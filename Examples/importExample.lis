@@ -1,0 +1,10 @@
+impt std.io;
+impt std.math as math;
+
+struct Point2D
+{
+    // private in default
+
+    pub mut x: &i32,
+    pub mut y: i32,
+}

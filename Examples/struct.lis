@@ -1,0 +1,53 @@
+impt std.io;
+impt std.math as math;
+
+struct Point2D
+{
+    // private in default
+
+    pub mut x: i32,
+    pub mut y: i32,
+}
+
+impl Point2D
+{
+    fn new(self, _x: i32 = 0, _y: i32 = 0)
+    {
+        ret Point2D {
+            x: _x,
+            y: _y
+        };
+    }
+
+    fn distance(self: &mut Point2D, other: &mut Point2D) -> f64
+    {
+        ret math.sqrt(math.pow( /* must be explicit type transformation */ f64(self.x - other.x), 2), math.pow(f64(self.y - other.y), 2));
+    }
+
+    fn distance_to_origin(self: &mut Point2D) -> f64
+    {
+        ret self.distance(Point2D::new(0, 0));
+    }
+}
+
+// This variable will be created when the program start
+// and be destroyed when the program exit
+let origin: Point2D = Point2D::new();
+
+// This variable will NOT be created when the program start
+// it will be create when it be used
+// and when the user finished using (the user statement had been executed)
+// it will be destroyed
+let move origin: Point2D = Point2D::new();
+
+fn main()
+{
+    let point: Point2D = Point2D::new(0, 0);
+
+    // point = Point2D::new(0, 1); // error: point is unmutable variable
+
+    std.io.println("${0} ${1}", point.x, point.y); // 0 0
+    std.io.println("${0}", point.distance_to_origin()) // 0
+
+    // ret 0;
+}

@@ -1,0 +1,25 @@
+.VSCodeCounter
+.vscode
+*.code-workspace
+
+# Local History for Visual Studio Code
+.history/
+*.app
+.snapshots/*
+
+*.o
+*.exe
+*.dll
+
+__pycache__
+*.pyc
+
+Test/**
+
+compile_commands.json
+output_zbuffer.png
+output.png
+
+Genericed.hpp
+
+.cache

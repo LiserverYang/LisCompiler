@@ -1,0 +1,16 @@
+fn fib(n: i32) -> i32
+{
+    if (n == 0 || n == 1)
+    {
+        ret 1;
+    }
+
+    ret fib(n - 2) + fib(n - 1);
+}
+
+fn main()
+{
+    let x: i32 = fib(4);
+
+    ret 0;
+}
