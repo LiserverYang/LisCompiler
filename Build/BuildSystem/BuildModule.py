@@ -9,7 +9,10 @@ from .BinaryTypeEnum import BinaryTypeEnum
 from .Functions import GetCurrentSystem
 from .SystemEnum import SystemEnum
 from .TestModule import TestModule
+from .FormatCheck import CheckFormat
+
 from typing import List
+
 import os
 import sys
 
@@ -70,7 +73,7 @@ def BuildModule(ModuleName: str):
         BuildContext.ModulePath[ModuleID]) + "/Private/"))
 
     # If this file has been compiled, skip
-    if not "--do-not-use-o-files" in sys.argv:
+    if not BuildContext.Arguments.donot_use_o_files:
         for File in WaitCompileCFilesList + WaitCompileCppFilesList:
             FileFileIO: FileIO = FileIO(File)
             MidFileFileIO: FileIO = FileIO(
@@ -110,6 +113,11 @@ def BuildModule(ModuleName: str):
         BuildContext.BuildedModule[ModuleID] = True
         BuildContext.SkipedModule[ModuleID] = True
         return
+    
+    if BuildContext.ModuleConfiguration[ModuleID].EnableFormatCheck and BuildContext.Arguments.enable_format_check:
+        for file in WaitCompileCppFilesList:
+            if CheckFormat(file) != 0:
+                Logger.Log(LogLevelEnum.Error, f"Format check faild in file {file}, see log for detailed informations", True, 1)
 
     # Start to compile files
     CStanderd: str = BuildContext.ModuleConfiguration[ModuleID].CStanderd
@@ -155,7 +163,7 @@ def BuildModule(ModuleName: str):
         BuildCommand: str = f"gcc {CFile} -o {TargetFileName} -std={CStanderd} {ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -c"
         BuildContext.CompileCommands.append(
             TransformCommand(BuildCommand, CFile))
-        if not "--donot-build-files" in sys.argv:
+        if not BuildContext.Arguments.donot_build_files:
             os.system(BuildCommand)
 
     for CppFile in WaitCompileCppFilesList:
@@ -164,10 +172,10 @@ def BuildModule(ModuleName: str):
         BuildCommand: str = f"g++ {CppFile} -o {TargetFileName} -std={CxxStanderd} {ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -c"
         BuildContext.CompileCommands.append(
             TransformCommand(BuildCommand, CppFile))
-        if not "--donot-build-files" in sys.argv:
+        if not BuildContext.Arguments.donot_build_files:
             os.system(BuildCommand)
 
-    if  "--donot-build-files" in sys.argv:
+    if  BuildContext.Arguments.donot_build_files:
         BuildContext.BuildedModule[ModuleID] = True
         return
 
@@ -194,5 +202,5 @@ def BuildModule(ModuleName: str):
                    f"There's something error when build module '{ModuleName}' in target '{BuildContext.TargetName}', and the compiler return value '{BuildResult}' not 0.", True, -1)
 
         # Run test
-    if "--enable-tests" in sys.argv and BuildContext.ModuleConfiguration[ModuleID].EnableTests:
+    if BuildContext.Arguments.enable_tests and BuildContext.ModuleConfiguration[ModuleID].EnableTests:
         TestModule(ModuleName, os.path.dirname(BuildContext.ModulePath[ModuleID]), CxxOFilesList, f"{ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -L ./Build/Binaries/ {LinkDependsStr} -l{LibPrefix}{ModuleName}")

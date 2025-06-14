@@ -27,6 +27,7 @@ class ModuleBase:
     EnableReflectionGeneric = False
     EnableBinaryLibPrefix = True
     EnableTests = False
+    EnableFormatCheck = True
 
     def Configuration(self) -> None:
         """

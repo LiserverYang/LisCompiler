@@ -5,8 +5,8 @@
 
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <map>
+#include <sstream>
 
 #include "Core/CompilePipeline.hpp"
 #include "Parser/ASTPrinter.hpp"
@@ -35,14 +35,14 @@ llvm::IRBuilder<> g_ir_builder(g_llvm_context);
 // 用于管理函数和全局变量，可以粗浅地理解为类c++的编译单元(单个cpp文件)
 llvm::Module g_module("my cool jit", g_llvm_context);
 // 用于记录函数的变量参数
-std::map<std::string, llvm::Value*> g_named_values;
+std::map<std::string, llvm::Value *> g_named_values;
 
 int main(int argc, const char **argv)
 {
     std::shared_ptr<Context> context = std::make_shared<Context>();
     context->filePath = argv[1];
 
-    CompilePipeline compilePipeline {context};
+    CompilePipeline compilePipeline{context};
     compilePipeline.run();
 
     printAST(context->program);
