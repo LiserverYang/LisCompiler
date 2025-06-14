@@ -6,6 +6,7 @@ from .BuildTypeEnum import BuildTypeEnum
 from .SystemEnum import SystemEnum
 
 from typing import Tuple
+from argparse import Namespace
 
 class TBuildContext:
     """
@@ -31,5 +32,7 @@ class TBuildContext:
     GccVersionStr: str = "0.0.1"
     GxxVersion: Tuple[int, int, int] = [0, 0, 1]
     GxxVersionStr: str = "0.0.1"
+
+    Arguments: Namespace
 
 BuildContext: TBuildContext = TBuildContext()

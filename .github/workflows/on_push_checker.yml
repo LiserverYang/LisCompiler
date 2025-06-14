@@ -1,0 +1,14 @@
+name: OnPushChecker
+
+on:
+  push:
+    master:
+
+jobs:
+  check_format:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+      - name: Run format checker
+        run: python3 ./build.py --donot-build-files --enable-format-check

@@ -55,7 +55,7 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
     match(TokenCode::STRUCT);
 
     auto structDef = std::make_unique<StructDef>();
-    
+
     createSnapshot();
     structDef->name = consume(TokenCode::IDENTIFIER, "expect an identifier as the struct name").value;
 
@@ -98,7 +98,7 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
     }
 
     consume(TokenCode::RBRACE, "expect a '}'");
-    
+
     return impl;
 }
 
