@@ -2,7 +2,7 @@ name: OnPushChecker
 
 on:
   push:
-    master:
+    branches: [ master ]
 
 jobs:
   check_format:
