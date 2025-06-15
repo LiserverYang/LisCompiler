@@ -15,7 +15,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt)
     std::stringstream ss;
     ss << f.rdbuf();
     context->fileValue = ss.str();
-    
+
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
 }
