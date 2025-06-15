@@ -26,6 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install llvm
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1.0"
+          directory: ./llvm
+
       - name: Install python3
         uses: actions/setup-python@v5
         with:
