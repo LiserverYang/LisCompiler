@@ -17,4 +17,3 @@ class GtestModule(BuildSystem.ModuleBase):
         self.EnableBinaryLibPrefix = False
         self.ModulesDependOn = []
         self.ArgumentsAdded = ["-I./Source/Gtest/Private"]
-        self.AutoSkiped = True
