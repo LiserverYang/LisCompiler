@@ -22,4 +22,4 @@ jobs:
       - name: Install python modules
         run: python3 -m pip install -r requirements.txt
       - name: Run format checker
-        run: python3 build.py --build-type Debug --enable-format-check --donot-build-files --llvm-postion ./llvm/bin/
+        run: python3 build.py --build-type Debug --enable-format-check --donot-build-files --llvm-position ./llvm/bin/
