@@ -2,7 +2,7 @@
 
 from Build import BuildSystem
 
-class CompilerTarget(BuildSystem.TargetBase):
+class liscTarget(BuildSystem.TargetBase):
     """
     The target of compiler.
     """

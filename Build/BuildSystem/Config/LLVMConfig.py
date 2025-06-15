@@ -2,8 +2,8 @@
 
 import subprocess
 
-LLVMLibs: str
-LLVMCommand: str
+LLVMLibs: str = ""
+LLVMCommand: str = ""
 
 def InitLLVMConfig(LLVMPosition: str) -> None:
     global LLVMLibs, LLVMCommand

@@ -10,7 +10,7 @@ class CompilerModule(BuildSystem.ModuleBase):
         """
         """
 
-        self.BinaryType = BuildSystem.BinaryTypeEnum.DynamicLib
+        self.BinaryType = BuildSystem.BinaryTypeEnum.StaticLib
         self.ModulesDependOn = ["Gtest"]
         self.EnableBinaryLibPrefix = False
         self.EnableTests = True

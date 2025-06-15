@@ -8,6 +8,7 @@
 .snapshots/*
 
 *.o
+*.a
 *.exe
 *.dll
 

@@ -98,4 +98,5 @@ def GetInformations():
     SplitedGxxVersion = BuildContext.GxxVersionStr.split(".")
     BuildContext.GxxVersion = [SplitedGxxVersion[0], SplitedGxxVersion[1], SplitedGxxVersion[2]]
 
-    LLVMConfig.InitLLVMConfig(BuildContext.Arguments.llvm_position)
+    if not BuildContext.Arguments.donot_build_files:
+        LLVMConfig.InitLLVMConfig(BuildContext.Arguments.llvm_position)
