@@ -14,6 +14,7 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "20.1.0"
+          directory: ./llvm
       - name: Install python3
         uses: actions/setup-python@v5
         with:
@@ -21,4 +22,4 @@ jobs:
       - name: Install python modules
         run: python3 -m pip install -r requirements.txt
       - name: Run format checker
-        run: python3 build.py --build-type Debug --enable-format-check --donot-build-files
+        run: python3 build.py --build-type Debug --enable-format-check --donot-build-files --llvm-postion ./llvm/bin/
