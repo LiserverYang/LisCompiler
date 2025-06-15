@@ -10,5 +10,13 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
+      - name: Install llvm
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1.0"
+      - name: Install python3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13' 
       - name: Run format checker
-        run: python3 ./build.py --donot-build-files --enable-format-check
+        run: python3 build.py --build-type Debug --enable-format-check --donot-build-files

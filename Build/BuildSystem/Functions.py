@@ -4,6 +4,7 @@ from .FilePermissionsEnum import FilePermissionsEnum
 from .SystemEnum import SystemEnum
 from .FileSystem import FileIO
 from .BuildContext import BuildContext
+from .Config import LLVMConfig
 
 import importlib
 import importlib.util
@@ -96,3 +97,5 @@ def GetInformations():
     BuildContext.GxxVersionStr = subprocess.check_output(["g++", "--version"]).decode("utf-8").split("\n")[0].split(" ")[-1]
     SplitedGxxVersion = BuildContext.GxxVersionStr.split(".")
     BuildContext.GxxVersion = [SplitedGxxVersion[0], SplitedGxxVersion[1], SplitedGxxVersion[2]]
+
+    LLVMConfig.InitLLVMConfig(BuildContext.Arguments.llvm_position)

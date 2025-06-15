@@ -36,6 +36,7 @@ def BuildEngine(SourceFolder: FileIO, TargetList: List[str]) -> None:
     parser.add_argument('--donot-use-o-files', help='If enabled, the build system will not use cache (.o files) to build module', action="store_true")
     parser.add_argument('--enable-tests', help='If enabled, the build system will execute the unit test with google test (all test file should be at ModuolePath/Test/**)', action="store_true")
     parser.add_argument('--enable-format-check', help='If enabled, the build system will check the code format with clang-format', action="store_true")
+    parser.add_argument('--llvm-position', help='If enabled, the build system set the llvm position', default="")
     BuildContext.Arguments = parser.parse_args()
 
     # Get Build type
