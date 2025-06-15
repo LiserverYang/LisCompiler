@@ -5,7 +5,7 @@ on:
     branches: [ master ]
 
 jobs:
-  check_format:
+  on_windows:
     runs-on: windows-latest
     steps:
       - name: Check out repo
@@ -25,3 +25,5 @@ jobs:
         run: python3 -m pip install -r requirements.txt
       - name: Run format checker
         run: python3 build.py --build-type Debug --enable-format-check --donot-build-files --llvm-position ./llvm/bin/
+      - name: Run unit tests
+        run: python3 build.py --build-type Debug --enable-tests --llvm-position ./llvm/bin/
