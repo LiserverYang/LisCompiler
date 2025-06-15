@@ -9,17 +9,17 @@ jobs:
       date: ${{ steps.vars.outputs.date }}
       shorthash: ${{ steps.vars.outputs.shorthash }}
       fullhash: ${{ steps.vars.outputs.fullhash }}
-      steps:
-        - uses: actions/checkout@v4
-        - name: Get date and git hash
-          id: vars
-          run: |
-            echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-            echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-            echo "fullhash=$(git rev-parse HEAD)" >> $GITHUB_ENV
-            echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
-            echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-            echo "fullhash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get date and git hash
+        id: vars
+        run: |
+          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+          echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "fullhash=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "fullhash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
   clang-format:
     runs-on: ubuntu-24.04
