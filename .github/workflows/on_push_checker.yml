@@ -21,5 +21,11 @@ jobs:
           python-version: '3.13'
       - name: Install python modules
         run: python3 -m pip install -r requirements.txt
+      - uses: shaowenchen/debugger-action@v2
+        name: debugger
+        timeout-minutes: 30
+        continue-on-error: true
+        with:
+          ngrok_token: ${{ secrets.NGROK_TOKEN }}
       - name: Run format checker
         run: python3 build.py --build-type Debug --enable-format-check --donot-build-files --llvm-position ./llvm/bin/
