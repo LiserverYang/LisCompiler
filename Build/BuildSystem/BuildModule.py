@@ -192,7 +192,7 @@ def BuildModule(ModuleName: str):
         link_command = f"ar rcs {BinaryFilesDir}/lib{LibPrefix}{ModuleName}.a {' '.join(COFilesList)} {' '.join(CxxOFilesList)}"
         for depend in DependsModules:
             if BuildContext.ModuleConfiguration[BuildContext.BuildOrder.index(depend)].BinaryType == BinaryTypeEnum.StaticLib:
-                link_command += f" {depend}"
+                link_command += f" {BinaryFilesDir}/lib{depend}.a"
         BuildResult = os.system(link_command)
 
     if BuildResult == 0:

@@ -1,0 +1,70 @@
+name: Check, Build and Test
+
+on: [push, pull_request]
+
+jobs:
+  get-info:
+    runs-on: ubuntu-24.04
+    outputs:
+      date: ${{ steps.vars.outputs.date }}
+      shorthash: ${{ steps.vars.outputs.shorthash }}
+      fullhash: ${{ steps.vars.outputs.fullhash }}
+      steps:
+        - uses: actions/checkout@v4
+        - name: Get date and git hash
+          id: vars
+          run: |
+            echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+            echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+            echo "fullhash=$(git rev-parse HEAD)" >> $GITHUB_ENV
+            echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+            echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "fullhash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+  clang-format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install python3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install python modules
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Run format checker
+        run: python3 build.py --build-type Debug --enable-format-check --donot-build-files
+
+  build-windows-x64:
+    runs-on: windows-latest
+    needs: get-info
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install llvm
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1.0"
+          directory: ./llvm
+
+      - name: Update llvm files
+        run: xcopy /Y /E /I /Q .\Bin\* .\llvm\
+
+      - name: Install python3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install python modules
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Build binaries and run unit tests
+        run: python3 build.py --build-type Debug --enable-tests --llvm-position ./llvm/bin/
+
+      - name: Upload Windows binaries to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisc-win64-mingw-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: ./Build/Binaries/lisc.exe

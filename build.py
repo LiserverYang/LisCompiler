@@ -16,4 +16,4 @@ if BuildSystem.GetCurrentSystem() == BuildSystem.SystemEnum.Other:
 BuildSystem.sys.dont_write_bytecode = True
 
 # Just build
-BuildSystem.BuildEngine(BuildSystem.FileIO("./Source"), ["./Source/Compiler.target.py"])
+BuildSystem.BuildEngine(BuildSystem.FileIO("./Source"), ["./Source/lisc.target.py"])
