@@ -24,8 +24,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         {
             // This pass is to read file values
             ctx->filePath = ctx->args->getArg("filePath");
-            ctx->fileValue = (std::stringstream{} << std::ifstream{ctx->filePath, std::ios::binary}.rdbuf()).str();
-        }));
+            ctx->fileValue = (std::stringstream{} << std::ifstream{ctx->filePath, std::ios::binary}.rdbuf()).str(); }));
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
 }
