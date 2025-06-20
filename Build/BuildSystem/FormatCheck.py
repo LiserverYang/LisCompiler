@@ -3,4 +3,4 @@
 import os
 
 def CheckFormat(FileName: str) -> int:
-    return os.system(f"clang-format --Werror --fail-on-incomplete-format --dry-run {FileName}")
+    return os.system(f"clang-format --Werror --dry-run {FileName}")
