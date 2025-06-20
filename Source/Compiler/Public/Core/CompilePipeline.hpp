@@ -14,6 +14,6 @@
 class CompilePipeline : public Pipeline
 {
 public:
-    CompilePipeline(std::shared_ptr<Context> cnt);
+    CompilePipeline(std::shared_ptr<Context> cnt, int argc, const char **argv);
     virtual ~CompilePipeline() = default;
 };

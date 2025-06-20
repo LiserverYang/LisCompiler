@@ -40,9 +40,8 @@ std::map<std::string, llvm::Value *> g_named_values;
 int main(int argc, const char **argv)
 {
     std::shared_ptr<Context> context = std::make_shared<Context>();
-    context->filePath = argv[1];
 
-    CompilePipeline compilePipeline{context};
+    CompilePipeline compilePipeline{context, argc, argv};
     compilePipeline.run();
 
     printAST(context->program);
