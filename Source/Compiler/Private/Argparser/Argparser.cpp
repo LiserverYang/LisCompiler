@@ -53,7 +53,7 @@ void Argparser::run()
                         found = true;
 
                         pos += rule.behavior(this, normalizeKey(rule.name[0]));
-                        
+
                         break;
                     }
                 }
