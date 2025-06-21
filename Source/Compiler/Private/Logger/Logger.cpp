@@ -4,8 +4,8 @@
 #include <iostream>
 
 /**
- * This function is to help the logger log the code where have errors with loginfo and the color 
- * 
+ * This function is to help the logger log the code where have errors with loginfo and the color
+ *
  * @param info the info of log stored the file value, the error position and the length
  * @param color the color of error
  */
@@ -96,7 +96,7 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
     {
         LogCode(info, color);
     }
-    
+
     if (level == LogLevel::ERROR)
     {
 #ifdef __DEBUG__

@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * The entrypoint of 
+ * The entrypoint of compiler
  */
 
 #include <fstream>

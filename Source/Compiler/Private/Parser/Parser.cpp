@@ -137,7 +137,6 @@ std::unique_ptr<GlobalVarDef> Parser::parseGlobalVariableDefinition()
     return var;
 }
 
-
 std::unique_ptr<MemberVarDef> Parser::parseMemberVariableDefinition()
 {
     auto member = std::make_unique<MemberVarDef>();
