@@ -1,6 +1,5 @@
 #include "Lexer/Lexer.hpp"
 #include "Logger/Logger.hpp"
-
 #include <iostream>
 
 void Lexer::run()
@@ -8,133 +7,144 @@ void Lexer::run()
     TokenStream &tokens = context->tokenStream;
     std::string &source = context->fileValue;
 
+    // process each character in source code sequentially
     while (index < source.size())
     {
         char current = source[index];
 
-        // 跳过空白字符
+        // skip whitespace characters (space, tab, newline, etc.)
         if (std::isspace(current))
         {
             skipWhitespace();
             continue;
         }
 
-        // 处理注释
+        // handle comments (both line and block comments)
         if (current == '/' && index + 1 < source.size())
         {
             char next = source[index + 1];
-            if (next == '/')
+            if (next == '/') // line comment
             {
                 skipLineComment();
                 continue;
             }
-            if (next == '*')
+            if (next == '*') // block comment
             {
                 skipBlockComment();
                 continue;
             }
         }
 
-        // 处理字面量
+        // handle string literals (double-quoted)
         if (current == '"')
         {
             tokens.push_back(lexStringLiteral());
             continue;
         }
+        // handle character literals (single-quoted)
         if (current == '\'')
         {
             tokens.push_back(lexCharLiteral());
             continue;
         }
+        // handle numeric literals (integers/floats)
         if (std::isdigit(current))
         {
             tokens.push_back(lexNumber());
             continue;
         }
 
-        // 处理标识符和关键字
+        // handle identifiers and keywords (start with letter or underscore)
         if (std::isalpha(current) || current == '_')
         {
             tokens.push_back(lexIdentifier());
             continue;
         }
 
-        // 处理运算符和分隔符
+        // handle operators and delimiters as fallthrough
         tokens.push_back(lexOperatorOrDelimiter());
     }
 }
 
+// skips whitespace characters while tracking line/column position
 void Lexer::skipWhitespace()
 {
     std::string &source = context->fileValue;
 
     while (index < source.size() && std::isspace(source[index]))
     {
+        // handle newline: increment line counter and reset column
         if (source[index] == '\n')
         {
             line++;
-            lineStart = index + 1;
-            column = 1;
+            lineStart = index + 1; // track start of next line
+            column = 1;            // reset column counter
         }
         else
         {
-            column++;
+            column++; // increment column for non-newline whitespace
         }
-        index++;
+        index++; // move to next character
     }
 }
 
+// skips single-line comments (// ...)
 void Lexer::skipLineComment()
 {
     std::string &source = context->fileValue;
 
-    // 跳过 '//'
+    // skip the initial '//' characters
     index += 2;
     column += 2;
 
-    // 跳过直到行尾
+    // advance until end of line or file
     while (index < source.size() && source[index] != '\n')
     {
         index++;
         column++;
     }
 
+    // prepare for next line (if any)
     lineStart = index;
 }
 
+// skips block comments (/* ... */)
 void Lexer::skipBlockComment()
 {
     std::string &source = context->fileValue;
 
-    // 跳过 '/*'
+    // skip initial '/*'
     index += 2;
     column += 2;
 
     while (index < source.size())
     {
+        // check for comment end marker '*/'
         if (source[index] == '*' && index + 1 < source.size() && source[index + 1] == '/')
         {
-            // 找到结束标记 '*/'
-            index += 2;
+            index += 2; // skip '*/'
             column += 2;
-            return;
+            return; // exit after closing comment
         }
 
+        // handle newlines within comment
         if (source[index] == '\n')
         {
-            line++;
+            line++; // increment line counter
             lineStart = index + 1;
-            column = 1;
+            column = 1; // reset column counter
         }
         else
         {
-            column++;
+            column++; // track column position
         }
 
-        index++;
+        index++; // move to next character
     }
+    // note: Unclosed block comments handled by reaching EOF
 }
 
+// tokenizes string literals ("...")
 Token Lexer::lexStringLiteral()
 {
     std::string &source = context->fileValue;
@@ -147,17 +157,18 @@ Token Lexer::lexStringLiteral()
     token.pos = index;
     token.lineStart = lineStart;
 
-    // 跳过开头的双引号
+    // skip opening quote
     index++;
     column++;
 
     std::string value;
-    bool escape = false;
+    bool escape = false; // track escape sequences
 
     while (index < source.size())
     {
         char c = source[index];
 
+        // handle newlines in string (update position tracking)
         if (c == '\n')
         {
             line++;
@@ -169,48 +180,48 @@ Token Lexer::lexStringLiteral()
             column++;
         }
 
+        // process escape sequences
         if (escape)
         {
-            // 处理转义字符
             switch (c)
             {
-            case 'n': value += '\n'; break;
-            case 't': value += '\t'; break;
-            case 'r': value += '\r'; break;
-            case '"': value += '"'; break;
-            case '\\': value += '\\'; break;
-            default:
+            case 'n': value += '\n'; break;  // newline
+            case 't': value += '\t'; break;  // tab
+            case 'r': value += '\r'; break;  // carriage return
+            case '"': value += '"'; break;   // literal quote
+            case '\\': value += '\\'; break; // literal backslash
+            default:                         // invalid escape
                 value += '\\';
                 value += c;
                 break;
             }
             escape = false;
         }
-        else if (c == '\\')
+        else if (c == '\\') // start escape sequence
         {
             escape = true;
         }
-        else if (c == '"')
+        else if (c == '"') // closing quote
         {
-            // 结束字符串
-            index++;
+            index++; // skip closing quote
             token.value = value;
             return token;
         }
         else
         {
-            value += c;
+            value += c; // normal character
         }
 
         index++;
     }
 
-    // 如果到达这里，说明字符串未闭合
+    // handle unclosed string error
     Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed string literal", line, column - 1, 1, lineStart});
 
-    return token;
+    return token; // return partial token on error
 }
 
+// tokenizes character literals ('a', '\n', etc.)
 Token Lexer::lexCharLiteral()
 {
     std::string &source = context->fileValue;
@@ -223,21 +234,22 @@ Token Lexer::lexCharLiteral()
     token.pos = index;
     token.lineStart = lineStart;
 
-    // 跳过开头的单引号
+    // skip opening quote
     index++;
     column++;
 
+    // check for immediate EOF
     if (index >= source.size())
     {
         Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart});
     }
 
     char c = source[index];
-    if (c == '\\')
+    if (c == '\\') // escape sequence
     {
-        // 处理转义字符
         index++;
         column++;
+        // validate escape sequence length
         if (index >= source.size())
         {
             Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart});
@@ -251,10 +263,10 @@ Token Lexer::lexCharLiteral()
         case 'r': token.value = "\r"; break;
         case '\'': token.value = "'"; break;
         case '\\': token.value = "\\"; break;
-        default: token.value = std::string("\\") + escape; break;
+        default: token.value = std::string("\\") + escape; // invalid escape
         }
     }
-    else
+    else // normal character
     {
         token.value = std::string(1, c);
     }
@@ -262,17 +274,19 @@ Token Lexer::lexCharLiteral()
     index++;
     column++;
 
-    // 检查结束单引号
+    // verify closing quote exists
     if (index >= source.size() || source[index] != '\'')
     {
         Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart});
     }
 
+    // skip closing quote
     index++;
     column++;
     return token;
 }
 
+// tokenizes numeric literals (integers and floats)
 Token Lexer::lexNumber()
 {
     std::string &source = context->fileValue;
@@ -285,22 +299,23 @@ Token Lexer::lexNumber()
     token.lineStart = lineStart;
 
     std::string value;
-    bool isFloat = false;
-    bool hasExponent = false;
+    bool isFloat = false;     // flag for decimal points
+    bool hasExponent = false; // flag for scientific notation
 
     while (index < source.size())
     {
         char c = source[index];
 
+        // accumulate digits
         if (std::isdigit(c))
         {
             value += c;
             index++;
             column++;
         }
+        // decimal point handling (must be followed by digit)
         else if (c == '.' && !isFloat && !hasExponent)
         {
-            // 处理浮点数的小数点
             if (index + 1 < source.size() && std::isdigit(source[index + 1]))
             {
                 isFloat = true;
@@ -310,19 +325,18 @@ Token Lexer::lexNumber()
             }
             else
             {
-                // 不是浮点数，可能是成员访问
-                break;
+                break; // not a float (e.g., member access)
             }
         }
+        // exponent handling (e/E followed by optional sign)
         else if ((c == 'e' || c == 'E') && !hasExponent)
         {
-            // 处理指数部分
             hasExponent = true;
             value += c;
             index++;
             column++;
 
-            // 检查指数符号
+            // capture exponent sign
             if (index < source.size() && (source[index] == '+' || source[index] == '-'))
             {
                 value += source[index];
@@ -332,15 +346,19 @@ Token Lexer::lexNumber()
         }
         else
         {
-            break;
+            break; // end of numeric literal
         }
     }
 
-    token.code = isFloat || hasExponent ? TokenCode::FLOAT_LITERAL : TokenCode::INT_LITERAL;
+    // determine token type based on flags
+    token.code = (isFloat || hasExponent)
+                     ? TokenCode::FLOAT_LITERAL
+                     : TokenCode::INT_LITERAL;
     token.value = value;
     return token;
 }
 
+// tokenizes identifiers and keywords
 Token Lexer::lexIdentifier()
 {
     std::string &source = context->fileValue;
@@ -353,6 +371,7 @@ Token Lexer::lexIdentifier()
     token.lineStart = lineStart;
 
     std::string value;
+    // accumulate alphanumeric + underscore characters
     while (index < source.size())
     {
         char c = source[index];
@@ -368,11 +387,13 @@ Token Lexer::lexIdentifier()
         }
     }
 
-    // 检查是否是关键字
+    // check if identifier is a reserved keyword
     if (auto pos = getKeywordPoistion(value); pos)
     {
-        // 将索引转换为TokenCode
-        token.code = static_cast<TokenCode>(*pos + static_cast<size_t>(TokenCode::IMPT));
+        // convert keyword index to TokenCode
+        // (offset by IMPT enum value)
+        token.code = static_cast<TokenCode>(
+            *pos + static_cast<size_t>(TokenCode::IMPT));
     }
     else
     {
@@ -383,6 +404,7 @@ Token Lexer::lexIdentifier()
     return token;
 }
 
+// tokenizes operators and delimiters
 Token Lexer::lexOperatorOrDelimiter()
 {
     std::string &source = context->fileValue;
@@ -396,87 +418,61 @@ Token Lexer::lexOperatorOrDelimiter()
 
     char current = source[index];
 
-    // 处理双字符运算符
+    // handle multi-character operators first
     if (index + 1 < source.size())
     {
         char next = source[index + 1];
         std::string twoChars = std::string(1, current) + next;
 
+        // check for known two-character operators
         if (twoChars == "::")
         {
             token.code = TokenCode::DOUBLE_COLON;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "==")
+        else if (twoChars == "==")
         {
             token.code = TokenCode::EQ_EQ;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "!=")
+        else if (twoChars == "!=")
         {
             token.code = TokenCode::NOT_EQ;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "<=")
+        else if (twoChars == "<=")
         {
             token.code = TokenCode::LT_EQ;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == ">=")
+        else if (twoChars == ">=")
         {
             token.code = TokenCode::GT_EQ;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "->")
+        else if (twoChars == "->")
         {
             token.code = TokenCode::ARROW;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "=>")
+        else if (twoChars == "=>")
         {
             token.code = TokenCode::DOUBLE_ARROW;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "||")
+        else if (twoChars == "||")
         {
             token.code = TokenCode::OR;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
-        if (twoChars == "&&")
+        else if (twoChars == "&&")
         {
             token.code = TokenCode::AND;
-            token.value = twoChars;
-            index += 2;
-            column += 2;
-            return token;
         }
+        else
+            goto single_char; // not multi-character operator
+
+        // handle matched two-character operator
+        token.value = twoChars;
+        index += 2;
+        column += 2;
+        return token;
     }
 
-    // 处理单字符运算符和分隔符
+single_char:
+    // handle single-character operators/delimiters
     switch (current)
     {
     case '+': token.code = TokenCode::PLUS; break;
@@ -497,7 +493,7 @@ Token Lexer::lexOperatorOrDelimiter()
     case '&': token.code = TokenCode::REFERENCE; break;
     case '!': token.code = TokenCode::NOT; break;
     case '|': token.code = TokenCode::BOR; break;
-    default:
+    default: // unknown character
         Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unknown character '" + std::string(1, current) + "'", line, column, 1, lineStart});
     }
 

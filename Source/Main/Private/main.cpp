@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 程序的入口文件
+ * The entrypoint of 
  */
 
 #include <fstream>
@@ -28,13 +28,10 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 
-// 记录了LLVM的核心数据结构，比如类型和常量表，不过我们不太需要关心它的内部
+// LLVM global varialbes
 llvm::LLVMContext g_llvm_context;
-// 用于创建LLVM指令
 llvm::IRBuilder<> g_ir_builder(g_llvm_context);
-// 用于管理函数和全局变量，可以粗浅地理解为类c++的编译单元(单个cpp文件)
 llvm::Module g_module("my cool jit", g_llvm_context);
-// 用于记录函数的变量参数
 std::map<std::string, llvm::Value *> g_named_values;
 
 int main(int argc, const char **argv)

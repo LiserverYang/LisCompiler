@@ -9,7 +9,7 @@
 #include "Argparser/Args.hpp"
 
 /**
- * Context 存储了所有有关于编译的信息，这些信息在不同的 Pass 之间共享
+ * Context stored all informations of compiler, these will be shared in different passes
  */
 struct Context
 {
@@ -19,13 +19,13 @@ struct Context
     std::shared_ptr<Args> args = std::make_shared<Args>();
 
     /**
-     * 当源文件被 Lexer 解析后，就会得到 TokenStream
+     * When a source code be passed by Lexer，we will get TokenStream
      */
     TokenStream tokenStream;
 
     /**
-     * Parser 通过解析 TokenStream 得到抽象语法树（AST）
-     * Program 可以认为是 AST 的根节点
+     * Program is the root of AST
+     * It will be generate after Parser parsed the tokenStream
      */
     Program program;
 };

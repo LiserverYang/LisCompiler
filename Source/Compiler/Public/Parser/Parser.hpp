@@ -1,6 +1,6 @@
 /**
  * Copyrigt 2025, LiserverYang. All rights reserved.
- * 此文件定义了语法分析器的函数
+ * The definations of grammer parser
  */
 
 #pragma once
@@ -12,7 +12,7 @@
 #include <unordered_set>
 
 /**
- * Parser 是语法分析器，它会通过 TokenStream 生成 AST
+ * Parser is a grammer parser，it will generate AST from TokenStream
  */
 class Parser : public Pass
 {
@@ -34,7 +34,7 @@ private:
 
     std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char"};
 
-    /* 辅助函数 */
+    /* Helper functions */
 
     inline void advance()
     {
@@ -141,7 +141,7 @@ private:
     int getPrecedence(TokenCode type);
     void initLineInformation(std::unique_ptr<ASTNode> &node);
 
-    /* 解析函数 */
+    /* Parser functions */
     std::vector<std::unique_ptr<Param>> parseParameterList();
 
     std::unique_ptr<ASTNode> parseGlobalStatement();

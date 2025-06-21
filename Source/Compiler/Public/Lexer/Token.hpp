@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 此文件定义了 TokenCode 和 Token ，用于存储词法分析的结果
+ * This file defined TokenCode and Token
  */
 
 #pragma once
@@ -12,15 +12,15 @@
 #include <vector>
 
 /**
- * TokenCode 用来定义 Token 的类型
- * 对于不同类型的 Token ，我们可以定义不同的 TokenCode ，方便后续分析
+ * TokenCode is the type of Token
+ * For different tokens, we can define different TokenCode to make the following steps easier
  */
 enum class TokenCode
 {
-    /* 未定义 */
+    /* Undefined */
     UNDEFINED,
 
-    /* 关键字 */
+    /* Keywords */
     IMPT,   // "impt"
     STRUCT, // "struct"
     IMPL,   // "impl"
@@ -38,7 +38,7 @@ enum class TokenCode
     SELF,   // "self"
     MOVE,   // "move"
 
-    /* 类型关键字 */
+    /* Type keywords */
     I8,   // "i8"
     I16,  // "i16"
     I32,  // "i32"
@@ -48,7 +48,7 @@ enum class TokenCode
     BOOL, // "bool"
     CHAR, // "char"
 
-    /* 字面量 */
+    /* Literal */
     BOOLEAN_TRUE,   // "true"
     BOOLEAN_FALSE,  // "false"
     INT_LITERAL,    // [0-9]+
@@ -56,10 +56,10 @@ enum class TokenCode
     CHAR_LITERAL,   // '[^'\\]|\\[nrt'"\\]'
     STRING_LITERAL, // "[^"\\]*(\\.[^"\\]*)*"
 
-    /* 标识符 */
+    /* Idenfiter */
     IDENTIFIER, // [a-zA-Z_][a-zA-Z0-9_]*
 
-    /* 运算符 */
+    /* Operator */
     PLUS,   // "+"
     MINUS,  // "-"
     STAR,   // "*"
@@ -76,7 +76,7 @@ enum class TokenCode
     OR,     // ||
     AND,    // &&
 
-    /* 分隔符 */
+    /* Delimiter */
     LBRACE,       // "{"
     RBRACE,       // "}"
     LPAREN,       // "("
@@ -92,16 +92,14 @@ enum class TokenCode
 
 };
 
-// 为了存储关键字的一些信息方便分析，下面定义一个常量
-
-// 所有关键字的长度
+// The length of all keywords
 const size_t KEYWORDS_LENGTH = (size_t)TokenCode::BOOLEAN_FALSE - (size_t)TokenCode::IMPT + 1;
 
-// 所有类型关键字长度
+// The length of all type keywords
 const size_t TYPE_KEYWORD_BEGIN = (size_t)TokenCode::I8;
 const size_t TYPE_KEYWORD_END = (size_t)TokenCode::CHAR;
 
-// 所有关键字的对应字符串
+// The procedure keyword list
 const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "impt",
     "struct",
@@ -130,40 +128,36 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "true",
     "false"};
 
-// 初始化哈希表的函数
+// init the hash map
 std::unordered_map<std::string, size_t> buildKeywordIndexMap();
 
-// 生成一个哈希表优化查询时间复杂度
 static const std::unordered_map<std::string, size_t> keywordsMap = buildKeywordIndexMap();
 
 /*
- * Token 是在编译阶段的最小有意义的单元
- * 词法分析器 Lexer 将源代码转换为一个个的 Token
- * 单个 Token 每个字符都是不可分割的整体，强行分割会改变语义
- * 每个 Token 都有一个自己的类型，例如关键字、字面量等
- * 同类型的 Token 可以有不同的值，例如同样的数字字面量类型 Token 可以为 123 也可以是 456
- * 同时为了方便错误处理，还会保留这个 Token 的文件、行信息
+ * Token is the smallest meaningful unit in the compiler
+ * Lexer convet the source code to tokens
+ * Every tokens are unsplitable, split forcefully will change the semantics
+ * Each token has a own type, likes keyword, literal ans so on
+ * The tokens of the same type can have different values, such as the number literal token can be 123 or 456
+ * And for the error report, we will save informations about file, line and col
  */
 struct Token
 {
-    // 这个 Token 的类型
+    // The type of the token
     TokenCode code = TokenCode::UNDEFINED;
-    // Token 的值
+    // The value of this token
     std::string value = "";
-    // Token 的文件路径
+    // The file path of the token
     std::string filePath = "";
-    // Token 的起始下标
+    // The indexs of the token
     size_t col = 0, line = 0, pos = 0, lineStart = 0;
 };
 
-// TokenStream 存储了一个翻译单元的所有 Token
+// TokenStream stored all tokens in one translation unit
 using TokenStream = std::vector<Token>;
 
-// 下面定义所有关于 Token 的辅助函数
+// Here are some helper functions
 
-/**
- * 构建哈希表，用于以 O(1) 时间复杂度检查标识符是否是关键字
- */
 inline std::unordered_map<std::string, size_t> buildKeywordIndexMap()
 {
     std::unordered_map<std::string, size_t> map;
@@ -176,10 +170,6 @@ inline std::unordered_map<std::string, size_t> buildKeywordIndexMap()
     return map;
 }
 
-/**
- * 获取关键字的位置
- * 如果不存在，则返回值为 std::nullopt
- */
 inline std::optional<size_t> getKeywordPoistion(const std::string &tokenValue)
 {
     if (auto it = keywordsMap.find(tokenValue); it != keywordsMap.end())
@@ -189,17 +179,11 @@ inline std::optional<size_t> getKeywordPoistion(const std::string &tokenValue)
     return std::nullopt;
 }
 
-/**
- * 判断一个字符是否是字母
- */
 inline bool isLetter(char letter)
 {
     return (letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z');
 }
 
-/**
- * 判断一个字符是否是数字
- */
 inline bool isDigit(char digit)
 {
     return digit >= '0' && digit <= '9';

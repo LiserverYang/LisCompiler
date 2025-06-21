@@ -10,8 +10,8 @@
 #include <memory>
 
 /**
- * Pipeline 描述了不同 Pass 之间执行的先后关系，也就是整个流程
- * 常见的 Pipeline 有：CompilePipeline（完整的编译流程） ParseMoudulePipeline（解析模块流程）
+ * Pipeline is the order of passes, that is the whole compile process
+ * Common Pipeline: CompilePipeline and ParseMoudulePipeline
  */
 class Pipeline
 {

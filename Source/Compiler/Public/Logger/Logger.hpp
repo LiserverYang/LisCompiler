@@ -1,15 +1,15 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 定义输出系统
+ * The definations of looger system
  */
 
 #include <string>
 
 /*
- * Logger 定义了编译器的三种输出：
- *     1. 错误（error）
- *     2. 警告（warning）
- *     3. 信息 (info)
+ * Logger defined three log level:
+ *     1. error
+ *     2. warning
+ *     3. info
  */
 class Logger
 {
@@ -29,6 +29,7 @@ public:
         size_t line, col;
         size_t length;
         size_t beginPosition;
+        bool logCode = 1;
     };
 
 public:

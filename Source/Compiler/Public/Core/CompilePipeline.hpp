@@ -9,7 +9,7 @@
 #include <string>
 
 /**
- * CompilePipeline 是描述整个编译流程的 pipeline
+ * CompilePipeline is a pipline that describe the whole compile procedure
  */
 class CompilePipeline : public Pipeline
 {

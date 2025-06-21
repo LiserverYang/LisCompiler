@@ -9,8 +9,8 @@
 #include <memory>
 
 /**
- * Pass 代表了编译过程的一个步骤，通过 Pass 可以实现灵活的编译流程控制
- * 常见的 Pass： Lexer（词法分析器） Parser（语法分析器） Analyzer（语义分析器）
+ * Pass is a step of compile process, with the pass, we can control the whole compile process easily
+ * Common Pass： Lexer, Parser and Analyzer
  */
 class Pass
 {

@@ -3,8 +3,15 @@
 #include <cmath>
 #include <iostream>
 
+/**
+ * This function is to help the logger log the code where have errors with loginfo and the color 
+ * 
+ * @param info the info of log stored the file value, the error position and the length
+ * @param color the color of error
+ */
 void LogCode(Logger::LogInfo &info, std::string color)
 {
+    // first we stored the spaces of the line number
     const int lineLength = std::log10(info.line) + 1;
 
     std::string codeStr = "";
@@ -12,6 +19,7 @@ void LogCode(Logger::LogInfo &info, std::string color)
 
     for (int i = 0; i <= i + 15; i++)
     {
+        // to avoid outing of bounds
         if (info.beginPosition + i >= info.code->size())
         {
             break;
@@ -19,16 +27,19 @@ void LogCode(Logger::LogInfo &info, std::string color)
 
         char code = info.code->at(info.beginPosition + i);
 
-        if (code == '\t' || code == '\n')
+        // if the line end, break
+        if (code == '\r' || code == '\n')
         {
             break;
         }
 
+        // add the color ascii code
         if (i == info.col - 1)
         {
             codeStr.append(color);
         }
 
+        // end the color ascii code with "\033[0m" code
         if (i == info.col - 1 + info.length)
         {
             codeStr.append("\033[0m");
@@ -80,13 +91,19 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
 
     printf((info.msg + "\n").c_str());
 
-    LogCode(info, color);
-
+    // log the code
+    if (info.logCode)
+    {
+        LogCode(info, color);
+    }
+    
     if (level == LogLevel::ERROR)
     {
 #ifdef __DEBUG__
+        // if it is debug, we should throw error to let the developer debug the compiler and get the call stack
         throw std::runtime_error("Create debug point");
 #else
+        // if it is release, exit with error code 1
         exit(1);
 #endif
     }

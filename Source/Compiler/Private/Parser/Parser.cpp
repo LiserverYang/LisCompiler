@@ -21,7 +21,6 @@ void Parser::run()
 
 std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
 {
-    // 移除导入语句(IMPT)相关代码
     if (check(TokenCode::STRUCT))
     {
         return parseStructDefinition();
@@ -47,8 +46,6 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
 
     return nullptr;
 }
-
-// 移除 parseImptStatement() 函数
 
 std::unique_ptr<StructDef> Parser::parseStructDefinition()
 {
@@ -140,7 +137,6 @@ std::unique_ptr<GlobalVarDef> Parser::parseGlobalVariableDefinition()
     return var;
 }
 
-// 移除 parseModulePath() 函数
 
 std::unique_ptr<MemberVarDef> Parser::parseMemberVariableDefinition()
 {
@@ -150,7 +146,7 @@ std::unique_ptr<MemberVarDef> Parser::parseMemberVariableDefinition()
 
     consume(TokenCode::COLON, "expected ':' after member name");
     member->type = parseType();
-    match(TokenCode::COMMA); // 可选逗号
+    match(TokenCode::COMMA);
 
     return member;
 }
@@ -165,7 +161,6 @@ std::unique_ptr<Type> Parser::parseType()
         type->isMutReference = match(TokenCode::MUT);
     }
 
-    // 移除模块限定类型相关代码
     if ((size_t)currentToken().code >= TYPE_KEYWORD_BEGIN && (size_t)currentToken().code <= TYPE_KEYWORD_END)
     {
         type->kind = Type::TypeKind::Primitive;
@@ -203,7 +198,6 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
 
     consume(TokenCode::LPAREN, "expected '(' after function name");
 
-    // 修复：self参数是可选的
     if (match(TokenCode::SELF))
     {
         auto selfParam = std::make_unique<SelfParam>();
@@ -263,7 +257,6 @@ std::unique_ptr<Param> Parser::parseParameter()
     auto param = std::make_unique<Param>();
     param->name = consume(TokenCode::IDENTIFIER, "expected parameter name").value;
 
-    // 修复：移除错误的参数名覆盖
     consume(TokenCode::COLON, "expected ':'");
 
     param->type = parseType();
@@ -360,7 +353,6 @@ std::unique_ptr<ReturnStmt> Parser::parseReturnStmt()
     match(TokenCode::RET);
     auto returnStmt = std::make_unique<ReturnStmt>();
 
-    // 修复：正确处理无分号的返回语句
     if (!check(TokenCode::SEMI))
     {
         returnStmt->returnValue = parseExpression();

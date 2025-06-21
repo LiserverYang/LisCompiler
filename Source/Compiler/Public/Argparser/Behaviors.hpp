@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 定义了常见的参数行为
+ * The definations of common argument behaviors
  */
 
 #pragma once

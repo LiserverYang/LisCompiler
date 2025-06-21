@@ -8,7 +8,7 @@
 
 using namespace testing;
 
-// 测试夹具
+// The test class for argparser
 class ArgparserTest : public ::testing::Test
 {
 protected:
@@ -21,7 +21,7 @@ protected:
         args = std::make_shared<Args>();
     }
 
-    // 创建带参数的解析器
+    // create the parser with arguments
     std::unique_ptr<Argparser> createParser(
         std::vector<const char *> cmdArgs,
         bool enableHelp = true,
@@ -41,7 +41,7 @@ protected:
         return parser;
     }
 
-    // 常用规则定义
+    // common rules
     ArgParseRule createBoolRule(
         const std::string &name,
         ArgParseRule::ArgBehavior behavior,
@@ -78,7 +78,7 @@ protected:
     }
 };
 
-// 测试用例
+// Test case
 TEST_F(ArgparserTest, HandlesHelpOption)
 {
     const char *argv[] = {"app", "--help"};
@@ -136,7 +136,7 @@ TEST_F(ArgparserTest, NormalizesArgumentKeys)
     auto parser = createParser({argv, argv + 2}, true, {rule});
     parser->run();
 
-    // 应转换为 output_file
+    // should be converted to output_file
     EXPECT_EQ(args->getArg("output_file"), "true");
 }
 

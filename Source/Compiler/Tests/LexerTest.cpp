@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 
-// 词法分析器测试夹具
+// The test class for lexer
 class LexerTest : public ::testing::Test
 {
 protected:
@@ -43,7 +43,7 @@ protected:
     }
 };
 
-// 测试用例
+// Test samples
 TEST_F(LexerTest, HandlesEmptyInput)
 {
     runLexer("");

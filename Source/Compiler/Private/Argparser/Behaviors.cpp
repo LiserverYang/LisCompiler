@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 定义了常见的参数行为
+ * Implement the common argument behavior
  */
 
 #include "Argparser/Behaviors.hpp"
@@ -19,6 +19,7 @@ int setAsFalse(Argparser *parser, std::string argName)
 
 int setAsValue(Argparser *parser, std::string argName)
 {
+    // to avoid outing of bounds
     if (parser->pos >= parser->argc - 1)
     {
         throw std::runtime_error("Except a value for argument: " + argName);

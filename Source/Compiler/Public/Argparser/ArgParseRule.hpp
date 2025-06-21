@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 定义了参数解析规则
+ * Defination of ArgParseRule
  */
 
 #pragma once
@@ -16,64 +16,67 @@ struct ArgParseRule
     using ArgBehavior = std::function<int(Argparser*, std::string)>;
 
     /**
-     * 参数的名字
+     * Argument identifier
      *
-     * 例如
-     * name=fileName 时
-     * 程序参数 app.exe test
-     * 则可以在 Args.getArg("fileName") 获取到值 test
-     * 这种类型的参数称为位置参数
+     * Example:
+     * When name=fileName
+     * Command: app.exe test
+     * Value "test" can be retrieved via Args.getArg("fileName")
+     * This type is called a positional argument
      *
-     * 特别地，如果 name 是形如 --xxx 或 -xxx 的形式
-     * 则认为 name 是一个选项参数
+     * Special case: If name follows format --xxx or -xxx,
+     * it is recognized as an option argument
      *
-     * 例子：
-     * 当 name=--filename 时
-     * 程序参数 app.exe --filename test
-     * 则可以在 Args.getArg("filename") 获取到值 test
+     * Example:
+     * When name=--filename
+     * Command: app.exe --filename test
+     * Value "test" is retrievable via Args.getArg("filename")
      *
-     * 并且当程序参数为 app.exe test
-     * Args.getArg("filename") 获取不到 test 并且返回空，因为选项参数需要有 --xxx 作为标识
+     * However, for command: app.exe test
+     * Args.getArg("filename") returns empty, as option arguments require explicit identifiers
      *
-     * 另外，
-     * 如果 name 是 xxx-xxx 的形式
-     * 那么需要通过 Args.getArg("xxx_xxx") 的形式获取这个参数的值
+     * Note:
+     * For hyphenated names (xxx-xxx format),
+     * access via Args.getArg("xxx_xxx") (hyphens replaced by underscores)
      *
-     * 如果是一个选项参数时，可以有多个值
+     * Option arguments may accept multiple values
      */
     std::vector<std::string> name;
 
     /**
-     * 当参数是一个选项参数时
-     * 可以指定这个参数的行为，通常有 setAsTrue setAsFalse setAsValue 三个常用行为
+     * Behavior specification for option arguments
+     * Common behaviors: setAsTrue, setAsFalse, setAsValue
      *
-     * setAsTrue：
-     * 解析到这个参数，就会将这个参数对应的值设置为 "true" 注意类型是字符串！
+     * setAsTrue:
+     * Sets corresponding value to string "true" when parsed
      *
-     * setAsFalse：
-     * 解析到这个参数，就会将这个参数对应的值设置为 "false" 注意类型是字符串！
+     * setAsFalse:
+     * Sets corresponding value to string "false" when parsed
      *
-     * setAsValue：
-     * 解析到这个参数，就会将这个参数对应的值设置为下一个的值，并且下一个参数不能是选项参数
+     * setAsValue:
+     * Sets corresponding value to the subsequent argument,
+     * which must not be an option argument
      *
-     * 例子：
-     * 如果 name=filename behavior=setAsValue
-     * 当程序参数为 app.exe --filename xxx 时
-     * 就可以通过 Args.getArg("filename") 获取到值 "xxx"
+     * Example:
+     * name=filename, behavior=setAsValue
+     * Command: app.exe --filename xxx
+     * Args.getArg("filename") returns "xxx"
      *
-     * 并且，
-     * 如果程序参数为 app.exe --filename --xxx 时
-     * 解析器就会报错
+     * Important:
+     * Command: app.exe --filename --xxx
+     * will cause parser error (--xxx cannot follow setAsValue)
      */
     ArgBehavior behavior;
 
     /**
-     * 这个参数的默认值，在这个参数被注册时初始化
+     * Default argument value
+     * Initialized during argument registration
      */
     std::string defaultValue;
 
     /**
-     * 参数的描述信息，描述这个参数的行为和作用
+     * Argument description
+     * Documents argument behavior and purpose
      */
     std::string description;
 };

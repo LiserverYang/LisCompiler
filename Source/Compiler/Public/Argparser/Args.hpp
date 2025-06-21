@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 参数容器实现
+ * The implementation of Args
  */
 
 #pragma once
@@ -9,14 +9,18 @@
 #include <unordered_map>
 
 /**
- * Args 存储了所有参数的信息，以 键-值 的方式存储
+ * Args stored all values of arguments by the way of key-value.
+ * Use function `getArg` to get argument value
+ * Use function `setArg` to set argument value
  */
 class Args : public std::unordered_map<std::string, std::string>
 {
 public:
     /**
-     * 通过下标访问参数列表上的一个位置
-     * 如果下标不存在则返回为空字符串
+     * Visit a argument value by the argument name
+     * If it is undefined, return null string ("")
+     * 
+     * @param argName the argument name
      */
     std::string getArg(std::string argName)
     {
@@ -30,6 +34,12 @@ public:
         return "";
     }
 
+    /**
+     * Set the argument value by argument name
+     * 
+     * @param argName the argument name
+     * @param value the value to set
+     */
     void setArg(std::string argName, std::string value)
     {
         this->operator[](argName) = value;

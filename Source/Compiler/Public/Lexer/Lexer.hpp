@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 词法分析器实现
+ * The implementation of Lexer
  */
 
 #pragma once

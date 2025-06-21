@@ -1,6 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
- * 参数解析器实现
+ * The implementation of argparser
  */
 
 #pragma once
@@ -14,7 +14,7 @@
 #include <stdexcept>
 
 /**
- * 定义了所有创建 Argparser 用到的参数
+ * The create info of argparser
  */
 struct ArgparserCreateInfo
 {
@@ -27,8 +27,12 @@ struct ArgparserCreateInfo
 };
 
 /**
- * Argparse 通过 argc, argv 解析程序的参数
- * Pipeline 通过 createInfo 来创建 Argparser
+ * `Argparser` is the core of argparse module
+ * By given the `ArgParseRule`, the Argparser parse the arguments in argv with rules
+ * ArgParseRule defined when met a argument, how parser works
+ * The result will store in Args, a `std::unordered_map`
+ *
+ * The pipeline create Argparser by Context and CreateInfo
  */
 class Argparser : public Pass
 {
@@ -43,7 +47,7 @@ public:
     ~Argparser() {}
 
     /**
-     * 开始进行参数解析
+     * Start to parse all arguments
      */
     virtual void run() override;
 
@@ -61,7 +65,6 @@ public:
         args->setArg(normalizeKey(rule.name[0]), rule.defaultValue);
     }
 
-    // 设置参数值
     void setArgValue(const std::string &key, const std::string &value)
     {
         (*args)[key] = value;
