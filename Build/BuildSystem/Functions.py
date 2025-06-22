@@ -97,6 +97,3 @@ def GetInformations():
     BuildContext.GxxVersionStr = subprocess.check_output(["g++", "--version"]).decode("utf-8").split("\n")[0].split(" ")[-1]
     SplitedGxxVersion = BuildContext.GxxVersionStr.split(".")
     BuildContext.GxxVersion = [SplitedGxxVersion[0], SplitedGxxVersion[1], SplitedGxxVersion[2]]
-
-    if not BuildContext.Arguments.donot_build_files:
-        LLVMConfig.InitLLVMConfig(BuildContext.Arguments.llvm_position)

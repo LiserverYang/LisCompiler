@@ -9,7 +9,7 @@
 #include <sstream>
 
 #include "Core/CompilePipeline.hpp"
-#include "Parser/ASTPrinter.hpp"\
+#include "Parser/ASTPrinter.hpp"
 
 int main(int argc, const char **argv)
 {
