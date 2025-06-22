@@ -11,5 +11,5 @@ class MainModule(BuildSystem.ModuleBase):
         """
 
         self.BinaryType = BuildSystem.BinaryTypeEnum.EntryPoint
-        self.ModulesDependOn = ["llvm", "Compiler", "Gtest"]
-        self.ArgumentsAdded = [BuildSystem.Config.LLVMConfig.LLVMCommand]
+        self.ModulesDependOn = ["Compiler", "Gtest"]
+        self.ArgumentsAdded = []

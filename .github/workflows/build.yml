@@ -46,14 +46,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install llvm
-        uses: KyleMayes/install-llvm-action@v2
+      - name: Install python3
+        uses: actions/setup-python@v5
         with:
-          version: "20.1.0"
-          directory: ./llvm
+          python-version: "3.13"
 
-      - name: Update llvm files
-        run: xcopy /Y /E /I /Q .\Bin\* .\llvm\
+      - name: Install python modules
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Build binaries and run unit tests
+        run: python3 build.py --build-type Debug --enable-tests
+
+      - name: Upload Windows binaries to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisc-win64-mingw-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: ./Build/Binaries/lisc.exe
+  
+  build-linux-x64:
+    runs-on: ubuntu-24.04
+    needs: get-info
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install python3
         uses: actions/setup-python@v5
@@ -64,10 +78,10 @@ jobs:
         run: python3 -m pip install -r requirements.txt
 
       - name: Build binaries and run unit tests
-        run: python3 build.py --build-type Debug --enable-tests --llvm-position ./llvm/bin/
+        run: python3 build.py --build-type Debug --enable-tests
 
-      - name: Upload Windows binaries to artifact
+      - name: Upload Linux binaries to artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lisc-win64-mingw-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
-          path: ./Build/Binaries/lisc.exe
+          name: lisc-linux64-gnu-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: ./Build/Binaries/lisc
