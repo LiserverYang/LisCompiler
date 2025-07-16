@@ -5,15 +5,15 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
-#include <functional>
 
 class Argparser;
 
 struct ArgParseRule
 {
-    using ArgBehavior = std::function<int(Argparser*, std::string)>;
+    using ArgBehavior = std::function<int(Argparser *, std::string)>;
 
     /**
      * Argument identifier

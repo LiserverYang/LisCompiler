@@ -1,7 +1,16 @@
 #include "Logger/Logger.hpp"
+#include "Core/Debugging.hpp"
 
 #include <cmath>
 #include <iostream>
+
+/**
+ * The output looks like:
+ *
+ * .\Examples\helloworld.lis:15:5: error: expected ';' after let statement
+ *     15 |     ret 0;
+ *        |     ^~~
+ */
 
 /**
  * This function is to help the logger log the code where have errors with loginfo and the color
@@ -9,60 +18,52 @@
  * @param info the info of log stored the file value, the error position and the length
  * @param color the color of error
  */
-void LogCode(Logger::LogInfo &info, std::string color)
+void LogCode(Logger::LogInfo &info, const std::string &color)
 {
-    // first we stored the spaces of the line number
-    const int lineLength = std::log10(info.line) + 1;
+    const int lineLength = static_cast<int>(std::log10(info.line)) + 1;
+    const std::string &code = *info.code;
 
-    std::string codeStr = "";
-    std::string errStr = "";
-
-    for (int i = 0; i <= i + 15; i++)
+    // Find start of line
+    size_t lineStart = info.beginPosition;
+    while (lineStart > 0 && code[lineStart - 1] != '\n' && code[lineStart - 1] != '\r')
     {
-        // to avoid outing of bounds
-        if (info.beginPosition + i >= info.code->size())
-        {
-            break;
-        }
-
-        char code = info.code->at(info.beginPosition + i);
-
-        // if the line end, break
-        if (code == '\r' || code == '\n')
-        {
-            break;
-        }
-
-        // add the color ascii code
-        if (i == info.col - 1)
-        {
-            codeStr.append(color);
-        }
-
-        // end the color ascii code with "\033[0m" code
-        if (i == info.col - 1 + info.length)
-        {
-            codeStr.append("\033[0m");
-        }
-
-        codeStr.push_back(code);
+        lineStart--;
     }
 
-    for (int i = 0; i < info.length - 1; i++)
-        errStr += '~';
-
-    codeStr.append("\033[0m");
-
-    printf("    %d | %s\n", info.line, codeStr.c_str());
-
-    if (info.col == 1)
+    // Find end of line
+    size_t lineEnd = info.beginPosition;
+    while (lineEnd < code.size() && code[lineEnd] != '\n' && code[lineEnd] != '\r')
     {
-        printf("%*s| ^", lineLength + 5, " ");
+        lineEnd++;
     }
-    else
+
+    // Extract the full line
+    std::string line = code.substr(lineStart, lineEnd - lineStart);
+
+    // Calculate error position within the line
+    size_t errorStart = info.col - 1;
+    size_t errorEnd = std::min(errorStart + info.length, line.length());
+
+    // Build colored line
+    std::string coloredLine = line.substr(0, errorStart)
+                              + color
+                              + line.substr(errorStart, errorEnd - errorStart)
+                              + "\033[0m"
+                              + line.substr(errorEnd);
+
+    // Build error indicator
+    std::string indicatorSpaces(lineLength + 5, ' ');
+    std::string errorIndent(errorStart, ' ');
+    std::string errorMark = color + '^';
+    if (info.length > 1)
     {
-        printf("%*s| %*s%s^%s\033[0m\n", lineLength + 5, " ", info.col - 1, " ", color.c_str(), errStr.c_str());
+        errorMark.append(info.length - 1, '~');
     }
+    errorMark += "\033[0m";
+
+    // Print output
+    printf("    %d | %s\n", info.line, coloredLine.c_str());
+    printf("%s| %s%s\n", indicatorSpaces.c_str(), errorIndent.c_str(), errorMark.c_str());
 }
 
 void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
@@ -74,7 +75,7 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
     switch (level)
     {
     case Logger::LogLevel::ERROR:
-        printf("\033[31m error:\033[0m ");
+        printf("\033[31m error[E%04d]:\033[0m ", info.errorId);
         color = "\033[31m";
         break;
     case Logger::LogLevel::WARNING:
@@ -100,8 +101,8 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
     if (level == LogLevel::ERROR)
     {
 #ifdef __DEBUG__
-        // if it is debug, we should throw error to let the developer debug the compiler and get the call stack
-        throw std::runtime_error("Create debug point");
+        // if it is debug, we should create debug point to get the call stack
+        DEBUG_POINT();
 #else
         // if it is release, exit with error code 1
         exit(1);

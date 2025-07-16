@@ -18,3 +18,10 @@ class GtestModule(BuildSystem.ModuleBase):
         self.ModulesDependOn = []
         self.ArgumentsAdded = ["-I./Source/Gtest/Private"]
         self.EnableFormatCheck = False
+
+        if BuildSystem.BuildContext.BuildType == BuildSystem.BuildTypeEnum.Release:
+            self.AutoSkiped = True
+            self.LinkThisModule = False
+
+        # You can enable this argument when you have had a build
+        # self.AutoSkiped = True

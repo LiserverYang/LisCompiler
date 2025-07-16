@@ -1,4 +1,5 @@
 #include "Lexer/Lexer.hpp"
+#include "Logger/ErrorID.hpp"
 #include "Logger/Logger.hpp"
 #include <iostream>
 
@@ -216,7 +217,7 @@ Token Lexer::lexStringLiteral()
     }
 
     // handle unclosed string error
-    Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed string literal", line, column - 1, 1, lineStart});
+    Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed string literal", line, column - 1, 1, lineStart, E_UnClosedStringLiteral});
 
     return token; // return partial token on error
 }
@@ -241,7 +242,7 @@ Token Lexer::lexCharLiteral()
     // check for immediate EOF
     if (index >= source.size())
     {
-        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart});
+        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral});
     }
 
     char c = source[index];
@@ -252,7 +253,7 @@ Token Lexer::lexCharLiteral()
         // validate escape sequence length
         if (index >= source.size())
         {
-            Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart});
+            Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral});
         }
 
         char escape = source[index];
@@ -277,7 +278,7 @@ Token Lexer::lexCharLiteral()
     // verify closing quote exists
     if (index >= source.size() || source[index] != '\'')
     {
-        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart});
+        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral});
     }
 
     // skip closing quote
@@ -494,7 +495,7 @@ single_char:
     case '!': token.code = TokenCode::NOT; break;
     case '|': token.code = TokenCode::BOR; break;
     default: // unknown character
-        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unknown character '" + std::string(1, current) + "'", line, column, 1, lineStart});
+        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unknown character '" + std::string(1, current) + "'", line, column, 1, lineStart, E_UnknownCharacter});
     }
 
     token.value = std::string(1, current);

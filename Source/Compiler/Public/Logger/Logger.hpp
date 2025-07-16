@@ -4,6 +4,7 @@
  */
 
 #include <string>
+#include <vector>
 
 /*
  * Logger defined three log level:
@@ -16,7 +17,7 @@ class Logger
 public:
     enum class LogLevel
     {
-        ERROR,
+        ERROR = 0,
         WARNING,
         INFO
     };
@@ -29,9 +30,11 @@ public:
         size_t line, col;
         size_t length;
         size_t beginPosition;
+        size_t errorId = 1;
         bool logCode = 1;
     };
 
 public:
     static void Log(LogLevel level, LogInfo info);
+    static void Log(LogLevel level, std::vector<LogInfo> info);
 };

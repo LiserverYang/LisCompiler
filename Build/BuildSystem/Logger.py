@@ -10,6 +10,9 @@ class TLogger:
     The logger, includes function log.
     """
 
+    def __init__(self):
+        colorama.init()
+
     def Log(self, LogLevel: LogLevelEnum, Msg: str, bExit: bool = False, ExitCode: int = 1):
         """
         Output log.

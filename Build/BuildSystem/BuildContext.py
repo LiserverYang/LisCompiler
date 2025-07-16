@@ -5,7 +5,7 @@ from .TargetBase import TargetBase
 from .BuildTypeEnum import BuildTypeEnum
 from .SystemEnum import SystemEnum
 
-from typing import Tuple
+from typing import Tuple, List
 from argparse import Namespace
 
 class TBuildContext:
@@ -28,9 +28,9 @@ class TBuildContext:
 
     # For other modules
     SystemType: SystemEnum = SystemEnum.Other
-    GccVersion: Tuple[int, int, int] = [0, 0, 1]
+    GccVersion: List[int] = [0, 0, 1]
     GccVersionStr: str = "0.0.1"
-    GxxVersion: Tuple[int, int, int] = [0, 0, 1]
+    GxxVersion: List[int] = [0, 0, 1]
     GxxVersionStr: str = "0.0.1"
 
     Arguments: Namespace

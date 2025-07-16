@@ -13,9 +13,9 @@ from .FormatCheck import CheckFormat
 
 from typing import List
 
+import subprocess
+import concurrent.futures
 import os
-import sys
-
 
 def BuildModule(ModuleName: str):
     """
@@ -25,7 +25,7 @@ def BuildModule(ModuleName: str):
     ModuleID: int = BuildContext.BuildOrder.index(ModuleName)
 
     # If we shouldn't build this module, return
-    if not BuildContext.ModuleConfiguration[ModuleID].bBuildThisModule:
+    if not BuildContext.ModuleConfiguration[ModuleID].BuildThisModule:
         return
 
     # And if anymodule that this module depends on did not build, report error
@@ -37,7 +37,7 @@ def BuildModule(ModuleName: str):
     Logger.Log(LogLevelEnum.Info,
                f"[{ModuleID + 1}/{len(BuildContext.BuildOrder)}] Building module '{ModuleName}'")
 
-    # Make file dir
+    # Some dirs
     MiddleFilesDir: str = f"./Build/Intermediate/{BuildContext.TargetName}/{ModuleName}"
     BinaryFilesDir: str = "./Build/Binaries"
 
@@ -72,7 +72,7 @@ def BuildModule(ModuleName: str):
     Search(FileIO(os.path.dirname(
         BuildContext.ModulePath[ModuleID]) + "/Private/"))
 
-    # If this file has been compiled, skip
+    # If a source file has been compiled, skip
     if not BuildContext.Arguments.donot_use_o_files:
         for File in WaitCompileCFilesList + WaitCompileCppFilesList:
             FileFileIO: FileIO = FileIO(File)
@@ -98,15 +98,24 @@ def BuildModule(ModuleName: str):
             AllDependsSkiped = False
             break
 
+    # Check if the target exists
     if BuildContext.ModuleConfiguration[ModuleID].BinaryType == BinaryTypeEnum.EntryPoint:
         TargetExists = FileIO(
             f"./Build/Binaries/{ModuleName}{PlatFormEndSwitchExe}").Exists()
     elif BuildContext.ModuleConfiguration[ModuleID].BinaryType == BinaryTypeEnum.DynamicLib:
-        TargetExists = FileIO(
-            f"./Build/Binaries/{BuildContext.TargetName}-{ModuleName}{PlatFormEndSwitchDy}").Exists()
+        if BuildContext.ModuleConfiguration[ModuleID].EnableBinaryLibPrefix:
+            TargetExists = FileIO(
+                f"./Build/Binaries/{BuildContext.TargetName}-{ModuleName}{PlatFormEndSwitchDy}").Exists()
+        else:
+            TargetExists = FileIO(
+                f"./Build/Binaries/{ModuleName}{PlatFormEndSwitchDy}").Exists()
     else:
-        TargetExists = FileIO(
-            f"./Build/Binaries/{BuildContext.TargetName}-{ModuleName}.a").Exists()
+        if BuildContext.ModuleConfiguration[ModuleID].EnableBinaryLibPrefix:
+            TargetExists = FileIO(
+                f"./Build/Binaries/{BuildContext.TargetName}-{ModuleName}.a").Exists()
+        else:
+            TargetExists = FileIO(
+                f"./Build/Binaries/{ModuleName}.a").Exists()
 
     # And if everything is compiled, skip this module building
     if BuildContext.ModuleConfiguration[ModuleID].AutoSkiped or (len(WaitCompileCFilesList) == len(WaitCompileCppFilesList) == 0 and AllDependsSkiped and TargetExists):
@@ -120,6 +129,8 @@ def BuildModule(ModuleName: str):
                 Logger.Log(LogLevelEnum.Error, f"Format check faild in file {file}, see log for detailed informations", True, 1)
 
     # Start to compile files
+
+    # Some variables in configuation
     CStanderd: str = BuildContext.ModuleConfiguration[ModuleID].CStanderd
     CxxStanderd: str = BuildContext.ModuleConfiguration[ModuleID].CxxStanderd
     ModuleAddedArguments: str = ' '.join(
@@ -157,14 +168,16 @@ def BuildModule(ModuleName: str):
         return ResultValue
 
     # Build all source to .o file
+
+    CompileCommands: List[str] = []
+
     for CFile in WaitCompileCFilesList:
         TargetFileName: str = f"{MiddleFilesDir}/{FileIO(CFile).FileName()}.o"
         COFilesList.append(TargetFileName)
         BuildCommand: str = f"gcc {CFile} -o {TargetFileName} -std={CStanderd} {ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -c"
         BuildContext.CompileCommands.append(
             TransformCommand(BuildCommand, CFile))
-        if not BuildContext.Arguments.donot_build_files:
-            os.system(BuildCommand)
+        CompileCommands.append(BuildCommand)
 
     for CppFile in WaitCompileCppFilesList:
         TargetFileName: str = f"{MiddleFilesDir}/{FileIO(CppFile).FileName()}.o"
@@ -172,8 +185,36 @@ def BuildModule(ModuleName: str):
         BuildCommand: str = f"g++ {CppFile} -o {TargetFileName} -std={CxxStanderd} {ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -c"
         BuildContext.CompileCommands.append(
             TransformCommand(BuildCommand, CppFile))
-        if not BuildContext.Arguments.donot_build_files:
-            os.system(BuildCommand)
+        CompileCommands.append(BuildCommand)
+
+    if not BuildContext.Arguments.donot_build_files and CompileCommands:
+        def RunCompileCommand(cmd):
+            """
+            Execute single command and check the result
+            """
+
+            result = subprocess.run(
+                cmd, 
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            if result.returncode != 0:
+                return (False, cmd, result.stderr)
+            return (True, cmd, "")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=BuildContext.Arguments.threads) as executor:
+            futures = {executor.submit(RunCompileCommand, cmd): cmd for cmd in CompileCommands}
+            
+            for future in concurrent.futures.as_completed(futures):
+                success, cmd, error = future.result()
+                if not success:
+                    # Cancle all not finished job
+                    for f in futures:
+                        f.cancel()
+                    print(error.replace("\n\n", "\n"))
+                    Logger.Log(LogLevelEnum.Error, f"Compile faild when running command {cmd}, see error in the log.", True, -1)
 
     if  BuildContext.Arguments.donot_build_files:
         BuildContext.BuildedModule[ModuleID] = True
@@ -190,9 +231,12 @@ def BuildModule(ModuleName: str):
     elif BuildContext.ModuleConfiguration[ModuleID].BinaryType == BinaryTypeEnum.StaticLib:
         # Build static lib
         link_command = f"ar rcs {BinaryFilesDir}/lib{LibPrefix}{ModuleName}.a {' '.join(COFilesList)} {' '.join(CxxOFilesList)}"
-        for depend in DependsModules:
-            if BuildContext.ModuleConfiguration[BuildContext.BuildOrder.index(depend)].BinaryType == BinaryTypeEnum.StaticLib:
-                link_command += f" {BinaryFilesDir}/lib{depend}.a"
+        for name in BuildContext.ModuleConfiguration[ModuleID].ModulesDependOn:
+            if BuildContext.ModuleConfiguration[BuildContext.BuildOrder.index(name)].LinkThisModule and BuildContext.ModuleConfiguration[BuildContext.BuildOrder.index(name)].BinaryType == BinaryTypeEnum.StaticLib:
+                if BuildContext.ModuleConfiguration[BuildContext.BuildOrder.index(name)].EnableBinaryLibPrefix:
+                    link_command += f" {BinaryFilesDir}/lib{BuildContext.TargetName}-{name}.a"
+                else:
+                    link_command += f" {BinaryFilesDir}/lib{name}.a"
         BuildResult = os.system(link_command)
 
     if BuildResult == 0:

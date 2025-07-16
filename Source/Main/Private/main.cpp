@@ -18,7 +18,5 @@ int main(int argc, const char **argv)
     CompilePipeline compilePipeline{context, argc, argv};
     compilePipeline.run();
 
-    printAST(context->program);
-
     return 0;
 }

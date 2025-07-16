@@ -24,6 +24,8 @@ struct ArgparserCreateInfo
     bool enableHelpRule = true;
 
     std::shared_ptr<Args> args;
+
+    std::string usageStr = "";
 };
 
 /**
@@ -39,9 +41,10 @@ class Argparser : public Pass
 public:
     Argparser() = default;
     Argparser(std::shared_ptr<Context> cnt, ArgparserCreateInfo createInfo)
-        : argc(createInfo.argc), argv(createInfo.argv), enableHelpRule(createInfo.enableHelpRule), args(createInfo.args)
+        : argc(createInfo.argc), argv(createInfo.argv), enableHelpRule(createInfo.enableHelpRule), args(createInfo.args), usageStr(createInfo.usageStr)
     {
         context = cnt;
+        rules.clear();
     }
 
     ~Argparser() {}
@@ -59,6 +62,13 @@ public:
     std::string currentRuleKey;
     std::shared_ptr<Args> args;
 
+    std::string usageStr;
+
+    /**
+     * Regist a rule with `ArgParseRule`
+     *
+     * @param rule The rule to regist
+     */
     void registRule(ArgParseRule rule)
     {
         rules.push_back(rule);
@@ -76,4 +86,6 @@ private:
     std::vector<ArgParseRule> rules;
 
     std::string normalizeKey(const std::string &name);
+
+    void printHelpInformation();
 };

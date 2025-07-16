@@ -19,11 +19,11 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     context = cnt;
 
     // create the argparser and regist the arguments
-    ArgparserCreateInfo createInfo{argc, argv, true, context->args};
+    ArgparserCreateInfo createInfo{argc, argv, true, context->args, "Usage: lisc [options] file"};
     auto argParser = std::make_unique<Argparser>(context, createInfo);
 
     argParser->registRule(ArgParseRule{{"filePath"}, nullptr, "./a.lis", "test"});
-    argParser->registRule(ArgParseRule{{"--test"}, setAsTrue, "false", "test"});
+    argParser->registRule(ArgParseRule{{"--print-ast"}, setAsTrue, "false", "Print the parsed ast."});
 
     passes.emplace_back(argParser.release());
     passes.emplace_back(std::make_unique<LambdaPass>(context, [](std::shared_ptr<Context> ctx)

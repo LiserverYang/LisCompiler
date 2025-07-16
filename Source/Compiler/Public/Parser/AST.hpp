@@ -15,7 +15,7 @@
 class ASTNode
 {
 public:
-    size_t line, col, lineStart;
+    size_t line, col, lineStart, length;
     virtual ~ASTNode() = default;
 };
 
@@ -55,7 +55,7 @@ public:
     bool isReference = false;
     bool isMutReference = false;
     TypeKind kind;
-    std::string typeName;                   // base type name or idenfiter
+    std::string typeName; // base type name or idenfiter
     std::unique_ptr<ModulePath> modulePath;
 };
 
@@ -64,7 +64,7 @@ class ImportStmt : public ASTNode
 public:
     std::unique_ptr<ModulePath> modulePath;
     std::optional<std::vector<std::string>> symbols; // nullopt means import all
-    std::optional<std::string> alias; // nullopt mean import as global
+    std::optional<std::string> alias;                // nullopt mean import as global
 };
 
 class MemberVarDef : public ASTNode

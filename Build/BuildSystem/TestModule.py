@@ -2,7 +2,11 @@
 
 from .Logger import Logger
 from .LogLevelEnum import LogLevelEnum
+from .BuildContext import BuildContext
+from .SystemEnum import SystemEnum
 from typing import List
+
+import subprocess
 
 import os
 
@@ -20,5 +24,7 @@ def TestModule(ModuleName:str, ModulePath: str, ModuleOFiles: List[str], Argumen
     if BuildResult != 0:
         Logger.Log(LogLevelEnum.Error, f"Unable to build test file for module '{ModuleName}' and the compiler return {BuildResult}", True, -1)
 
-    if os.system("powershell ./Build/Intermediate/test") != 0:
+    ExePosition = "./Build/Intermediate/test.exe" if SystemEnum.Windows else "./Build/Intermediate/test"
+
+    if subprocess.run([ExePosition]).returncode != 0:
         Logger.Log(LogLevelEnum.Error, f"Test module '{ModuleName}' faild. See log to find out what happend.", True, -1)

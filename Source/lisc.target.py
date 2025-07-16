@@ -9,13 +9,13 @@ class liscTarget(BuildSystem.TargetBase):
 
     def Configuration(self) -> None:
         """
-        Config renderer's config.
+        Config compiler's config.
         """
 
         self.TargetType = BuildSystem.TargetTypeEnum.Program
         self.bBuildAllmodules = True
         self.ModulesSubFolder = [""]
-        self.ArgumentsAdded = ["-std=c++20", "-Wno-deprecated-declarations", "-Wno-deprecated-enum-enum-conversion", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-DUNICODE"]
+        self.ArgumentsAdded = ["-std=c++20", "-Wno-deprecated-declarations", "-Wno-deprecated-enum-enum-conversion", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-DUNICODE", "-fdiagnostics-color=always"]
 
         match BuildSystem.BuildContext.BuildType:
             case BuildSystem.BuildTypeEnum.Release:

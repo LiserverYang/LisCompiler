@@ -32,6 +32,7 @@ protected:
         info.argv = cmdArgs.data();
         info.enableHelpRule = enableHelp;
         info.args = args;
+        info.usageStr = "Usage: lisc [options] file";
 
         auto parser = std::make_unique<Argparser>(context, info);
         for (const auto &rule : rules)

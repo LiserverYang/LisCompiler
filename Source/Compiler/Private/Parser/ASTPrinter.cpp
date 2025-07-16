@@ -90,7 +90,7 @@ void printNodeInfo(const ASTNode *node, std::ostream &os)
     std::string nodeType = demangle(typeid(*node).name());
     std::string address = formatAddress(node);
 
-    os << "\033[38;5;10m" << nodeType << "\033[0m" << " " << "\033[38;5;3m" << address << "\033[0m";
+    os << "\033[38;5;10m" << nodeType << "\033[0m" << " <" << node->line << ":" << node->col << ":" << node->length << ">" << " " << "\033[38;5;3m" << address << "\033[0m";
 
     // 根据节点类型添加附加信息
     if (auto p = dynamic_cast<const Program *>(node))

@@ -11,7 +11,7 @@ class ModuleBase:
     BinaryType: BinaryTypeEnum = BinaryTypeEnum.DynamicLib
 
     # Is or not build this module
-    bBuildThisModule: bool = True
+    BuildThisModule: bool = True
     
     # All modules despend on
     ModulesDependOn: list[str] = []

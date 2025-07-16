@@ -4,9 +4,9 @@
 
 #pragma once
 
+#include "Argparser/Args.hpp"
 #include "Lexer/Token.hpp"
 #include "Parser/AST.hpp"
-#include "Argparser/Args.hpp"
 
 /**
  * Context stored all informations of compiler, these will be shared in different passes

@@ -37,6 +37,7 @@ def BuildEngine(SourceFolder: FileIO, TargetList: List[str]) -> None:
     parser.add_argument('--enable-tests', help='If enabled, the build system will execute the unit test with google test (all test file should be at ModuolePath/Test/**)', action="store_true")
     parser.add_argument('--enable-format-check', help='If enabled, the build system will check the code format with clang-format', action="store_true")
     parser.add_argument('--llvm-position', help='If enabled, the build system set the llvm position', default="")
+    parser.add_argument('--threads', help='Set the thread number', type=int, default=1)
     BuildContext.Arguments = parser.parse_args()
 
     # Get Build type
@@ -51,6 +52,8 @@ def BuildEngine(SourceFolder: FileIO, TargetList: List[str]) -> None:
     Logger.Log(LogLevelEnum.Info ,f"Build type is {BuildContext.BuildType.name}.")
 
     GetInformations()
+
+    Logger.Log(LogLevelEnum.Info ,f"System is {BuildContext.SystemType.name}.")
 
     Logger.Log(LogLevelEnum.Info, "Reading all targets.")
 

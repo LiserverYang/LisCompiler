@@ -19,7 +19,7 @@ public:
     /**
      * Visit a argument value by the argument name
      * If it is undefined, return null string ("")
-     * 
+     *
      * @param argName the argument name
      */
     std::string getArg(std::string argName)
@@ -36,7 +36,7 @@ public:
 
     /**
      * Set the argument value by argument name
-     * 
+     *
      * @param argName the argument name
      * @param value the value to set
      */

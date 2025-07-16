@@ -42,7 +42,7 @@ def BuildTarget(TargetPath: FileIO) -> None:
             ModuleInstance: ModuleBase = GetClassFromFileIO(FileIO(Module), MouduleName + "Module")()
             ModuleInstance.Configuration()
             # Check if should build
-            if (not ModuleInstance.bBuildThisModule) or ((not TargetInstance.bBuildAllmodules) and not (MouduleName in TargetInstance.BuildModulesList)):
+            if (not ModuleInstance.BuildThisModule) or ((not TargetInstance.bBuildAllmodules) and not (MouduleName in TargetInstance.BuildModulesList)):
                 continue
             # Add to list
             HashMap[MouduleName] = len(ModulesList)

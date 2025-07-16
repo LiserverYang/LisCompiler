@@ -9,8 +9,8 @@
 #include "Token.hpp"
 
 #include <cctype>
-#include <stdexcept>
 #include <memory>
+#include <stdexcept>
 
 class Lexer : public Pass
 {

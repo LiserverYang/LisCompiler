@@ -17,7 +17,7 @@ class Pass
 protected:
     friend class Pipeline;
 
-    std::shared_ptr<Context> context;    
+    std::shared_ptr<Context> context;
 
 public:
     Pass() = default;

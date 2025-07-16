@@ -6,6 +6,7 @@
 #pragma once
 
 #include "Core/Pass.hpp"
+#include "Logger/ErrorID.hpp"
 #include "Logger/Logger.hpp"
 #include "Parser/AST.hpp"
 
@@ -16,6 +17,8 @@
  */
 class Parser : public Pass
 {
+    friend class PositionRecorder;
+
 public:
     Parser() = default;
     Parser(std::shared_ptr<Context> cnt)
@@ -27,7 +30,7 @@ public:
 
     virtual void run() override;
 
-private:
+protected:
     size_t currentPos = 0;
     size_t snapshot = 0;
     TokenStream *tokenStream = nullptr;
@@ -44,6 +47,19 @@ private:
     inline bool finished()
     {
         return currentPos >= tokenStream->size();
+    }
+
+    inline Token &getToken(size_t pos)
+    {
+        if (pos >= tokenStream->size())
+        {
+            Logger::LogInfo logInfo;
+            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpect finishing", E_UnexpectFinishing);
+
+            Logger::Log(Logger::LogLevel::ERROR, logInfo);
+        }
+
+        return tokenStream->at(pos);
     }
 
     inline Token &currentToken()
@@ -87,12 +103,12 @@ private:
         return advance(), result;
     }
 
-    inline Token &consume(TokenCode code, std::string msg)
+    inline Token &consume(TokenCode code, std::string msg, size_t errorID = 1)
     {
         if (finished() || currentToken().code != code)
         {
             Logger::LogInfo logInfo;
-            initLogInfo(currentToken(), logInfo, msg);
+            initLogInfo(currentToken(), logInfo, msg, errorID);
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
         }
 
@@ -114,7 +130,7 @@ private:
         return false;
     }
 
-    inline void initLogInfo(Token &token, Logger::LogInfo &logInfo, std::string msg)
+    inline void initLogInfo(Token &token, Logger::LogInfo &logInfo, std::string msg, size_t errorId = 1)
     {
         logInfo.codePath = context->filePath;
         logInfo.code = &context->fileValue;
@@ -123,6 +139,7 @@ private:
         logInfo.length = token.value.size();
         logInfo.beginPosition = token.lineStart;
         logInfo.msg = msg;
+        logInfo.errorId = errorId;
     }
 
     inline void createSnapshot()
@@ -135,11 +152,26 @@ private:
         currentPos = snapshot;
     }
 
+    void setNodePosition(ASTNode *node)
+    {
+        node->line = currentToken().line;
+        node->col = currentToken().col;
+        node->lineStart = currentToken().lineStart;
+        node->length = currentToken().value.length();
+    }
+
+    void copyNodePosition(ASTNode *dest, const ASTNode *src)
+    {
+        dest->line = src->line;
+        dest->col = src->col;
+        dest->lineStart = src->lineStart;
+        dest->length = src->length;
+    }
+
     bool isTypeStart();
     bool isLiteral();
-    
+
     int getPrecedence(TokenCode type);
-    void initLineInformation(std::unique_ptr<ASTNode> &node);
 
     /* Parser functions */
     std::vector<std::unique_ptr<Param>> parseParameterList();
@@ -169,7 +201,66 @@ private:
     std::unique_ptr<ParenExpr> parseParenthesized();
     std::unique_ptr<LiteralExpr> parseLiteral();
     std::unique_ptr<CastExpr> parseCastExpression(std::unique_ptr<Type> type);
-    std::unique_ptr<StructInitExpr> parseStructInitialization(const std::string &typeName);
-    std::unique_ptr<Expr> parseFunctionCall(const std::string &name);
+    std::unique_ptr<StructInitExpr> parseStructInitialization(Token typeName);
+    std::unique_ptr<Expr> parseFunctionCall(Token name);
     std::unique_ptr<Expr> parseMemberAccessChain(std::unique_ptr<Expr> left);
+};
+
+/**
+ * PositionRecorder is a helper class to record positon informations for ASTNode
+ *
+ * The usage:
+ * Create a recorder object before parse, then bind the recorder to the ASTNode.
+ * Then, when the function finishied, the recorder will record informations automatically.
+ */
+class PositionRecorder
+{
+public:
+    PositionRecorder(Parser *parser, ASTNode *node)
+        : parser_(parser), node_(node), startIndex_(parser->currentPos)
+    {
+        // record the first token
+        if (parser_->tokenStream && startIndex_ < parser_->tokenStream->size())
+        {
+            const Token &startToken = parser_->currentToken();
+            line_ = startToken.line;
+            col_ = startToken.col;
+            lineStart_ = startToken.lineStart;
+        }
+    }
+
+    ~PositionRecorder()
+    {
+        // get the length of this node
+        if (parser_->tokenStream && node_)
+        {
+            node_->line = line_;
+            node_->lineStart = lineStart_;
+            node_->col = col_;
+
+            // the end token is the token before current token
+            size_t endIndex = parser_->currentPos - 1;
+
+            if (endIndex >= startIndex_ && endIndex < parser_->tokenStream->size())
+            {
+                const Token &startToken = parser_->tokenStream->at(startIndex_);
+                const Token &endToken = parser_->tokenStream->at(endIndex);
+
+                size_t startPos = startToken.lineStart + (startToken.col - 1);
+                size_t endPos = endToken.lineStart + (endToken.col - 1) + endToken.value.length();
+
+                node_->length = endPos - startPos;
+            }
+        }
+    }
+
+    void bindNode(ASTNode *node)
+    {
+        this->node_ = node;
+    }
+
+private:
+    Parser *parser_;
+    ASTNode *node_;
+    size_t startIndex_, line_, col_, lineStart_;
 };

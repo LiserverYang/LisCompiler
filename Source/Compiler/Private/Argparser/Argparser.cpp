@@ -3,7 +3,7 @@
  * The implementation of argparser
  */
 
-#include "ArgParser/Argparser.hpp"
+#include "Argparser/Argparser.hpp"
 
 #include <cstring>
 
@@ -37,7 +37,9 @@ void Argparser::run()
     // show help informations when need
     if (enableHelpRule && argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-help") == 0 || strcmp(argv[1], "-h") == 0))
     {
-        // tODO
+        // TODO
+
+        printHelpInformation();
 
         // if enable help, application should shut down with code 0
         exit(0);
@@ -118,5 +120,21 @@ void Argparser::run()
     if (posIndex < rules.size() && !rules[posIndex].name.empty() && rules[posIndex].name[0][0] != '-')
     {
         throw std::runtime_error("Excepted positional argument: " + rules[posIndex].name[0]);
+    }
+}
+
+void Argparser::printHelpInformation()
+{
+    // the usage
+    printf("%s\n", usageStr.c_str());
+
+    // options
+    printf("Options:\n");
+
+    for (auto &rule : rules)
+    {
+        if (rule.name[0][0] != '-') continue;
+
+        printf("  %s\t %s\n", rule.name[0].c_str(), rule.description.c_str());
     }
 }
