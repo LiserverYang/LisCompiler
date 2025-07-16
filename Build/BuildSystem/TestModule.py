@@ -24,7 +24,7 @@ def TestModule(ModuleName:str, ModulePath: str, ModuleOFiles: List[str], Argumen
     if BuildResult != 0:
         Logger.Log(LogLevelEnum.Error, f"Unable to build test file for module '{ModuleName}' and the compiler return {BuildResult}", True, -1)
 
-    ExePosition = "./Build/Intermediate/test.exe" if SystemEnum.Windows else "./Build/Intermediate/test"
+    ExePosition = "./Build/Intermediate/test.exe" if BuildContext.SystemType == SystemEnum.Windows else "./Build/Intermediate/test"
 
     if subprocess.run([ExePosition]).returncode != 0:
         Logger.Log(LogLevelEnum.Error, f"Test module '{ModuleName}' faild. See log to find out what happend.", True, -1)
