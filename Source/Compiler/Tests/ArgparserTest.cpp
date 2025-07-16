@@ -23,7 +23,7 @@ protected:
 
     // create the parser with arguments
     std::unique_ptr<Argparser> createParser(
-        std::vector<const char *> cmdArgs,
+        std::vector<const char *> &cmdArgs,
         bool enableHelp = true,
         std::vector<ArgParseRule> rules = {})
     {
@@ -35,10 +35,12 @@ protected:
         info.usageStr = "Usage: lisc [options] file";
 
         auto parser = std::make_unique<Argparser>(context, info);
+
         for (const auto &rule : rules)
         {
             parser->registRule(rule);
         }
+        
         return parser;
     }
 
@@ -82,91 +84,109 @@ protected:
 // Test case
 TEST_F(ArgparserTest, HandlesHelpOption)
 {
-    const char *argv[] = {"app", "--help"};
-    auto parser = createParser({argv, argv + 2});
+    std::vector<const char*> argv{"app", "--help"};
+    auto parser = createParser(argv);
 
     EXPECT_EXIT(parser->run(), ExitedWithCode(0), "");
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, HandlesDisabledHelp)
 {
-    const char *argv[] = {"app", "--help"};
-    auto parser = createParser({argv, argv + 2}, false);
+    std::vector<const char*> argv{"app", "--help"};
+    auto parser = createParser(argv, false);
 
     EXPECT_THROW(parser->run(), std::runtime_error);
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, HandlesSetAsTrue)
 {
     ArgParseRule verboseRule = createBoolRule("--verbose", setAsTrue);
 
-    const char *argv[] = {"app", "--verbose"};
-    auto parser = createParser({argv, argv + 2}, true, {verboseRule});
+    std::vector<const char*> argv{"app", "--verbose"};
+    auto parser = createParser(argv, true, {verboseRule});
     parser->run();
 
     EXPECT_EQ(args->getArg("verbose"), "true");
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, HandlesSetAsFalse)
 {
     ArgParseRule quietRule = createBoolRule("--quiet", setAsFalse, "true");
 
-    const char *argv[] = {"app", "--quiet"};
-    auto parser = createParser({argv, argv + 2}, true, {quietRule});
+    std::vector<const char*> argv{"app", "--quiet"};
+    auto parser = createParser(argv, true, {quietRule});
     parser->run();
 
     EXPECT_EQ(args->getArg("quiet"), "false");
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, HandlesSetAsValue)
 {
     ArgParseRule fileRule = createValueRule("--file");
 
-    const char *argv[] = {"app", "--file", "config.yaml"};
-    auto parser = createParser({argv, argv + 3}, true, {fileRule});
+    std::vector<const char*> argv{"app", "--file", "config.yaml"};
+    auto parser = createParser(argv, true, {fileRule});
     parser->run();
 
     EXPECT_EQ(args->getArg("file"), "config.yaml");
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, NormalizesArgumentKeys)
 {
     ArgParseRule rule = createBoolRule("--output-file", setAsTrue);
 
-    const char *argv[] = {"app", "--output-file"};
-    auto parser = createParser({argv, argv + 2}, true, {rule});
+    std::vector<const char*> argv{"app", "--output-file"};
+    auto parser = createParser(argv, true, {rule});
     parser->run();
 
     // should be converted to output_file
     EXPECT_EQ(args->getArg("output_file"), "true");
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, ThrowsOnUnknownOption)
 {
-    const char *argv[] = {"app", "--unknown"};
-    auto parser = createParser({argv, argv + 2});
+    std::vector<const char*> argv{"app", "--unknown"};
+    auto parser = createParser(argv);
 
     EXPECT_THROW(parser->run(), std::runtime_error);
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, ThrowsOnMissingPositionalArg)
 {
     ArgParseRule requiredRule = createPositionalRule("input");
 
-    const char *argv[] = {"app"};
-    auto parser = createParser({argv, argv + 1}, true, {requiredRule});
+    std::vector<const char*> argv{"app"};
+    auto parser = createParser(argv, true, {requiredRule});
 
     EXPECT_THROW(parser->run(), std::runtime_error);
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, ThrowsOnExtraPositionalArgs)
 {
     ArgParseRule rule = createPositionalRule("input");
 
-    const char *argv[] = {"app", "file1", "file2"};
-    auto parser = createParser({argv, argv + 3}, true, {rule});
+    std::vector<const char*> argv{"app", "file1", "file2"};
+    auto parser = createParser(argv, true, {rule});
 
     EXPECT_THROW(parser->run(), std::runtime_error);
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, HandlesMixedArguments)
@@ -175,13 +195,15 @@ TEST_F(ArgparserTest, HandlesMixedArguments)
     ArgParseRule fileRule = createValueRule("--config");
     ArgParseRule inputRule = createPositionalRule("input");
 
-    const char *argv[] = {"app", "--verbose", "data.bin", "--config", "settings.cfg"};
-    auto parser = createParser({argv, argv + 5}, true, {inputRule, verboseRule, fileRule});
+    std::vector<const char*> argv{"app", "--verbose", "data.bin", "--config", "settings.cfg"};
+    auto parser = createParser(argv, true, {inputRule, verboseRule, fileRule});
     parser->run();
 
     EXPECT_EQ(args->getArg("verbose"), "true");
     EXPECT_EQ(args->getArg("config"), "settings.cfg");
     EXPECT_EQ(args->getArg("input"), "data.bin");
+
+    parser.release();
 }
 
 TEST_F(ArgparserTest, HandlesMultipleNamesForRule)
@@ -194,9 +216,11 @@ TEST_F(ArgparserTest, HandlesMultipleNamesForRule)
             return 1;
         }};
 
-    const char *argv[] = {"app", "-h"};
-    auto parser = createParser({argv, argv + 2}, false, {helpRule});
+    std::vector<const char*> argv{"app", "-h"};
+    auto parser = createParser(argv, false, {helpRule});
     parser->run();
 
     EXPECT_EQ(args->getArg("help"), "true");
+
+    parser.release();
 }
