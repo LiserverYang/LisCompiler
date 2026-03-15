@@ -62,7 +62,7 @@ public:
     std::shared_ptr<CustomType> getCustom(std::string name, std::vector<CustomType::Field> fields)
     {
         auto it = customs.find(name);
-        
+
         if (it != customs.end())
         {
             return it->second;
@@ -76,7 +76,7 @@ public:
     std::optional<std::shared_ptr<CustomType>> getCustom(std::string name)
     {
         auto it = customs.find(name);
-        
+
         if (it != customs.end())
         {
             return it->second;
@@ -89,7 +89,7 @@ public:
     std::shared_ptr<FunctionType> getFunction(std::string name, std::vector<FunctionType::Param> params, std::shared_ptr<Type> returnType)
     {
         auto it = functions.find(name);
-        
+
         if (it != functions.end())
         {
             return it->second;

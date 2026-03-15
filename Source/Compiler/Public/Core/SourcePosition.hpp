@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include <string>
 #include <cctype>
+#include <string>
 
 /**
  * SourcePosition provides a unification api to store the location of something (Token, AST Node) in source code.

@@ -127,7 +127,7 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     if (match(TokenCode::FOR))
     {
-        impl->structName= consume(TokenCode::IDENTIFIER, "expect a trait name", E_ExpectAnIdentifier).value;
+        impl->structName = consume(TokenCode::IDENTIFIER, "expect a trait name", E_ExpectAnIdentifier).value;
         impl->traitName = name;
     }
     else

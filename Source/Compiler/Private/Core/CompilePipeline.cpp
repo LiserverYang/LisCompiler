@@ -4,12 +4,12 @@
  */
 
 #include "Core/CompilePipeline.hpp"
+#include "Analysiser/SemanticAnalyzer.hpp"
 #include "Argparser/Argparser.hpp"
 #include "Argparser/Behaviors.hpp"
 #include "Core/LambdaPass.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Parser/Parser.hpp"
-#include "Analysiser/SemanticAnalyzer.hpp"
 
 #include <fstream>
 #include <iostream>

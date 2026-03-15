@@ -5,8 +5,8 @@
 
 #pragma once
 
-#include "Analysiser/Symbol.hpp"
 #include "Analysiser/Scope.hpp"
+#include "Analysiser/Symbol.hpp"
 
 class SymbolTable
 {
@@ -28,7 +28,7 @@ public:
     {
         currentScope_ = std::move(newScope);
     }
-    
+
     void exitScope()
     {
         if (currentScope_->parent_)

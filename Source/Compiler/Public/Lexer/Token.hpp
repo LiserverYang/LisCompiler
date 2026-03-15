@@ -152,7 +152,7 @@ struct Token
     TokenCode code = TokenCode::UNDEFINED;
     // The value of this token
     std::string value = "";
-    
+
     SourcePosition position;
 };
 

@@ -5,11 +5,11 @@
 
 #pragma once
 
-#include "Core/Pass.hpp"
-#include "Parser/ASTVisitor.hpp"
 #include "Analysiser/SymbolTable.hpp"
 #include "Analysiser/TypeContext.hpp"
+#include "Core/Pass.hpp"
 #include "Logger/Logger.hpp"
+#include "Parser/ASTVisitor.hpp"
 
 class SemanticAnalyzer : public ASTVisitor, public Pass
 {
@@ -18,9 +18,9 @@ private:
 
     struct FunctionInfo
     {
-        std::shared_ptr<Type> declaredReturnType;   // 可能为空（待推断）
-        bool hasReturnValue;                        // 函数定义是否显示声明返回类型
-        bool isInFunction;                          // 当前是否正在分析函数
+        std::shared_ptr<Type> declaredReturnType; // 可能为空（待推断）
+        bool hasReturnValue;                      // 函数定义是否显示声明返回类型
+        bool isInFunction;                        // 当前是否正在分析函数
     } functionInfo;
 
     std::shared_ptr<Type> currentStructType;
@@ -59,13 +59,12 @@ private:
         Logger::Log(level, logInfo);
     }
 
-    bool isNumericType(const std::shared_ptr<Type>& type)
+    bool isNumericType(const std::shared_ptr<Type> &type)
     {
-        return type->getKind() == Type::Kind::Primitive && int(std::dynamic_pointer_cast<PrimitiveType>(type)->getPrimKind()) <= 5; 
+        return type->getKind() == Type::Kind::Primitive && int(std::dynamic_pointer_cast<PrimitiveType>(type)->getPrimKind()) <= 5;
     }
 
 public:
-
     SemanticAnalyzer() = default;
     SemanticAnalyzer(std::shared_ptr<Context> cnt)
     {
