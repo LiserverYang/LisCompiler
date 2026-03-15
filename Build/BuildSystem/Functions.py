@@ -11,6 +11,7 @@ import importlib.util
 import sys
 import subprocess
 
+
 def GetCurrentSystem() -> SystemEnum:
     """
     Get the kind of current operating system.
@@ -23,22 +24,25 @@ def GetCurrentSystem() -> SystemEnum:
             return SystemEnum.Linux
         case "darwin":
             return SystemEnum.MacOS
-    
+
     return SystemEnum.Other
+
 
 def HasPermissions(PermissionsNumber: int, Permissions: FilePermissionsEnum) -> bool:
     """
     Return if PermissionsNumber has permission, Permissions.
     """
-    
+
     return (PermissionsNumber & Permissions.value) == Permissions.value
+
 
 def AddPermissions(PermissionsNumber: int, Permissions: FilePermissionsEnum) -> int:
     """
     Add permission, Permissions to PermissionsNumber and return a new PermissionsNumber
     """
 
-    return (PermissionsNumber | Permissions.value)
+    return PermissionsNumber | Permissions.value
+
 
 def GetAllUnits(Folder: FileIO, Suffix: str) -> list[str]:
     """
@@ -58,18 +62,19 @@ def GetAllUnits(Folder: FileIO, Suffix: str) -> list[str]:
         if not tFileIO.Exists():
             return
 
-        if tFileIO.FileName().endswith("." + Suffix + '.py'):
+        if tFileIO.FileName().endswith("." + Suffix + ".py"):
             Result.append(tFileIO.FilePathStr)
-        
+
         if tFileIO.IsFolder():
             sub_files = tFileIO.GetSubFiles()
             for sub_file in sub_files:
                 helper(sub_file)
-    
+
     helper(Folder.FilePathStr)
 
     # Return value
     return Result
+
 
 def GetClassFromFileIO(FilePath: FileIO, ClassName: str):
     """
@@ -83,17 +88,36 @@ def GetClassFromFileIO(FilePath: FileIO, ClassName: str):
 
     return getattr(Module, ClassName)
 
+
 def GetInformations():
     """
     All informations like system type, compiler version.
     """
 
     BuildContext.SystemType = GetCurrentSystem()
-    
-    BuildContext.GccVersionStr = subprocess.check_output(["gcc", "--version"]).decode("utf-8").split("\n")[0].split(" ")[-1]
-    SplitedGccVersion = BuildContext.GccVersionStr.split(".")
-    BuildContext.GccVersion = [SplitedGccVersion[0], SplitedGccVersion[1], SplitedGccVersion[2]]
 
-    BuildContext.GxxVersionStr = subprocess.check_output(["g++", "--version"]).decode("utf-8").split("\n")[0].split(" ")[-1]
+    BuildContext.GccVersionStr = (
+        subprocess.check_output(["gcc", "--version"])
+        .decode("utf-8")
+        .split("\n")[0]
+        .split(" ")[-1]
+    )
+    SplitedGccVersion = BuildContext.GccVersionStr.split(".")
+    BuildContext.GccVersion = [
+        SplitedGccVersion[0],
+        SplitedGccVersion[1],
+        SplitedGccVersion[2],
+    ]
+
+    BuildContext.GxxVersionStr = (
+        subprocess.check_output(["g++", "--version"])
+        .decode("utf-8")
+        .split("\n")[0]
+        .split(" ")[-1]
+    )
     SplitedGxxVersion = BuildContext.GxxVersionStr.split(".")
-    BuildContext.GxxVersion = [SplitedGxxVersion[0], SplitedGxxVersion[1], SplitedGxxVersion[2]]
+    BuildContext.GxxVersion = [
+        SplitedGxxVersion[0],
+        SplitedGxxVersion[1],
+        SplitedGxxVersion[2],
+    ]

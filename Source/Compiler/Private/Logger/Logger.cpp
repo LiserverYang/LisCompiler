@@ -1,3 +1,7 @@
+/**
+ * Copyright 2025, LiserverYang. All rights reserved.
+ */
+
 #include "Logger/Logger.hpp"
 #include "Core/Debugging.hpp"
 
@@ -7,7 +11,7 @@
 /**
  * The output looks like:
  *
- * .\Examples\helloworld.lis:15:5: error: expected ';' after let statement
+ * ./Examples/fib.lis:15:5: error[E2012]: expected ';' after let statement
  *     15 |     ret 0;
  *        |     ^~~
  */
@@ -20,8 +24,19 @@
  */
 void LogCode(Logger::LogInfo &info, const std::string &color)
 {
-    const int lineLength = static_cast<int>(std::log10(info.line)) + 1;
+    // 安全检查：避免空指针访问
+    if (info.code == nullptr)
+    {
+        return;
+    }
+
     const std::string &code = *info.code;
+
+    int lineLength = 1;
+    if (info.line > 0)
+    {
+        lineLength = static_cast<int>(std::log10(info.line)) + 1;
+    }
 
     // Find start of line
     size_t lineStart = info.beginPosition;
@@ -41,7 +56,7 @@ void LogCode(Logger::LogInfo &info, const std::string &color)
     std::string line = code.substr(lineStart, lineEnd - lineStart);
 
     // Calculate error position within the line
-    size_t errorStart = info.col - 1;
+    size_t errorStart = info.col > 0 ? (info.col - 1) : 0;
     size_t errorEnd = std::min(errorStart + info.length, line.length());
 
     // Build colored line
@@ -76,21 +91,21 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
     {
     case Logger::LogLevel::ERROR:
         printf("\033[31m error[E%04d]:\033[0m ", info.errorId);
-        color = "\033[31m";
+        color = "\033[31m"; // 红色
         break;
     case Logger::LogLevel::WARNING:
         printf("\033[33m warning:\033[0m ");
-        color = "\033[33m";
+        color = "\033[33m"; // 黄色
         break;
     case Logger::LogLevel::INFO:
         printf("\033[34m info:\033[0m ");
-        color = "\034[31m";
+        color = "\033[34m"; // 蓝色（修复了原错误的 \034[31m）
         break;
     default:
         break;
     }
 
-    printf((info.msg + "\n").c_str());
+    printf("%s\n", info.msg.c_str());
 
     // log the code
     if (info.logCode)
@@ -98,14 +113,32 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
         LogCode(info, color);
     }
 
-    if (level == LogLevel::ERROR)
+    if (level == LogLevel::ERROR && info.exit)
     {
 #ifdef __DEBUG__
         // if it is debug, we should create debug point to get the call stack
         DEBUG_POINT();
 #else
-        // if it is release, exit with error code 1
-        exit(1);
+        // if it is release, exit with exitCode
+        exit(info.exitCode);
 #endif
+    }
+}
+
+void Logger::Log(LogLevel level, const std::vector<LogInfo> &info) // 改为 const 引用，提升效率
+{
+    if (info.empty())
+    {
+        return;
+    }
+
+    LogInfo firstInfo = info[0];
+    firstInfo.exit = false;
+
+    Log(level, firstInfo);
+
+    for (size_t index = 1; index < info.size(); index++)
+    {
+        Log(LogLevel::INFO, info[index]);
     }
 }

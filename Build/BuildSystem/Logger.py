@@ -5,6 +5,7 @@ from . import LogLevelEnum
 
 import colorama
 
+
 class TLogger:
     """
     The logger, includes function log.
@@ -13,7 +14,9 @@ class TLogger:
     def __init__(self):
         colorama.init()
 
-    def Log(self, LogLevel: LogLevelEnum, Msg: str, bExit: bool = False, ExitCode: int = 1):
+    def Log(
+        self, LogLevel: LogLevelEnum, Msg: str, bExit: bool = False, ExitCode: int = 1
+    ):
         """
         Output log.
         """
@@ -25,13 +28,19 @@ class TLogger:
 
         match LogLevel:
             case LogLevelEnum.Info:
-                OutputStr = OutputStr.replace(LevelMarco, colorama.Fore.BLUE + "Info" + colorama.Fore.RESET)
+                OutputStr = OutputStr.replace(
+                    LevelMarco, colorama.Fore.BLUE + "Info" + colorama.Fore.RESET
+                )
             case LogLevelEnum.Warning:
-                OutputStr = OutputStr.replace(LevelMarco, colorama.Fore.YELLOW + "Warning" + colorama.Fore.RESET)
+                OutputStr = OutputStr.replace(
+                    LevelMarco, colorama.Fore.YELLOW + "Warning" + colorama.Fore.RESET
+                )
             case LogLevelEnum.Error:
                 OutputStr = OutputStr.replace(LevelMarco, "Error")
 
-        OutputStr = OutputStr.replace(TimeMarco, time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()))
+        OutputStr = OutputStr.replace(
+            TimeMarco, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        )
         OutputStr = OutputStr.replace(MsgMarco, Msg)
 
         if LogLevel == LogLevelEnum.Error:
@@ -41,5 +50,6 @@ class TLogger:
 
         if bExit:
             exit(ExitCode)
+
 
 Logger = TLogger()

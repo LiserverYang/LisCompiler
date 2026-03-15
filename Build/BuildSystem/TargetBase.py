@@ -2,6 +2,7 @@
 
 from .TargetTypeEnum import TargetTypeEnum
 
+
 class TargetBase:
     """
     The base class of all targets, to give api for LBS.

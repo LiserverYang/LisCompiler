@@ -1,0 +1,57 @@
+// this is a language-example for lis language to show what this language looks like and some compiler behaviors
+// we recommend a new line after function def, and not new line after a control-stream condiction statement
+// a non-capital litter with the first letter of a type, that looks nice
+
+// TODO: this should be defined in standard library, but put here first
+
+trait Drop
+{
+    fn drop(self) {}
+}
+
+fn fib(n: i32) -> i32
+{    
+    if n == 0 || n == 1 { 
+        ret 1;
+    }
+
+    ret fib(n - 2) + fib(n - 1);
+}
+
+struct number
+{
+    pub a: i32,
+    pub b: i32,
+}
+
+impl number
+{
+    fn new(a: i32, b: i32) -> number
+    {
+        ret number {
+            a: a,
+            b: b
+        };
+    }
+}
+
+impl Drop for number
+{
+}
+
+fn main() -> i32
+{
+    let x: i32 = fib(4) as i32; // compiler will warn: useless type translating
+    
+    let y: number = number::new(1, 2);
+
+    // i64 -> i32 error: high-to-low type translating
+    // but you can use #[i_know = "high-to-low type translating can cause data overflow and other undefined behaviors"] before the statement
+
+    {
+        let z: number = number::new(1, 2);
+        // compiler will add a z.drop() here
+    }
+
+    ret 0; // compiler will add a y.drop() here
+}

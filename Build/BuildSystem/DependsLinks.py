@@ -1,10 +1,11 @@
 # Copyright 2025, LiserverYang. All rights reserved.
 
+
 class TGraph:
     """
     The graph of dependency links.
     """
-    
+
     def __init__(self):
         self.Data = {}
 
@@ -12,7 +13,7 @@ class TGraph:
         """
         Add an edge (begin, end) to this graph.
         """
-        
+
         if begin not in self.Data:
             self.Data[begin] = []
         self.Data[begin].append(end)
@@ -54,7 +55,7 @@ class TGraph:
         for node in self.Data:
             if node not in visited:
                 visit(node)
-        
+
         # Check for nodes with no outgoing edges
         all_nodes = set(self.Data.keys())
         for edges in self.Data.values():
@@ -62,5 +63,5 @@ class TGraph:
         for node in all_nodes:
             if node not in visited:
                 sorted_list.append(node)
-        
+
         return sorted_list, has_cycle

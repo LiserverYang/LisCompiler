@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Core/SourcePosition.hpp"
+
 /**
  * TokenCode is the type of Token
  * For different tokens, we can define different TokenCode to make the following steps easier
@@ -37,6 +39,7 @@ enum class TokenCode
     AS,     // "as"
     SELF,   // "self"
     MOVE,   // "move"
+    TRAIT,  // "trait"
 
     /* Type keywords */
     I8,   // "i8"
@@ -47,6 +50,7 @@ enum class TokenCode
     F64,  // "f64"
     BOOL, // "bool"
     CHAR, // "char"
+    VOID, // "void"
 
     /* Literal */
     BOOLEAN_TRUE,   // "true"
@@ -89,7 +93,6 @@ enum class TokenCode
     ARROW,        // "->"
     DOUBLE_ARROW, // "=>"
     REFERENCE,    // &
-
 };
 
 // The length of all keywords
@@ -97,7 +100,7 @@ const size_t KEYWORDS_LENGTH = (size_t)TokenCode::BOOLEAN_FALSE - (size_t)TokenC
 
 // The length of all type keywords
 const size_t TYPE_KEYWORD_BEGIN = (size_t)TokenCode::I8;
-const size_t TYPE_KEYWORD_END = (size_t)TokenCode::CHAR;
+const size_t TYPE_KEYWORD_END = (size_t)TokenCode::VOID;
 
 // The procedure keyword list
 const std::array<std::string, KEYWORDS_LENGTH> keywords = {
@@ -117,6 +120,7 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "as",
     "self",
     "move",
+    "trait",
     "i8",
     "i16",
     "i32",
@@ -125,13 +129,14 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "f64",
     "bool",
     "char",
+    "void",
     "true",
     "false"};
 
-// init the hash map
 std::unordered_map<std::string, size_t> buildKeywordIndexMap();
 
-static const std::unordered_map<std::string, size_t> keywordsMap = buildKeywordIndexMap();
+// init the hash map
+static inline const std::unordered_map<std::string, size_t> keywordsMap = buildKeywordIndexMap();
 
 /*
  * Token is the smallest meaningful unit in the compiler
@@ -147,13 +152,14 @@ struct Token
     TokenCode code = TokenCode::UNDEFINED;
     // The value of this token
     std::string value = "";
-    // The file path of the token
-    std::string filePath = "";
-    // The indexs of the token
-    size_t col = 0, line = 0, pos = 0, lineStart = 0;
+    
+    SourcePosition position;
 };
 
-// TokenStream stored all tokens in one translation unit
+/**
+ * TokenStream is a stream (a vector, actually) filled with Token
+ * Some useful functions are in the Parser.
+ */
 using TokenStream = std::vector<Token>;
 
 // Here are some helper functions
@@ -186,5 +192,5 @@ inline bool isLetter(char letter)
 
 inline bool isDigit(char digit)
 {
-    return digit >= '0' && digit <= '9';
+    return (digit >= '0') && (digit <= '9');
 }

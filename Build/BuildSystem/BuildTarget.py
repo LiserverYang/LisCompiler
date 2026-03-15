@@ -11,17 +11,20 @@ from .DependsLinks import TGraph
 from .BuildContext import BuildContext
 from .BuildModule import BuildModule
 
+
 def BuildTarget(TargetPath: FileIO) -> None:
     """
     Build targets(Reflection, Editor, ...)
     """
 
-    TargetInstance: TargetBase = GetClassFromFileIO(TargetPath, TargetPath.FileName()[0:-10] + "Target")()
+    TargetInstance: TargetBase = GetClassFromFileIO(
+        TargetPath, TargetPath.FileName()[0:-10] + "Target"
+    )()
     TargetInstance.Configuration()
 
     if not TargetInstance.bBuildThisTarget:
         return
-    
+
     # Scan all modules and generic depends links
     Graph: TGraph = TGraph()
 
@@ -34,15 +37,22 @@ def BuildTarget(TargetPath: FileIO) -> None:
     # Scan
     for Folder in TargetInstance.ModulesSubFolder:
         # Get all modules in folder
-        Modules: list[str] = GetAllUnits(FileIO(os.path.dirname(TargetPath.FilePathStr) + "/" + Folder), "build")
+        Modules: list[str] = GetAllUnits(
+            FileIO(os.path.dirname(TargetPath.FilePathStr) + "/" + Folder), "build"
+        )
         # Check all modules
         for Module in Modules:
             # Get instance
             MouduleName: str = FileIO(Module).FileName()[0:-9]
-            ModuleInstance: ModuleBase = GetClassFromFileIO(FileIO(Module), MouduleName + "Module")()
+            ModuleInstance: ModuleBase = GetClassFromFileIO(
+                FileIO(Module), MouduleName + "Module"
+            )()
             ModuleInstance.Configuration()
             # Check if should build
-            if (not ModuleInstance.BuildThisModule) or ((not TargetInstance.bBuildAllmodules) and not (MouduleName in TargetInstance.BuildModulesList)):
+            if (not ModuleInstance.BuildThisModule) or (
+                (not TargetInstance.bBuildAllmodules)
+                and not (MouduleName in TargetInstance.BuildModulesList)
+            ):
                 continue
             # Add to list
             HashMap[MouduleName] = len(ModulesList)
@@ -52,7 +62,9 @@ def BuildTarget(TargetPath: FileIO) -> None:
 
     # Build depends links
     for i in range(0, len(ModulesList)):
-        Graph.AddLinks(i, [HashMap[name] for name in ModulesConfigurations[i].ModulesDependOn])
+        Graph.AddLinks(
+            i, [HashMap[name] for name in ModulesConfigurations[i].ModulesDependOn]
+        )
 
     BuildOrder, Circled = Graph.TopologicalSort()
 
@@ -74,9 +86,14 @@ def BuildTarget(TargetPath: FileIO) -> None:
     BuildContext.BuildedModule = [False] * len(BuildOrder)
     BuildContext.TargetName = TargetPath.FileName()[0:-10]
     BuildContext.ModulePath = [ModulesPathList[HashMap[i]] for i in BuildOrder]
-    BuildContext.ModuleConfiguration = [ModulesConfigurations[HashMap[i]] for i in BuildOrder]
+    BuildContext.ModuleConfiguration = [
+        ModulesConfigurations[HashMap[i]] for i in BuildOrder
+    ]
 
-    Logger.Log(LogLevelEnum.Info, f"Building target '{TargetPath.FileName()[0:-10]}', contains {len(BuildOrder)} modules wait for build.")
+    Logger.Log(
+        LogLevelEnum.Info,
+        f"Building target '{TargetPath.FileName()[0:-10]}', contains {len(BuildOrder)} modules wait for build.",
+    )
 
     for Module in BuildOrder:
         BuildModule(Module)

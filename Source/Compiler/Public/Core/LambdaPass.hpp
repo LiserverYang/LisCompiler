@@ -8,6 +8,10 @@
 
 #include <functional>
 
+/**
+ * LambdaPass provides a way to build a pass by a lambda function to process easy things
+ * Reading the content of a file, for example, is a classic scene
+ */
 class LambdaPass : public Pass
 {
 private:

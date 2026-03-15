@@ -12,6 +12,12 @@
 #include <memory>
 #include <stdexcept>
 
+/**
+ * `Lexer` is a part of compiler
+ * The task of it is to split the code, a kind of string into `Token`s, a type with more information
+ * This will be helpful to next passes
+ * The result of lexer is `TokenStream`, a vector of `Token`
+ */
 class Lexer : public Pass
 {
 public:

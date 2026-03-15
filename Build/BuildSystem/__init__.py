@@ -6,7 +6,7 @@ from .LogLevelEnum import *
 from .Logger import *
 from .FileSystem import *
 from .FilePermissionsEnum import *
-from .BuildEngine import *
+from .BuildApp import *
 from .BuildTarget import *
 from .BuildModule import *
 from .DependsLinks import *

@@ -1,3 +1,7 @@
+/**
+ * Copyright 2025, LiserverYang. All rights reserved.
+ */
+
 #include "Argparser/Argparser.hpp"
 #include "Argparser/ArgParseRule.hpp"
 #include "Argparser/Args.hpp"
@@ -40,7 +44,7 @@ protected:
         {
             parser->registRule(rule);
         }
-        
+
         return parser;
     }
 
@@ -84,7 +88,7 @@ protected:
 // Test case
 TEST_F(ArgparserTest, HandlesHelpOption)
 {
-    std::vector<const char*> argv{"app", "--help"};
+    std::vector<const char *> argv{"app", "--help"};
     auto parser = createParser(argv);
 
     EXPECT_EXIT(parser->run(), ExitedWithCode(0), "");
@@ -94,7 +98,7 @@ TEST_F(ArgparserTest, HandlesHelpOption)
 
 TEST_F(ArgparserTest, HandlesDisabledHelp)
 {
-    std::vector<const char*> argv{"app", "--help"};
+    std::vector<const char *> argv{"app", "--help"};
     auto parser = createParser(argv, false);
 
     EXPECT_THROW(parser->run(), std::runtime_error);
@@ -106,7 +110,7 @@ TEST_F(ArgparserTest, HandlesSetAsTrue)
 {
     ArgParseRule verboseRule = createBoolRule("--verbose", setAsTrue);
 
-    std::vector<const char*> argv{"app", "--verbose"};
+    std::vector<const char *> argv{"app", "--verbose"};
     auto parser = createParser(argv, true, {verboseRule});
     parser->run();
 
@@ -119,7 +123,7 @@ TEST_F(ArgparserTest, HandlesSetAsFalse)
 {
     ArgParseRule quietRule = createBoolRule("--quiet", setAsFalse, "true");
 
-    std::vector<const char*> argv{"app", "--quiet"};
+    std::vector<const char *> argv{"app", "--quiet"};
     auto parser = createParser(argv, true, {quietRule});
     parser->run();
 
@@ -132,7 +136,7 @@ TEST_F(ArgparserTest, HandlesSetAsValue)
 {
     ArgParseRule fileRule = createValueRule("--file");
 
-    std::vector<const char*> argv{"app", "--file", "config.yaml"};
+    std::vector<const char *> argv{"app", "--file", "config.yaml"};
     auto parser = createParser(argv, true, {fileRule});
     parser->run();
 
@@ -145,7 +149,7 @@ TEST_F(ArgparserTest, NormalizesArgumentKeys)
 {
     ArgParseRule rule = createBoolRule("--output-file", setAsTrue);
 
-    std::vector<const char*> argv{"app", "--output-file"};
+    std::vector<const char *> argv{"app", "--output-file"};
     auto parser = createParser(argv, true, {rule});
     parser->run();
 
@@ -157,7 +161,7 @@ TEST_F(ArgparserTest, NormalizesArgumentKeys)
 
 TEST_F(ArgparserTest, ThrowsOnUnknownOption)
 {
-    std::vector<const char*> argv{"app", "--unknown"};
+    std::vector<const char *> argv{"app", "--unknown"};
     auto parser = createParser(argv);
 
     EXPECT_THROW(parser->run(), std::runtime_error);
@@ -169,7 +173,7 @@ TEST_F(ArgparserTest, ThrowsOnMissingPositionalArg)
 {
     ArgParseRule requiredRule = createPositionalRule("input");
 
-    std::vector<const char*> argv{"app"};
+    std::vector<const char *> argv{"app"};
     auto parser = createParser(argv, true, {requiredRule});
 
     EXPECT_THROW(parser->run(), std::runtime_error);
@@ -181,7 +185,7 @@ TEST_F(ArgparserTest, ThrowsOnExtraPositionalArgs)
 {
     ArgParseRule rule = createPositionalRule("input");
 
-    std::vector<const char*> argv{"app", "file1", "file2"};
+    std::vector<const char *> argv{"app", "file1", "file2"};
     auto parser = createParser(argv, true, {rule});
 
     EXPECT_THROW(parser->run(), std::runtime_error);
@@ -195,7 +199,7 @@ TEST_F(ArgparserTest, HandlesMixedArguments)
     ArgParseRule fileRule = createValueRule("--config");
     ArgParseRule inputRule = createPositionalRule("input");
 
-    std::vector<const char*> argv{"app", "--verbose", "data.bin", "--config", "settings.cfg"};
+    std::vector<const char *> argv{"app", "--verbose", "data.bin", "--config", "settings.cfg"};
     auto parser = createParser(argv, true, {inputRule, verboseRule, fileRule});
     parser->run();
 
@@ -216,7 +220,7 @@ TEST_F(ArgparserTest, HandlesMultipleNamesForRule)
             return 1;
         }};
 
-    std::vector<const char*> argv{"app", "-h"};
+    std::vector<const char *> argv{"app", "-h"};
     auto parser = createParser(argv, false, {helpRule});
     parser->run();
 

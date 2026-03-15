@@ -3,6 +3,8 @@
  * The definations of looger system
  */
 
+#pragma once
+
 #include <string>
 #include <vector>
 
@@ -24,17 +26,19 @@ public:
 
     struct LogInfo
     {
-        const std::string *code;
-        std::string codePath;
-        std::string msg;
-        size_t line, col;
-        size_t length;
-        size_t beginPosition;
-        size_t errorId = 1;
-        bool logCode = 1;
+        const std::string *code; // the string of source code
+        std::string codePath; // the path of source code
+        std::string msg; // the error message
+        size_t line, col; // the line, column of error code
+        size_t length; // the length of error code
+        size_t beginPosition; // this is different from line and col, it is the index of the code
+        size_t errorId = 1; // the error id
+        bool logCode = true; // if print the source code
+        bool exit = true; // if exit after error
+        int exitCode = 1; // the exit code (if `exit` is `true`)
     };
 
 public:
     static void Log(LogLevel level, LogInfo info);
-    static void Log(LogLevel level, std::vector<LogInfo> info);
+    static void Log(LogLevel level, const std::vector<LogInfo> &info);
 };

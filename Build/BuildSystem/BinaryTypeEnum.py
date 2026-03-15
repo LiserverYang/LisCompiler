@@ -2,6 +2,7 @@
 
 from enum import Enum
 
+
 class BinaryTypeEnum(Enum):
     """
     Enumed all types of module target binaries.

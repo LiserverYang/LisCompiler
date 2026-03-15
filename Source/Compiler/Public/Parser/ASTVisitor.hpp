@@ -3,19 +3,53 @@
  * Definations of ASTVisitor
  */
 
-#include "Parser/AST.hpp"
+#pragma once
+
+class Program;
+class ModulePath;
+class TypeNode;
+class ImportStmt;
+class MemberVarDef;
+class StructDef;
+class TraitDef;
+class Param;
+class SelfParam;
+class MemberFunctionDef;
+class StructImpl;
+class FunctionDef;
+class GlobalVarDef;
+class CompoundStmt;
+class IfStmt;
+class ReturnStmt;
+class DeclStmt;
+class AssignStmt;
+class ExprStmt;
+class ForStmt;
+class WhileStmt;
+class LiteralExpr;
+class IdentifierExpr;
+class ModuleIdentifierExpr;
+class StructInitExpr;
+class StaticMemberCall;
+class MemberFunctionCall;
+class FunctionCall;
+class MemberAccess;
+class BinaryOp;
+class CastExpr;
+class ParenExpr;
 
 /**
  * ASTVisitor can visitor the whole AST tree
  */
 class ASTVisitor
 {
+public:
     virtual ~ASTVisitor() = default;
 
     virtual void visit(Program *node) = 0;
 
     virtual void visit(ModulePath *node) = 0;
-    virtual void visit(Type *node) = 0;
+    virtual void visit(TypeNode *node) = 0;
     virtual void visit(ImportStmt *node) = 0;
     virtual void visit(MemberVarDef *node) = 0;
     virtual void visit(StructDef *node) = 0;
@@ -25,6 +59,7 @@ class ASTVisitor
     virtual void visit(StructImpl *node) = 0;
     virtual void visit(FunctionDef *node) = 0;
     virtual void visit(GlobalVarDef *node) = 0;
+    virtual void visit(TraitDef *node) = 0;
 
     virtual void visit(CompoundStmt *node) = 0;
     virtual void visit(IfStmt *node) = 0;

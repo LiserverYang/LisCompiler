@@ -21,7 +21,7 @@ protected:
 
 public:
     Pipeline() = default;
-    ~Pipeline() = default;
+    virtual ~Pipeline() = default;
 
     void run()
     {

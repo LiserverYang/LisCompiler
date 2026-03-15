@@ -1,0 +1,3 @@
+https://github.com/Neargye/magic_enum/blob/master/include/magic_enum/magic_enum.hpp
+
+MIT License

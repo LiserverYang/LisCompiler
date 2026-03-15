@@ -2,6 +2,7 @@
 
 from enum import Enum
 
+
 class TargetTypeEnum(Enum):
     """
     Enumed all targets type.

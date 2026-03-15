@@ -9,8 +9,8 @@
 #include <memory>
 
 /**
- * Pass is a step of compile process, with the pass, we can control the whole compile process easily
- * Common Pass： Lexer, Parser and Analyzer
+ * Pass is a step of compile process. With the pass, we can control the whole compile process easily
+ * Common Pass： Lexer, Parser and SemanticAnalyzer
  */
 class Pass
 {
@@ -22,6 +22,7 @@ protected:
 public:
     Pass() = default;
     Pass(std::shared_ptr<Context> cnt) : context(cnt) {}
+    virtual ~Pass() = default;
 
     virtual void run() = 0;
 };

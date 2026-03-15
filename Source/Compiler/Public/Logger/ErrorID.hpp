@@ -9,11 +9,15 @@
 
 #define ERRORID const size_t
 
+// Lexing errors
+
 ERRORID E_UnClosedStringLiteral = 1001;
 ERRORID E_UnclosedCharLiteral = 1002;
 ERRORID E_UnknownCharacter = 1003;
 
-ERRORID E_UnexpectFinishing = 2001;
+// Parsing errors
+
+ERRORID E_UnexpectFinish = 2001;
 ERRORID E_ExpectAnIdentifier = 2002;
 ERRORID E_MutidefinedStruct = 2003;
 ERRORID E_ExpectALBRACE = 2004;
@@ -29,3 +33,4 @@ ERRORID E_ExpectAnASSIGN = 2013;
 ERRORID E_ExpectType = 2014;
 ERRORID E_ExpectedExpression = 2015;
 ERRORID E_InvalidLiteralType = 2016;
+ERRORID E_MutidefinedTrait = 2017;

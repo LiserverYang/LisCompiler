@@ -1,5 +1,6 @@
 # Copyright 2025, LiserverYang. All rights reserved.
 
+
 def FormatDuration(elapsed_time):
     total_milliseconds = round(elapsed_time * 1000)
 
@@ -14,15 +15,16 @@ def FormatDuration(elapsed_time):
     seconds = remaining % 60
 
     time_units = [
-        ('d', days),
-        ('h', hours),
-        ('m', minutes),
-        ('s', seconds),
-        ('ms', milliseconds)
+        ("d", days),
+        ("h", hours),
+        ("m", minutes),
+        ("s", seconds),
+        ("ms", milliseconds),
     ]
-    
+
     parts = [f"{value}{unit}" for unit, value in time_units if value != 0]
 
     if not parts:
         return "0ms"
-    return ''.join(parts)
+
+    return "".join(parts)

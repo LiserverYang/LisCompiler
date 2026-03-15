@@ -1,16 +1,21 @@
+// this is a language-example for lis language to show what this language looks like and some compiler behaviors
+// we recommend a new line after function def, and not new line after a control-stream condiction statement
+// a non-capital litter with the first letter of a type, that looks nice
+
+
 fn fib(n: i32) -> i32
-{
-    if (n == 0 || n == 1)
-    {
+{    
+    if n == 0 || n == 1 { 
         ret 1;
     }
 
     ret fib(n - 2) + fib(n - 1);
 }
 
-fn main()
+fn main() -> i32
 {
-    let x: i32 = fib(4);
+    let y: i32 = 54;
+    let x: i32 = fib(y) + y;
 
     ret 0;
 }

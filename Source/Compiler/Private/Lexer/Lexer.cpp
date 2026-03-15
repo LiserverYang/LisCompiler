@@ -1,4 +1,9 @@
+/**
+ * Copyright 2025, LiserverYang. All rights reserved.
+ */
+
 #include "Lexer/Lexer.hpp"
+#include "Lexer/TokenStreamPrinter.hpp"
 #include "Logger/ErrorID.hpp"
 #include "Logger/Logger.hpp"
 #include <iostream>
@@ -64,6 +69,11 @@ void Lexer::run()
 
         // handle operators and delimiters as fallthrough
         tokens.push_back(lexOperatorOrDelimiter());
+    }
+
+    if (context->args->getArg("print_tokenstream").compare("true") == 0)
+    {
+        PrintTokenStream(tokens);
     }
 }
 
@@ -152,11 +162,11 @@ Token Lexer::lexStringLiteral()
 
     Token token;
     token.code = TokenCode::STRING_LITERAL;
-    token.filePath = context->filePath;
-    token.line = line;
-    token.col = column;
-    token.pos = index;
-    token.lineStart = lineStart;
+    token.position.filePath = &context->filePath;
+    token.position.line = line;
+    token.position.col = column;
+    token.position.pos = index;
+    token.position.lineStart = lineStart;
 
     // skip opening quote
     index++;
@@ -229,11 +239,11 @@ Token Lexer::lexCharLiteral()
 
     Token token;
     token.code = TokenCode::CHAR_LITERAL;
-    token.filePath = context->filePath;
-    token.line = line;
-    token.col = column;
-    token.pos = index;
-    token.lineStart = lineStart;
+    token.position.filePath = &context->filePath;
+    token.position.line = line;
+    token.position.col = column;
+    token.position.pos = index;
+    token.position.lineStart = lineStart;
 
     // skip opening quote
     index++;
@@ -293,11 +303,11 @@ Token Lexer::lexNumber()
     std::string &source = context->fileValue;
 
     Token token;
-    token.filePath = context->filePath;
-    token.line = line;
-    token.col = column;
-    token.pos = index;
-    token.lineStart = lineStart;
+    token.position.filePath = &context->filePath;
+    token.position.line = line;
+    token.position.col = column;
+    token.position.pos = index;
+    token.position.lineStart = lineStart;
 
     std::string value;
     bool isFloat = false;     // flag for decimal points
@@ -365,11 +375,11 @@ Token Lexer::lexIdentifier()
     std::string &source = context->fileValue;
 
     Token token;
-    token.filePath = context->filePath;
-    token.line = line;
-    token.col = column;
-    token.pos = index;
-    token.lineStart = lineStart;
+    token.position.filePath = &context->filePath;
+    token.position.line = line;
+    token.position.col = column;
+    token.position.pos = index;
+    token.position.lineStart = lineStart;
 
     std::string value;
     // accumulate alphanumeric + underscore characters
@@ -411,11 +421,11 @@ Token Lexer::lexOperatorOrDelimiter()
     std::string &source = context->fileValue;
 
     Token token;
-    token.filePath = context->filePath;
-    token.line = line;
-    token.col = column;
-    token.pos = index;
-    token.lineStart = lineStart;
+    token.position.filePath = &context->filePath;
+    token.position.line = line;
+    token.position.col = column;
+    token.position.pos = index;
+    token.position.lineStart = lineStart;
 
     char current = source[index];
 

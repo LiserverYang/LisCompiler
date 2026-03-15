@@ -2,6 +2,7 @@
 
 from enum import Enum
 
+
 class BuildTypeEnum(Enum):
     """
     Enumed all kinds of build type.

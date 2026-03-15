@@ -11,8 +11,10 @@
 #include <vector>
 
 #include "Parser/AST.hpp"
+#include "Parser/ASTPrinter.hpp"
 
-// 辅助函数：获取可读的类型名
+namespace detail
+{
 std::string demangle(const char *mangled)
 {
     int status;
@@ -21,7 +23,7 @@ std::string demangle(const char *mangled)
     {
         std::string result(demangled);
         free(demangled);
-        // 移除命名空间
+        // remove namespace
         size_t pos = result.find_last_of(':');
         if (pos != std::string::npos)
         {
@@ -32,7 +34,6 @@ std::string demangle(const char *mangled)
     return mangled;
 }
 
-// 辅助函数：格式化指针地址
 std::string formatAddress(const void *addr)
 {
     std::stringstream ss;
@@ -40,307 +41,369 @@ std::string formatAddress(const void *addr)
        << reinterpret_cast<uintptr_t>(addr);
     return ss.str();
 }
+} // namespace detail
 
-void printAST(const ASTNode *node, const std::string &prefix = "", bool isLast = true);
-
-// 处理类型节点
-void printTypeInfo(const Type *type, std::ostream &os)
+void ASTPrinter::printCommon(ASTNode *node)
 {
-    if (!type)
-    {
-        os << "<null-type>";
-        return;
-    }
+    std::string nodeType = detail::demangle(typeid(*node).name());
+    std::string address = detail::formatAddress(node);
+    os << "\033[38;5;10m" << nodeType << "\033[0m"
+       << " <" << node->position.line << ":" << node->position.col << ":" << node->length << ">"
+       << " "
+       << "\033[38;5;3m" << address << "\033[0m";
+}
 
+void ASTPrinter::visit(Program *node)
+{
+    printCommon(node);
+    os << " [Program]";
+}
+
+void ASTPrinter::visit(ModulePath *node)
+{
+    printCommon(node);
+    os << " path: \033[38;5;2m'";
+    for (size_t i = 0; i < node->pathSegments.size(); ++i)
+    {
+        if (i > 0)
+            os << "::";
+        os << node->pathSegments[i];
+    }
+    os << "'\033[0m";
+}
+
+void ASTPrinter::visit(TypeNode *node)
+{
+    printCommon(node);
+    os << " ";
     os << "\033[38;5;14m";
 
-    const std::string reference = type->isReference ? (" \033[38;5;14mreference\033[0m ") : "";
+    std::string reference = node->isReference ? (" \033[38;5;14mreference\033[0m ") : "";
 
-    switch (type->kind)
+    switch (node->kind)
     {
-    case Type::TypeKind::Primitive:
-        os << "PrimitiveType\033[0m" << reference << "\033[38;5;2m'" << type->typeName << "'";
+    case TypeNode::TypeKind::Primitive:
+        os << "PrimitiveType\033[0m" << reference << "\033[38;5;2m'" << node->typeName << "'";
         break;
-    case Type::TypeKind::Custom:
-        os << "CustomType\033[0m \033[38;5;2m'" << type->typeName << "'";
+    case TypeNode::TypeKind::Custom:
+        os << "CustomType\033[0m \033[38;5;2m'" << node->typeName << "'";
         break;
-    case Type::TypeKind::ModuleQualified:
+    case TypeNode::TypeKind::ModuleQualified:
         os << "ModuleQualifiedType\033[0m \033[38;5;2m'";
-        if (type->modulePath)
+        if (node->modulePath)
         {
-            for (const auto &seg : type->modulePath->pathSegments)
+            for (auto &seg : node->modulePath->pathSegments)
             {
                 os << seg << "::";
             }
         }
-        os << type->typeName << "'\033[0m";
+        os << node->typeName << "'\033[0m";
         break;
     }
 }
 
-// 处理各种AST节点
-void printNodeInfo(const ASTNode *node, std::ostream &os)
+void ASTPrinter::visit(ImportStmt *node)
 {
-    if (!node)
+    printCommon(node);
+    os << " import: \033[38;5;2m'";
+    if (node->modulePath)
     {
-        os << "<null-node>";
-        return;
+        for (auto &seg : node->modulePath->pathSegments)
+        {
+            os << seg << "::";
+        }
     }
+    os << "'\033[0m";
+    if (node->symbols)
+    {
+        os << " symbols: \033[38;5;14m[";
+        for (auto &sym : *node->symbols)
+        {
+            os << sym << ", ";
+        }
+        os << "]\033[0m";
+    }
+    if (node->alias)
+    {
+        os << " alias: \033[38;5;2m" << *node->alias << "\033[0m";
+    }
+}
 
-    std::string nodeType = demangle(typeid(*node).name());
-    std::string address = formatAddress(node);
+void ASTPrinter::visit(MemberVarDef *node)
+{
+    printCommon(node);
+    os << " " << "\033[38;5;14m" << (node->isPublic ? "public " : "private ") << "\033[0m"
+       << "\033[38;5;2m" << node->name << "\033[0m" << ": ";
+    if (node->type)
+    {
+        node->type->accept(this);
+    }
+}
 
-    os << "\033[38;5;10m" << nodeType << "\033[0m" << " <" << node->line << ":" << node->col << ":" << node->length << ">" << " " << "\033[38;5;3m" << address << "\033[0m";
+void ASTPrinter::visit(StructDef *node)
+{
+    printCommon(node);
+    os << " struct \033[38;5;2m" << node->name << "\033[0m";
+}
 
-    // 根据节点类型添加附加信息
-    if (auto p = dynamic_cast<const Program *>(node))
+void ASTPrinter::visit(Param *node)
+{
+    printCommon(node);
+    os << " " << node->name << ": ";
+    if (node->type && *node->type)
     {
-        os << " [Program]";
+        (*node->type)->accept(this);
     }
-    else if (auto m = dynamic_cast<const ModulePath *>(node))
+    else
     {
-        os << " path: \033[38;5;2m'";
-        for (size_t i = 0; i < m->pathSegments.size(); ++i)
+        os << "<inferred>";
+    }
+}
+
+void ASTPrinter::visit(SelfParam *node)
+{
+    printCommon(node);
+    os << " self: " << (node->isRef ? "ref " : "")
+       << (node->isMut ? "mut " : "");
+    if (node->type && *node->type)
+    {
+        (*node->type)->accept(this);
+    }
+}
+
+void ASTPrinter::visit(MemberFunctionDef *node)
+{
+    printCommon(node);
+    os << " fn " << node->name << "()";
+}
+
+void ASTPrinter::visit(StructImpl *node)
+{
+    printCommon(node);
+    os << " impl " << node->structName;
+
+    if (node->traitName)
+    {
+        os << " trait " << node->traitName.value();
+    }
+}
+
+void ASTPrinter::visit(TraitDef *node)
+{
+    printCommon(node);
+    os << " trait " << node->name;
+}
+
+void ASTPrinter::visit(FunctionDef *node)
+{
+    printCommon(node);
+    os << " fn " << node->name << "()";
+}
+
+void ASTPrinter::visit(GlobalVarDef *node)
+{
+    printCommon(node);
+    os << " " << (node->isMove ? "move " : "") << node->name << ": ";
+    if (node->type && *node->type)
+    {
+        (*node->type)->accept(this);
+    }
+    else
+    {
+        os << "<inferred>";
+    }
+}
+
+void ASTPrinter::visit(CompoundStmt *node)
+{
+    printCommon(node);
+    os << " [CompoundStmt]";
+}
+
+void ASTPrinter::visit(IfStmt *node)
+{
+    printCommon(node);
+    os << " [IfStmt]";
+}
+
+void ASTPrinter::visit(ReturnStmt *node)
+{
+    printCommon(node);
+    os << " [ReturnStmt]";
+}
+
+void ASTPrinter::visit(DeclStmt *node)
+{
+    printCommon(node);
+    os << " " << (node->isMutable ? "mut " : "") << node->name << ": ";
+    if (node->type && *node->type)
+    {
+        (*node->type)->accept(this);
+    }
+    else
+    {
+        os << "<inferred>";
+    }
+}
+
+void ASTPrinter::visit(AssignStmt *node)
+{
+    printCommon(node);
+    os << " [AssignStmt]";
+}
+
+void ASTPrinter::visit(ExprStmt *node)
+{
+    printCommon(node);
+    os << " [ExprStmt]";
+}
+
+void ASTPrinter::visit(ForStmt *node)
+{
+    printCommon(node);
+    os << " for " << node->loopVar;
+}
+
+void ASTPrinter::visit(WhileStmt *node)
+{
+    printCommon(node);
+    os << " [WhileStmt]";
+}
+
+void ASTPrinter::visit(LiteralExpr *node)
+{
+    printCommon(node);
+    os << " literal: " << node->value << " (";
+    switch (node->kind)
+    {
+    case LiteralExpr::LiteralType::Int: os << "int"; break;
+    case LiteralExpr::LiteralType::Float: os << "float"; break;
+    case LiteralExpr::LiteralType::String: os << "string"; break;
+    case LiteralExpr::LiteralType::Bool: os << "bool"; break;
+    case LiteralExpr::LiteralType::Char: os << "char"; break;
+    }
+    os << ")";
+}
+
+void ASTPrinter::visit(IdentifierExpr *node)
+{
+    printCommon(node);
+    os << " identifier: " << node->name;
+}
+
+void ASTPrinter::visit(ModuleIdentifierExpr *node)
+{
+    printCommon(node);
+    os << " module_id: ";
+    if (node->modulePath)
+    {
+        for (auto &seg : node->modulePath->pathSegments)
         {
-            if (i > 0)
-                os << "::";
-            os << m->pathSegments[i];
-        }
-        os << "'\033[0m";
-    }
-    else if (auto t = dynamic_cast<const Type *>(node))
-    {
-        os << " ";
-        printTypeInfo(t, os);
-    }
-    else if (auto imp = dynamic_cast<const ImportStmt *>(node))
-    {
-        os << " import: \033[38;5;2m'";
-        if (imp->modulePath)
-        {
-            for (const auto &seg : imp->modulePath->pathSegments)
-            {
-                os << seg << "::";
-            }
-        }
-        os << "'\033[0m";
-        if (imp->symbols)
-        {
-            os << " symbols: \033[38;5;14m[";
-            for (const auto &sym : *imp->symbols)
-            {
-                os << sym << ", ";
-            }
-            os << "]\033[0m";
-        }
-        if (imp->alias)
-        {
-            os << " alias: \033[38;5;2m" << *imp->alias << "\033[0m";
+            os << seg << "::";
         }
     }
-    else if (auto mv = dynamic_cast<const MemberVarDef *>(node))
+    os << node->name;
+}
+
+void ASTPrinter::visit(StructInitExpr *node)
+{
+    printCommon(node);
+    os << " struct_init: ";
+    if (node->structType)
     {
-        os << " " << "\033[38;5;14m" << (mv->isPublic ? "public " : "private ") << "\033[0m"
-           << "\033[38;5;2m" << mv->name << "\033[0m" << ": ";
-        printTypeInfo(mv->type.get(), os);
+        node->structType->accept(this);
     }
-    else if (auto sd = dynamic_cast<const StructDef *>(node))
+}
+
+void ASTPrinter::visit(StaticMemberCall *node)
+{
+    printCommon(node);
+    os << " static_call: " << node->methodName;
+}
+
+void ASTPrinter::visit(MemberFunctionCall *node)
+{
+    printCommon(node);
+    os << " method_call: " << node->methodName;
+}
+
+void ASTPrinter::visit(FunctionCall *node)
+{
+    printCommon(node);
+    os << " function_call";
+}
+
+void ASTPrinter::visit(MemberAccess *node)
+{
+    printCommon(node);
+    os << " member_access: " << node->memberName;
+}
+
+void ASTPrinter::visit(BinaryOp *node)
+{
+    printCommon(node);
+    os << " binary_op: " << node->op;
+}
+
+void ASTPrinter::visit(CastExpr *node)
+{
+    printCommon(node);
+    os << " cast: ";
+    if (node->targetType)
     {
-        os << " struct \033[38;5;2m" << sd->name << "\033[0m";
+        node->targetType->accept(this);
     }
-    else if (auto p = dynamic_cast<const Param *>(node))
-    {
-        os << " " << p->name << ": ";
-        if (p->type && *p->type)
-        {
-            printTypeInfo(p->type->get(), os);
-        }
-        else
-        {
-            os << "<inferred>";
-        }
-    }
-    else if (auto sp = dynamic_cast<const SelfParam *>(node))
-    {
-        os << " self: " << (sp->isRef ? "ref " : "")
-           << (sp->isMut ? "mut " : "");
-        if (sp->type && *sp->type)
-        {
-            printTypeInfo(sp->type->get(), os);
-        }
-    }
-    else if (auto mf = dynamic_cast<const MemberFunctionDef *>(node))
-    {
-        os << " fn " << mf->name << "()";
-    }
-    else if (auto si = dynamic_cast<const StructImpl *>(node))
-    {
-        os << " impl " << si->structName;
-    }
-    else if (auto fd = dynamic_cast<const FunctionDef *>(node))
-    {
-        os << " fn " << fd->name << "()";
-    }
-    else if (auto gv = dynamic_cast<const GlobalVarDef *>(node))
-    {
-        os << " " << (gv->isMove ? "move " : "") << gv->name << ": ";
-        if (gv->type && *gv->type)
-        {
-            printTypeInfo(gv->type->get(), os);
-        }
-        else
-        {
-            os << "<inferred>";
-        }
-    }
-    else if (auto cs = dynamic_cast<const CompoundStmt *>(node))
-    {
-        os << " [CompoundStmt]";
-    }
-    else if (auto is = dynamic_cast<const IfStmt *>(node))
-    {
-        os << " [IfStmt]";
-    }
-    else if (auto rs = dynamic_cast<const ReturnStmt *>(node))
-    {
-        os << " [ReturnStmt]";
-    }
-    else if (auto ds = dynamic_cast<const DeclStmt *>(node))
-    {
-        os << " " << (ds->isMutable ? "mut " : "") << ds->name << ": ";
-        if (ds->type && *ds->type)
-        {
-            printTypeInfo(ds->type->get(), os);
-        }
-        else
-        {
-            os << "<inferred>";
-        }
-    }
-    else if (auto as = dynamic_cast<const AssignStmt *>(node))
-    {
-        os << " [AssignStmt]";
-    }
-    else if (auto es = dynamic_cast<const ExprStmt *>(node))
-    {
-        os << " [ExprStmt]";
-    }
-    else if (auto fs = dynamic_cast<const ForStmt *>(node))
-    {
-        os << " for " << fs->loopVar;
-    }
-    else if (auto ws = dynamic_cast<const WhileStmt *>(node))
-    {
-        os << " [WhileStmt]";
-    }
-    else if (auto lit = dynamic_cast<const LiteralExpr *>(node))
-    {
-        os << " literal: " << lit->value << " (";
-        switch (lit->type)
-        {
-        case LiteralExpr::LiteralType::Int: os << "int"; break;
-        case LiteralExpr::LiteralType::Float: os << "float"; break;
-        case LiteralExpr::LiteralType::String: os << "string"; break;
-        case LiteralExpr::LiteralType::Bool: os << "bool"; break;
-        case LiteralExpr::LiteralType::Char: os << "char"; break;
-        }
-        os << ")";
-    }
-    else if (auto id = dynamic_cast<const IdentifierExpr *>(node))
-    {
-        os << " identifier: " << id->name;
-    }
-    else if (auto mid = dynamic_cast<const ModuleIdentifierExpr *>(node))
-    {
-        os << " module_id: ";
-        if (mid->modulePath)
-        {
-            for (const auto &seg : mid->modulePath->pathSegments)
-            {
-                os << seg << "::";
-            }
-        }
-        os << mid->name;
-    }
-    else if (auto si = dynamic_cast<const StructInitExpr *>(node))
-    {
-        os << " struct_init: ";
-        printTypeInfo(si->structType.get(), os);
-    }
-    else if (auto smc = dynamic_cast<const StaticMemberCall *>(node))
-    {
-        os << " static_call: " << smc->methodName;
-    }
-    else if (auto mfc = dynamic_cast<const MemberFunctionCall *>(node))
-    {
-        os << " method_call: " << mfc->methodName;
-    }
-    else if (auto fc = dynamic_cast<const FunctionCall *>(node))
-    {
-        os << " function_call";
-    }
-    else if (auto ma = dynamic_cast<const MemberAccess *>(node))
-    {
-        os << " member_access: " << ma->memberName;
-    }
-    else if (auto bin = dynamic_cast<const BinaryOp *>(node))
-    {
-        os << " binary_op: " << bin->op;
-    }
-    else if (auto cast = dynamic_cast<const CastExpr *>(node))
-    {
-        os << " cast: ";
-        printTypeInfo(cast->targetType.get(), os);
-    }
-    else if (auto paren = dynamic_cast<const ParenExpr *>(node))
-    {
-        os << " [ParenExpr]";
-    }
+}
+
+void ASTPrinter::visit(ParenExpr *node)
+{
+    printCommon(node);
+    os << " [ParenExpr]";
 }
 
 // 获取节点的子节点列表
-std::vector<const ASTNode *> getChildren(const ASTNode *node)
+std::vector<ASTNode *> getChildren(ASTNode *node)
 {
-    std::vector<const ASTNode *> children;
+    std::vector<ASTNode *> children;
 
     if (!node)
         return children;
 
-    if (auto p = dynamic_cast<const Program *>(node))
+    if (auto p = dynamic_cast<Program *>(node))
     {
-        for (const auto &stmt : p->globalStatements)
+        for (auto &stmt : p->globalStatements)
         {
             children.push_back(stmt.get());
         }
     }
-    else if (auto t = dynamic_cast<const Type *>(node))
+    else if (auto t = dynamic_cast<TypeNode *>(node))
     {
         if (t->modulePath)
         {
             children.push_back(t->modulePath.get());
         }
     }
-    else if (auto imp = dynamic_cast<const ImportStmt *>(node))
+    else if (auto imp = dynamic_cast<ImportStmt *>(node))
     {
         if (imp->modulePath)
         {
             children.push_back(imp->modulePath.get());
         }
     }
-    else if (auto sd = dynamic_cast<const StructDef *>(node))
+    else if (auto sd = dynamic_cast<StructDef *>(node))
     {
-        for (const auto &member : sd->members)
+        for (auto &member : sd->members)
         {
             children.push_back(member.get());
         }
     }
-    else if (auto mf = dynamic_cast<const MemberFunctionDef *>(node))
+    else if (auto mf = dynamic_cast<MemberFunctionDef *>(node))
     {
         if (mf->selfParam && *mf->selfParam)
         {
             children.push_back(mf->selfParam->get());
         }
-        for (const auto &param : mf->params)
+        for (auto &param : mf->params)
         {
             children.push_back(param.get());
         }
@@ -348,21 +411,21 @@ std::vector<const ASTNode *> getChildren(const ASTNode *node)
         {
             children.push_back(mf->returnType->get());
         }
-        if (mf->body)
+        if (mf->body && mf->body.value())
         {
-            children.push_back(mf->body.get());
+            children.push_back(mf->body.value().get());
         }
     }
-    else if (auto si = dynamic_cast<const StructImpl *>(node))
+    else if (auto si = dynamic_cast<StructImpl *>(node))
     {
-        for (const auto &method : si->methods)
+        for (auto &method : si->methods)
         {
             children.push_back(method.get());
         }
     }
-    else if (auto fd = dynamic_cast<const FunctionDef *>(node))
+    else if (auto fd = dynamic_cast<FunctionDef *>(node))
     {
-        for (const auto &param : fd->params)
+        for (auto &param : fd->params)
         {
             children.push_back(param.get());
         }
@@ -375,7 +438,7 @@ std::vector<const ASTNode *> getChildren(const ASTNode *node)
             children.push_back(fd->body.get());
         }
     }
-    else if (auto gv = dynamic_cast<const GlobalVarDef *>(node))
+    else if (auto gv = dynamic_cast<GlobalVarDef *>(node))
     {
         if (gv->type && *gv->type)
         {
@@ -386,14 +449,14 @@ std::vector<const ASTNode *> getChildren(const ASTNode *node)
             children.push_back(gv->initValue.get());
         }
     }
-    else if (auto cs = dynamic_cast<const CompoundStmt *>(node))
+    else if (auto cs = dynamic_cast<CompoundStmt *>(node))
     {
-        for (const auto &stmt : cs->statements)
+        for (auto &stmt : cs->statements)
         {
             children.push_back(stmt.get());
         }
     }
-    else if (auto is = dynamic_cast<const IfStmt *>(node))
+    else if (auto is = dynamic_cast<IfStmt *>(node))
     {
         if (is->condition)
             children.push_back(is->condition.get());
@@ -404,14 +467,14 @@ std::vector<const ASTNode *> getChildren(const ASTNode *node)
             children.push_back(is->elseBranch->get());
         }
     }
-    else if (auto rs = dynamic_cast<const ReturnStmt *>(node))
+    else if (auto rs = dynamic_cast<ReturnStmt *>(node))
     {
         if (rs->returnValue && *rs->returnValue)
         {
             children.push_back(rs->returnValue->get());
         }
     }
-    else if (auto ds = dynamic_cast<const DeclStmt *>(node))
+    else if (auto ds = dynamic_cast<DeclStmt *>(node))
     {
         if (ds->type && *ds->type)
         {
@@ -422,111 +485,114 @@ std::vector<const ASTNode *> getChildren(const ASTNode *node)
             children.push_back(ds->initValue.value().get());
         }
     }
-    else if (auto as = dynamic_cast<const AssignStmt *>(node))
+    else if (auto as = dynamic_cast<AssignStmt *>(node))
     {
         if (as->target)
             children.push_back(as->target.get());
         if (as->value)
             children.push_back(as->value.get());
     }
-    else if (auto es = dynamic_cast<const ExprStmt *>(node))
+    else if (auto es = dynamic_cast<ExprStmt *>(node))
     {
         if (es->expression)
             children.push_back(es->expression.get());
     }
-    else if (auto fs = dynamic_cast<const ForStmt *>(node))
+    else if (auto fs = dynamic_cast<ForStmt *>(node))
     {
         if (fs->iterable)
             children.push_back(fs->iterable.get());
         if (fs->body)
             children.push_back(fs->body.get());
     }
-    else if (auto ws = dynamic_cast<const WhileStmt *>(node))
+    else if (auto ws = dynamic_cast<WhileStmt *>(node))
     {
         if (ws->condition)
             children.push_back(ws->condition.get());
         if (ws->body)
             children.push_back(ws->body.get());
     }
-    else if (auto si = dynamic_cast<const StructInitExpr *>(node))
+    else if (auto si = dynamic_cast<StructInitExpr *>(node))
     {
         children.push_back(si->structType.get());
-        for (const auto &[name, expr] : si->memberInits)
+        for (auto &[name, expr] : si->memberInits)
         {
             children.push_back(expr.get());
         }
     }
-    else if (auto smc = dynamic_cast<const StaticMemberCall *>(node))
+    else if (auto smc = dynamic_cast<StaticMemberCall *>(node))
     {
         children.push_back(smc->classType.get());
-        for (const auto &arg : smc->arguments)
+        for (auto &arg : smc->arguments)
         {
             children.push_back(arg.get());
         }
     }
-    else if (auto mfc = dynamic_cast<const MemberFunctionCall *>(node))
+    else if (auto mfc = dynamic_cast<MemberFunctionCall *>(node))
     {
         if (mfc->object)
             children.push_back(mfc->object.get());
-        for (const auto &arg : mfc->arguments)
+        for (auto &arg : mfc->arguments)
         {
             children.push_back(arg.get());
         }
     }
-    else if (auto fc = dynamic_cast<const FunctionCall *>(node))
+    else if (auto fc = dynamic_cast<FunctionCall *>(node))
     {
         if (fc->function)
             children.push_back(fc->function.get());
-        for (const auto &arg : fc->arguments)
+        for (auto &arg : fc->arguments)
         {
             children.push_back(arg.get());
         }
     }
-    else if (auto ma = dynamic_cast<const MemberAccess *>(node))
+    else if (auto ma = dynamic_cast<MemberAccess *>(node))
     {
         if (ma->object)
             children.push_back(ma->object.get());
     }
-    else if (auto bin = dynamic_cast<const BinaryOp *>(node))
+    else if (auto bin = dynamic_cast<BinaryOp *>(node))
     {
         if (bin->left)
             children.push_back(bin->left.get());
         if (bin->right)
             children.push_back(bin->right.get());
     }
-    else if (auto cast = dynamic_cast<const CastExpr *>(node))
+    else if (auto cast = dynamic_cast<CastExpr *>(node))
     {
         children.push_back(cast->targetType.get());
         if (cast->expression)
             children.push_back(cast->expression.get());
     }
-    else if (auto paren = dynamic_cast<const ParenExpr *>(node))
+    else if (auto paren = dynamic_cast<ParenExpr *>(node))
     {
         if (paren->expression)
             children.push_back(paren->expression.get());
+    }
+    else if (auto td = dynamic_cast<TraitDef *>(node))
+    {
+        for (auto &method : td->methods)
+        {
+            children.push_back(method.get());
+        }
     }
 
     return children;
 }
 
-// 主打印函数
-void printAST(const ASTNode *node, const std::string &prefix, bool isLast)
+void printAST(ASTNode *node, std::string prefix, bool isLast)
 {
     if (!node)
         return;
 
-    // 打印当前节点
     std::cout << "\033[38;5;4m" << prefix;
     std::cout << (isLast ? "`-" : "|-") << "\033[0m";
 
-    std::stringstream info;
-    printNodeInfo(node, info);
-    std::cout << info.str() << std::endl;
+    ASTPrinter printer;
+    node->accept(&printer);
+    std::cout << std::endl;
 
-    // 获取子节点
     auto children = getChildren(node);
 
-    // 递归打印子节点
     std::string newPrefix = prefix + (isLast ? "  " : "| ");
     for (size_t i = 0; i < children.size(); ++i)
     {
@@ -537,8 +603,10 @@ void printAST(const ASTNode *node, const std::string &prefix, bool isLast)
     std::cout << "\033[0m";
 }
 
-// 入口函数
-void printAST(const Program &program)
+void printAST(Program &program)
 {
-    printAST(&program, "", true);
+    for (auto &node : program.globalStatements)
+    {
+        printAST(node.get(), "", true);
+    }
 }

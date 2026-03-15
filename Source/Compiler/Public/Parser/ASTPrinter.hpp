@@ -11,26 +11,52 @@
 #include <vector>
 
 #include "Parser/AST.hpp"
+#include "Parser/ASTVisitor.hpp"
 
-// 辅助函数：获取可读的类型名
-std::string demangle(const char *mangled);
+class ASTPrinter : public ASTVisitor
+{
+private:
+    std::ostream &os;
+    void printCommon(ASTNode *node);
 
-// 辅助函数：格式化指针地址
-std::string formatAddress(const void *addr);
+public:
+    ASTPrinter(std::ostream &os = std::cout) : os(os) {}
 
-void printAST(const ASTNode *node, const std::string &prefix = "", bool isLast = true);
+    void visit(Program *node) override;
+    void visit(ModulePath *node) override;
+    void visit(TypeNode *node) override;
+    void visit(ImportStmt *node) override;
+    void visit(MemberVarDef *node) override;
+    void visit(StructDef *node) override;
+    void visit(Param *node) override;
+    void visit(SelfParam *node) override;
+    void visit(MemberFunctionDef *node) override;
+    void visit(StructImpl *node) override;
+    void visit(FunctionDef *node) override;
+    void visit(GlobalVarDef *node) override;
+    void visit(CompoundStmt *node) override;
+    void visit(IfStmt *node) override;
+    void visit(ReturnStmt *node) override;
+    void visit(DeclStmt *node) override;
+    void visit(AssignStmt *node) override;
+    void visit(ExprStmt *node) override;
+    void visit(ForStmt *node) override;
+    void visit(WhileStmt *node) override;
+    void visit(LiteralExpr *node) override;
+    void visit(IdentifierExpr *node) override;
+    void visit(ModuleIdentifierExpr *node) override;
+    void visit(StructInitExpr *node) override;
+    void visit(StaticMemberCall *node) override;
+    void visit(MemberFunctionCall *node) override;
+    void visit(FunctionCall *node) override;
+    void visit(MemberAccess *node) override;
+    void visit(BinaryOp *node) override;
+    void visit(CastExpr *node) override;
+    void visit(ParenExpr *node) override;
+    void visit(TraitDef *node) override;
+};
 
-// 处理类型节点
-void printTypeInfo(const Type *type, std::ostream &os);
+std::vector<ASTNode *> getChildren(ASTNode *node);
 
-// 处理各种AST节点
-void printNodeInfo(const ASTNode *node, std::ostream &os);
-
-// 获取节点的子节点列表
-std::vector<const ASTNode *> getChildren(const ASTNode *node);
-
-// 主打印函数
-void printAST(const ASTNode *node, const std::string &prefix, bool isLast);
-
-// 入口函数
-void printAST(const Program &program);
+void printAST(ASTNode *node, std::string prefix, bool isLast);
+void printAST(Program &program);

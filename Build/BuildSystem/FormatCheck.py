@@ -2,5 +2,6 @@
 
 import os
 
+
 def CheckFormat(FileName: str) -> int:
     return os.system(f"clang-format --Werror --dry-run {FileName}")

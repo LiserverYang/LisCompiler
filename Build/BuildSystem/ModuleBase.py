@@ -2,6 +2,7 @@
 
 from .BinaryTypeEnum import BinaryTypeEnum
 
+
 class ModuleBase:
     """
     The base class of all modules.
@@ -12,7 +13,7 @@ class ModuleBase:
 
     # Is or not build this module
     BuildThisModule: bool = True
-    
+
     # All modules despend on
     ModulesDependOn: list[str] = []
 

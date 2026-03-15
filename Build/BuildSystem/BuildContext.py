@@ -5,8 +5,9 @@ from .TargetBase import TargetBase
 from .BuildTypeEnum import BuildTypeEnum
 from .SystemEnum import SystemEnum
 
-from typing import Tuple, List
+from typing import List
 from argparse import Namespace
+
 
 class TBuildContext:
     """
@@ -34,5 +35,6 @@ class TBuildContext:
     GxxVersionStr: str = "0.0.1"
 
     Arguments: Namespace
+
 
 BuildContext: TBuildContext = TBuildContext()

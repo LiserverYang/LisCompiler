@@ -35,7 +35,8 @@ protected:
     size_t snapshot = 0;
     TokenStream *tokenStream = nullptr;
 
-    std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char"};
+    std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char", "void"};
+    std::unordered_set<std::string> knownTraits = {};
 
     /* Helper functions */
 
@@ -54,7 +55,7 @@ protected:
         if (pos >= tokenStream->size())
         {
             Logger::LogInfo logInfo;
-            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpect finishing", E_UnexpectFinishing);
+            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpeced finish", E_UnexpectFinish);
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
         }
@@ -67,7 +68,7 @@ protected:
         if (finished())
         {
             Logger::LogInfo logInfo;
-            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpect finishing");
+            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpect finish", E_UnexpectFinish);
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
         }
@@ -134,10 +135,10 @@ protected:
     {
         logInfo.codePath = context->filePath;
         logInfo.code = &context->fileValue;
-        logInfo.col = token.col;
-        logInfo.line = token.line;
+        logInfo.col = token.position.col;
+        logInfo.line = token.position.line;
         logInfo.length = token.value.size();
-        logInfo.beginPosition = token.lineStart;
+        logInfo.beginPosition = token.position.lineStart;
         logInfo.msg = msg;
         logInfo.errorId = errorId;
     }
@@ -154,28 +155,22 @@ protected:
 
     void setNodePosition(ASTNode *node)
     {
-        node->line = currentToken().line;
-        node->col = currentToken().col;
-        node->lineStart = currentToken().lineStart;
+        node->position = currentToken().position;
         node->length = currentToken().value.length();
     }
 
     void copyNodePosition(ASTNode *dest, const ASTNode *src)
     {
-        dest->line = src->line;
-        dest->col = src->col;
-        dest->lineStart = src->lineStart;
+        dest->position = src->position;
         dest->length = src->length;
     }
 
-    bool isTypeStart();
     bool isLiteral();
 
     int getPrecedence(TokenCode type);
 
     /* Parser functions */
     std::vector<std::unique_ptr<Param>> parseParameterList();
-
     std::unique_ptr<ASTNode> parseGlobalStatement();
     // std::unique_ptr<ImportStmt> parseImptStatement();
     std::unique_ptr<StructDef> parseStructDefinition();
@@ -184,7 +179,7 @@ protected:
     std::unique_ptr<GlobalVarDef> parseGlobalVariableDefinition();
     // std::unique_ptr<ModulePath> parseModulePath();
     std::unique_ptr<MemberVarDef> parseMemberVariableDefinition();
-    std::unique_ptr<Type> parseType();
+    std::unique_ptr<TypeNode> parseType();
     std::unique_ptr<MemberFunctionDef> parseMemberFunctionDefinition();
     std::unique_ptr<Param> parseParameter();
     std::unique_ptr<CompoundStmt> parseCompoundStatement();
@@ -200,10 +195,11 @@ protected:
     std::vector<std::unique_ptr<Expr>> parseArgumentList();
     std::unique_ptr<ParenExpr> parseParenthesized();
     std::unique_ptr<LiteralExpr> parseLiteral();
-    std::unique_ptr<CastExpr> parseCastExpression(std::unique_ptr<Type> type);
+    std::unique_ptr<CastExpr> parseCastExpression(std::unique_ptr<Expr> expr);
     std::unique_ptr<StructInitExpr> parseStructInitialization(Token typeName);
     std::unique_ptr<Expr> parseFunctionCall(Token name);
     std::unique_ptr<Expr> parseMemberAccessChain(std::unique_ptr<Expr> left);
+    std::unique_ptr<TraitDef> parseTraitDefinition();
 };
 
 /**
@@ -223,9 +219,7 @@ public:
         if (parser_->tokenStream && startIndex_ < parser_->tokenStream->size())
         {
             const Token &startToken = parser_->currentToken();
-            line_ = startToken.line;
-            col_ = startToken.col;
-            lineStart_ = startToken.lineStart;
+            position_ = startToken.position;
         }
     }
 
@@ -234,9 +228,7 @@ public:
         // get the length of this node
         if (parser_->tokenStream && node_)
         {
-            node_->line = line_;
-            node_->lineStart = lineStart_;
-            node_->col = col_;
+            node_->position = position_;
 
             // the end token is the token before current token
             size_t endIndex = parser_->currentPos - 1;
@@ -246,8 +238,8 @@ public:
                 const Token &startToken = parser_->tokenStream->at(startIndex_);
                 const Token &endToken = parser_->tokenStream->at(endIndex);
 
-                size_t startPos = startToken.lineStart + (startToken.col - 1);
-                size_t endPos = endToken.lineStart + (endToken.col - 1) + endToken.value.length();
+                size_t startPos = startToken.position.lineStart + (startToken.position.col - 1);
+                size_t endPos = endToken.position.lineStart + (endToken.position.col - 1) + endToken.value.length();
 
                 node_->length = endPos - startPos;
             }
@@ -262,5 +254,6 @@ public:
 private:
     Parser *parser_;
     ASTNode *node_;
-    size_t startIndex_, line_, col_, lineStart_;
+    size_t startIndex_;
+    SourcePosition position_;
 };

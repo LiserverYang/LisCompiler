@@ -3,11 +3,6 @@
  * The entrypoint of compiler
  */
 
-#include <fstream>
-#include <iostream>
-#include <map>
-#include <sstream>
-
 #include "Core/CompilePipeline.hpp"
 #include "Parser/ASTPrinter.hpp"
 

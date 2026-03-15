@@ -37,16 +37,14 @@ void Argparser::run()
     // show help informations when need
     if (enableHelpRule && argc > 1 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-help") == 0 || strcmp(argv[1], "-h") == 0))
     {
-        // TODO
-
         printHelpInformation();
 
-        // if enable help, application should shut down with code 0
+        // if enable help, application should exit with code 0
         exit(0);
     }
 
     // loop all arguments
-    // attention: there's to type of arguments
+    // attention: there's two type of arguments
     // one is positional argument and the other is option argument
     // we should distinguish what kind it is
     while (pos < argc)

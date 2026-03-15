@@ -1,3 +1,7 @@
+/**
+ * Copyright 2025, LiserverYang. All rights reserved.
+ */
+
 #include "Lexer/Lexer.hpp"
 #include "Lexer/Token.hpp"
 
@@ -36,10 +40,10 @@ protected:
             << ", got: " << static_cast<int>(tok.code);
         EXPECT_EQ(tok.value, value)
             << "Expected value: " << value << ", got: " << tok.value;
-        EXPECT_EQ(tok.line, line)
-            << "Expected line: " << line << ", got: " << tok.line;
-        EXPECT_EQ(tok.col, col)
-            << "Expected col: " << col << ", got: " << tok.col;
+        EXPECT_EQ(tok.position.line, line)
+            << "Expected line: " << line << ", got: " << tok.position.line;
+        EXPECT_EQ(tok.position.col, col)
+            << "Expected col: " << col << ", got: " << tok.position.col;
     }
 };
 

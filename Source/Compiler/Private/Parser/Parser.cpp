@@ -1,3 +1,7 @@
+/**
+ * Copyright 2025, LiserverYang. All rights reserved.
+ */
+
 #include "Parser/Parser.hpp"
 #include "Lexer/Token.hpp"
 #include "Parser/ASTPrinter.hpp"
@@ -35,6 +39,10 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     else if (check(TokenCode::LET))
     {
         return parseGlobalVariableDefinition();
+    }
+    else if (check(TokenCode::TRAIT))
+    {
+        return parseTraitDefinition();
     }
     else
     {
@@ -78,6 +86,34 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
     return structDef;
 }
 
+std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    match(TokenCode::TRAIT);
+
+    auto traitDef = std::make_unique<TraitDef>();
+
+    recorder.bindNode(traitDef.get());
+
+    traitDef->name = consume(TokenCode::IDENTIFIER, "expect an identifier as the trait name", E_ExpectAnIdentifier).value;
+
+    if (knownTraits.count(traitDef->name) > 0)
+    {
+        consume(TokenCode::UNDEFINED, "mutidefined trait '" + traitDef->name + "'", E_MutidefinedTrait);
+    }
+
+    consume(TokenCode::LBRACE, "expect a '{' after trait name", E_ExpectALBRACE);
+
+    while (!match(TokenCode::RBRACE))
+    {
+        traitDef->methods.push_back(parseMemberFunctionDefinition());
+    }
+
+    knownTypes.insert(traitDef->name);
+    return traitDef;
+}
+
 std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 {
     PositionRecorder recorder(this, nullptr);
@@ -86,7 +122,18 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     auto impl = std::make_unique<StructImpl>();
     createSnapshot();
-    impl->structName = consume(TokenCode::IDENTIFIER, "expect a struct name after impl", E_ExpectAnIdentifier).value;
+
+    std::string name = consume(TokenCode::IDENTIFIER, "expect a identifer after impl", E_ExpectAnIdentifier).value;
+
+    if (match(TokenCode::FOR))
+    {
+        impl->structName= consume(TokenCode::IDENTIFIER, "expect a trait name", E_ExpectAnIdentifier).value;
+        impl->traitName = name;
+    }
+    else
+    {
+        impl->structName = name;
+    }
 
     recorder.bindNode(impl.get());
 
@@ -173,11 +220,11 @@ std::unique_ptr<MemberVarDef> Parser::parseMemberVariableDefinition()
     return member;
 }
 
-std::unique_ptr<Type> Parser::parseType()
+std::unique_ptr<TypeNode> Parser::parseType()
 {
     PositionRecorder recorder(this, nullptr);
 
-    auto type = std::make_unique<Type>();
+    auto type = std::make_unique<TypeNode>();
 
     recorder.bindNode(type.get());
 
@@ -189,7 +236,7 @@ std::unique_ptr<Type> Parser::parseType()
 
     if ((size_t)currentToken().code >= TYPE_KEYWORD_BEGIN && (size_t)currentToken().code <= TYPE_KEYWORD_END)
     {
-        type->kind = Type::TypeKind::Primitive;
+        type->kind = TypeNode::TypeKind::Primitive;
         type->typeName = currentToken().value;
         advance();
         return type;
@@ -202,7 +249,7 @@ std::unique_ptr<Type> Parser::parseType()
             consume(TokenCode::UNDEFINED, "undefined type '" + currentToken().value + "'", E_UndefinedType);
         }
 
-        type->kind = Type::TypeKind::Custom;
+        type->kind = TypeNode::TypeKind::Custom;
         type->typeName = currentToken().value;
         advance();
         return type;
@@ -261,6 +308,11 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
     if (match(TokenCode::ARROW))
     {
         func->returnType = parseType();
+    }
+
+    if (match(TokenCode::SEMI))
+    {
+        return func;
     }
 
     func->body = parseCompoundStatement();
@@ -376,10 +428,8 @@ std::unique_ptr<IfStmt> Parser::parseIfStmt()
 
     recorder.bindNode(ifStmt.get());
 
-    consume(TokenCode::LPAREN, "expected '(' after 'if'", E_ExpectALPAREN);
+    // now if statement needn't '(' and ')'
     ifStmt->condition = parseExpression();
-    consume(TokenCode::RPAREN, "expected ')'", E_ExpectARPAREN);
-
     ifStmt->thenBranch = parseStatement();
 
     if (match(TokenCode::ELSE))
@@ -443,11 +493,9 @@ std::unique_ptr<ForStmt> Parser::parseForLoop()
 
     recorder.bindNode(forStmt.get());
 
-    consume(TokenCode::LPAREN, "expected '(' after 'for'", E_ExpectALPAREN);
     forStmt->loopVar = consume(TokenCode::IDENTIFIER, "expected an identifier as the loop variable", E_ExpectAnIdentifier).value;
     consume(TokenCode::IN, "expected keyword 'in'", E_ExpectedKeyword);
     forStmt->iterable = parseExpression();
-    consume(TokenCode::RPAREN, "expected ')'", E_ExpectARPAREN);
 
     forStmt->body = parseStatement();
     return forStmt;
@@ -462,9 +510,7 @@ std::unique_ptr<WhileStmt> Parser::parseWhileLoop()
 
     recorder.bindNode(whileLoop.get());
 
-    consume(TokenCode::LPAREN, "expected '(' after 'while'", E_ExpectALPAREN);
     whileLoop->condition = parseExpression();
-    consume(TokenCode::RPAREN, "expected ')' after condition", E_ExpectARPAREN);
 
     whileLoop->body = parseStatement();
     return whileLoop;
@@ -487,6 +533,12 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
     PositionRecorder opRecorder(this, nullptr);
 
     auto left = parsePrimary();
+
+    if (match(TokenCode::AS))
+    {
+        left = parseCastExpression(std::move(left));
+    }
+
     left = parseMemberAccessChain(std::move(left));
 
     while (true)
@@ -566,17 +618,6 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return expr;
     }
 
-    if (isTypeStart() && getToken(currentPos + 1).code == TokenCode::LPAREN && knownTypes.count(currentToken().value) > 0)
-    {
-        auto type = parseType();
-
-        consume(TokenCode::LPAREN, "except '(' for type cast", E_ExpectALPAREN);
-
-        auto expr = parseCastExpression(std::move(type));
-        recorder.bindNode(expr.get());
-        return expr;
-    }
-
     if (check(TokenCode::IDENTIFIER))
     {
         Token identifier = currentToken();
@@ -589,7 +630,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
             return expr;
         }
 
-        if (match(TokenCode::LPAREN))
+        if (match(TokenCode::LPAREN) || check(TokenCode::DOUBLE_COLON))
         {
             auto expr = parseFunctionCall(identifier);
             recorder.bindNode(expr.get());
@@ -637,24 +678,24 @@ std::unique_ptr<LiteralExpr> Parser::parseLiteral()
     switch (currentToken().code)
     {
     case TokenCode::INT_LITERAL:
-        literal->type = LiteralExpr::LiteralType::Int;
+        literal->kind = LiteralExpr::LiteralType::Int;
         break;
     case TokenCode::FLOAT_LITERAL:
-        literal->type = LiteralExpr::LiteralType::Float;
+        literal->kind = LiteralExpr::LiteralType::Float;
         break;
     case TokenCode::STRING_LITERAL:
-        literal->type = LiteralExpr::LiteralType::String;
+        literal->kind = LiteralExpr::LiteralType::String;
         break;
     case TokenCode::CHAR_LITERAL:
-        literal->type = LiteralExpr::LiteralType::Char;
+        literal->kind = LiteralExpr::LiteralType::Char;
         break;
     case TokenCode::BOOLEAN_TRUE:
     case TokenCode::BOOLEAN_FALSE:
-        literal->type = LiteralExpr::LiteralType::Bool;
+        literal->kind = LiteralExpr::LiteralType::Bool;
         break;
     default:
         Logger::LogInfo logInfo;
-        initLogInfo(currentToken(), logInfo, "invalid literal type", E_InvalidLiteralType);
+        initLogInfo(currentToken(), logInfo, "invalid literal kind", E_InvalidLiteralType);
         Logger::Log(Logger::LogLevel::ERROR, logInfo);
     }
 
@@ -667,14 +708,13 @@ bool Parser::isLiteral()
     return isOneOf({TokenCode::INT_LITERAL, TokenCode::FLOAT_LITERAL, TokenCode::STRING_LITERAL, TokenCode::CHAR_LITERAL, TokenCode::BOOLEAN_TRUE, TokenCode::BOOLEAN_FALSE});
 }
 
-std::unique_ptr<CastExpr> Parser::parseCastExpression(std::unique_ptr<Type> type)
+std::unique_ptr<CastExpr> Parser::parseCastExpression(std::unique_ptr<Expr> expr)
 {
     PositionRecorder recorder(this, nullptr);
     auto cast = std::make_unique<CastExpr>();
     recorder.bindNode(cast.get());
-    cast->targetType = std::move(type);
-    cast->expression = parseExpression();
-    consume(TokenCode::RPAREN, "expected ')' after cast expression", E_ExpectARPAREN);
+    cast->expression = std::move(expr);
+    cast->targetType = parseType();
     return cast;
 }
 
@@ -684,12 +724,10 @@ std::unique_ptr<StructInitExpr> Parser::parseStructInitialization(Token typeName
     auto init = std::make_unique<StructInitExpr>();
     recorder.bindNode(init.get());
 
-    auto type = std::make_unique<Type>();
-    type->kind = Type::TypeKind::Custom;
+    auto type = std::make_unique<TypeNode>();
+    type->kind = TypeNode::TypeKind::Custom;
+    type->position = typeName.position;
     type->typeName = typeName.value;
-    type->col = typeName.col;
-    type->line = typeName.line;
-    type->lineStart = typeName.lineStart;
     type->length = typeName.value.length();
     init->structType = std::move(type);
 
@@ -713,18 +751,16 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
 {
     PositionRecorder recorder(this, nullptr);
 
-    // 静态成员调用 (Type::method)
+    // (TypeNode::method)
     if (match(TokenCode::DOUBLE_COLON))
     {
         auto staticCall = std::make_unique<StaticMemberCall>();
         recorder.bindNode(staticCall.get());
 
-        auto type = std::make_unique<Type>();
-        type->kind = Type::TypeKind::Custom;
+        auto type = std::make_unique<TypeNode>();
+        type->kind = TypeNode::TypeKind::Custom;
         type->typeName = name.value;
-        type->col = name.col;
-        type->line = name.line;
-        type->lineStart = name.lineStart;
+        type->position = name.position;
         type->length = name.value.length();
         staticCall->classType = std::move(type);
 
@@ -735,21 +771,18 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
         return staticCall;
     }
 
-    // 普通函数调用
     auto call = std::make_unique<FunctionCall>();
     recorder.bindNode(call.get());
 
     call->function = std::make_unique<IdentifierExpr>();
     static_cast<IdentifierExpr *>(call->function.get())->name = name.value;
-    call->function->line = name.line;
-    call->function->col = name.col;
-    call->function->lineStart = name.lineStart;
+    call->function->position = name.position;
     call->function->length = name.value.length();
     call->arguments = parseArgumentList();
 
     consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectARPAREN);
 
-    // 检查链式调用 (obj.method())
+    // (obj.method())
     if (match(TokenCode::DOT))
     {
         PositionRecorder chainRecorder(this, nullptr);
@@ -810,9 +843,4 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
         }
     }
     return left;
-}
-
-bool Parser::isTypeStart()
-{
-    return isOneOf({TokenCode::I8, TokenCode::I16, TokenCode::I32, TokenCode::I64, TokenCode::F32, TokenCode::F64, TokenCode::BOOL, TokenCode::CHAR, TokenCode::IDENTIFIER});
 }

@@ -1,3 +1,7 @@
+/**
+ * Copyright 2025, LiserverYang. All rights reserved.
+ */
+
 #include <gtest/gtest.h>
 
 #include "Core/Context.hpp"
@@ -26,17 +30,17 @@ protected:
 
     inline void checkPosition(ASTNode *node, size_t line, size_t col, size_t lineStart, size_t length)
     {
-        EXPECT_EQ(node->line, line);
-        EXPECT_EQ(node->col, col);
-        EXPECT_EQ(node->lineStart, lineStart);
+        EXPECT_EQ(node->position.line, line);
+        EXPECT_EQ(node->position.col, col);
+        EXPECT_EQ(node->position.lineStart, lineStart);
         EXPECT_EQ(node->length, length);
     }
 
     inline void checkTokenPosition(Token token, size_t line, size_t col, size_t lineStart, size_t length)
     {
-        EXPECT_EQ(token.line, line);
-        EXPECT_EQ(token.col, col);
-        EXPECT_EQ(token.lineStart, lineStart);
+        EXPECT_EQ(token.position.line, line);
+        EXPECT_EQ(token.position.col, col);
+        EXPECT_EQ(token.position.lineStart, lineStart);
         EXPECT_EQ(token.value.length(), length);
     }
 };
