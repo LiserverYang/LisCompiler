@@ -272,6 +272,7 @@ def BuildModule(ModuleName: str):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="UTF-8"
             )
             if result.returncode != 0:
                 return (False, cmd, result.stderr)

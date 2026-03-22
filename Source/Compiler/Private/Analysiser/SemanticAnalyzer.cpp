@@ -6,6 +6,7 @@
 #include "Analysiser/SemanticAnalyzer.hpp"
 
 #include "Analysiser/Type.hpp"
+#include "Core/Debugging.hpp"
 #include "Logger/Logger.hpp"
 
 #include <algorithm>
@@ -18,6 +19,8 @@ void SemanticAnalyzer::visit(Program *node)
     for (auto &stmt : node->globalStatements)
         if (stmt)
             stmt->accept(this);
+
+    auto scope = SymbolTable::getInstance().getCurrentScope();
 }
 
 void SemanticAnalyzer::visit(GlobalVarDef *node)
@@ -75,18 +78,18 @@ void SemanticAnalyzer::visit(FunctionDef *node)
     auto funcScope = SymbolTable::getInstance().getCurrentScope()->createChild();
     SymbolTable::getInstance().enterScope(funcScope);
 
-    std::vector<FunctionType::Param> params;
+    std::vector<std::shared_ptr<Type>> params;
 
     for (auto &param : node->params)
     {
         if (!param) continue;
 
         param->accept(this);
-        params.emplace_back(param->name, param->semanticType);
+        params.emplace_back(param->semanticType);
     }
 
     functionInfo.hasReturnValue = node->returnType.has_value();
-    functionInfo.declaredReturnType = typeContext.getPrimitive(PrimitiveType::PrimKind::VOID);
+    functionInfo.declaredReturnType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
     functionInfo.isInFunction = true;
 
     if (node->returnType.has_value())
@@ -96,7 +99,10 @@ void SemanticAnalyzer::visit(FunctionDef *node)
 
         if (auto func = SymbolTable::getInstance().lookupSymbol(node->name))
             if (func->kind == SymbolKind::Function)
-                func->type = typeContext.getFunction(node->name, std::move(params), functionInfo.declaredReturnType);
+            {
+                node->type = func->type = context->typeContext->getFunction(std::move(params), functionInfo.declaredReturnType);
+                node->symbol = func;
+            }
     }
 
     node->body->accept(this);
@@ -104,7 +110,10 @@ void SemanticAnalyzer::visit(FunctionDef *node)
     if (!node->returnType.has_value())
         if (auto func = SymbolTable::getInstance().lookupSymbol(node->name))
             if (func->kind == SymbolKind::Function)
-                func->type = typeContext.getFunction(node->name, std::move(params), functionInfo.declaredReturnType);
+            {
+                node->type = func->type = context->typeContext->getFunction(std::move(params), functionInfo.declaredReturnType);
+                node->symbol = func;
+            }
 
     functionInfo.isInFunction = false;
 
@@ -160,12 +169,12 @@ void SemanticAnalyzer::visit(TypeNode *node)
 
     if (node->kind == TypeNode::TypeKind::Custom)
     {
-        auto custom = typeContext.getCustom(node->typeName);
+        auto custom = context->typeContext->getCustom(node->typeName);
 
         if (!custom.has_value())
         {
             log(*node, "the type '" + node->typeName + "' can not be found.");
-            node->semanticType = typeContext.getPrimitive(PrimitiveType::PrimKind::VOID);
+            node->semanticType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
             return;
         }
 
@@ -173,14 +182,14 @@ void SemanticAnalyzer::visit(TypeNode *node)
     }
     else
     {
-        auto primitive = typeContext.getPrimitive(PrimitiveType::getKind(node->typeName));
+        auto primitive = context->typeContext->getPrimitive(PrimitiveType::getKind(node->typeName));
 
         basic_type = primitive;
     }
 
     if (node->isReference)
     {
-        node->semanticType = typeContext.getReference(basic_type, node->isMutReference);
+        node->semanticType = context->typeContext->getReference(basic_type, node->isMutReference);
 
         return;
     }
@@ -196,7 +205,7 @@ void SemanticAnalyzer::visit(ReturnStmt *node)
         return;
     }
 
-    std::shared_ptr<Type> type = typeContext.getPrimitive(PrimitiveType::PrimKind::VOID);
+    std::shared_ptr<Type> type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
     if (node->returnValue.has_value())
     {
@@ -255,7 +264,8 @@ void SemanticAnalyzer::visit(StructDef *node)
 
     if (auto stru = SymbolTable::getInstance().lookupSymbol(node->name))
     {
-        stru->type = typeContext.getCustom(node->name, std::move(fields));
+        stru->type = context->typeContext->createCustom(node->name, std::move(fields));
+        node->symbol = stru;
     }
 }
 
@@ -278,7 +288,7 @@ void SemanticAnalyzer::visit(MemberFunctionDef *node)
 
     // 3. Return & Body
     functionInfo.isInFunction = true;
-    functionInfo.declaredReturnType = typeContext.getPrimitive(PrimitiveType::PrimKind::VOID);
+    functionInfo.declaredReturnType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
     if (node->returnType.has_value())
     {
@@ -298,36 +308,48 @@ void SemanticAnalyzer::visit(MemberFunctionDef *node)
 
 void SemanticAnalyzer::visit(SelfParam *node)
 {
-    // SelfParam 只有在 MemberFunctionDef 且在 StructImpl 中处理时才有意义
-    // 我们需要把 self 变量插入当前作用域
-    if (!currentStructType)
+    bool inStructImpl = (currentStructType != nullptr);
+    bool inTraitMethod = isInTraitMethod;
+
+    if (!inStructImpl && !inTraitMethod)
     {
-        log(*node, "self used outside of impl block.");
+        log(*node, "self used outside of impl block or trait method.");
         return;
     }
 
-    std::shared_ptr<Type> selfType = currentStructType;
+    std::shared_ptr<Type> selfType;
 
-    if (node->isRef)
+    if (inStructImpl)
     {
-        selfType = typeContext.getReference(currentStructType, node->isMut);
+        selfType = currentStructType;
+        if (node->isRef)
+        {
+            selfType = context->typeContext->getReference(currentStructType, node->isMut);
+        }
+    }
+    else if (inTraitMethod)
+    {
+        selfType = context->typeContext->createSelf(traitName, node->isMut, node->isRef);
     }
 
     node->semanticType = selfType;
 
     auto selfSymbol = std::make_unique<Symbol>();
-    selfSymbol->kind = SymbolKind::Param; // 或者专门的 Self
+    selfSymbol->kind = SymbolKind::Param;
     selfSymbol->name = "self";
     selfSymbol->type = selfType;
-    selfSymbol->isMutable = node->isMut || !node->isRef; // 值类型 self 通常可修改
+    selfSymbol->isMutable = node->isMut || !node->isRef;
+
     SymbolTable::getInstance().insertSymbol("self", std::move(selfSymbol));
 }
 
 void SemanticAnalyzer::visit(StructImpl *node)
 {
     std::shared_ptr<Type> structType = nullptr;
+    std::shared_ptr<TraitType> traitType = nullptr;
+    Symbol *structSymbol;
 
-    if (auto structSymbol = SymbolTable::getInstance().lookupSymbol(node->structName))
+    if (structSymbol = SymbolTable::getInstance().lookupSymbol(node->structName))
     {
         if (structSymbol->kind != SymbolKind::Struct)
         {
@@ -343,24 +365,41 @@ void SemanticAnalyzer::visit(StructImpl *node)
 
     if (node->traitName.has_value())
     {
-        if (auto traitSymbol = SymbolTable::getInstance().lookupSymbol(node->traitName.value()))
+        const std::string &traitName = node->traitName.value();
+
+        auto traitSymbol = SymbolTable::getInstance().lookupSymbol(traitName);
+        if (!traitSymbol)
         {
-            if (traitSymbol->kind != SymbolKind::Trait)
-            {
-                log(*node, "the idenfiter '" + node->traitName.value() + "' is not a trait name.");
-            }
+            log(*node, "can not find the trait '" + traitName + "'.");
+            return;
         }
-        else
+
+        if (traitSymbol->kind != SymbolKind::Trait)
         {
-            log(*node, "can not find the struct '" + node->traitName.value() + "'.");
+            log(*node, "the identifier '" + traitName + "' is not a trait name.");
+            return;
+        }
+
+        traitType = std::static_pointer_cast<TraitType>(traitSymbol->type);
+
+        if (!traitType)
+        {
+            log(*node, "trait '" + traitName + "' has invalid type information.");
+            return;
+        }
+
+        auto &implementedTraits = structSymbol->implementedTraits;
+        if (std::find(implementedTraits.begin(), implementedTraits.end(), traitName) != implementedTraits.end())
+        {
+            log(*node, "struct '" + node->structName + "' already implements trait '" + traitName + "'.");
+            return;
         }
     }
-
-    // TODO: 实现 trait 检查
 
     currentStructType = structType;
 
     std::vector<CustomType::Method> methods;
+    std::unordered_map<std::string, CustomType::Method> methodMap;
 
     for (auto &method : node->methods)
     {
@@ -378,10 +417,91 @@ void SemanticAnalyzer::visit(StructImpl *node)
             params.emplace_back("self", method->selfParam.value()->semanticType);
         }
 
-        methods.emplace_back(method->name,
+        CustomType::Method structMethod{
+            method->name,
             std::move(params),
-            method->returnType.has_value() ? method->returnType.value()->semanticType : typeContext.getPrimitive(PrimitiveType::PrimKind::VOID),
-            !method->selfParam.has_value());
+            method->returnType.has_value() ? method->returnType.value()->semanticType : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID),
+            !method->selfParam.has_value() // 无self参数则为静态方法
+        };
+
+        methods.push_back(structMethod);
+
+        methodMap[method->name] = structMethod;
+    }
+
+    if (traitType)
+    {
+        const std::string &traitName = node->traitName.value();
+        const auto &traitMethods = traitType->getMethods();
+
+        // 4.1 检查Trait的所有方法是否都被实现
+        for (const auto &traitMethod : traitMethods)
+        {
+            auto it = methodMap.find(traitMethod.name);
+
+            if (it == methodMap.end())
+            {
+                log(*node, "struct '" + node->structName + "' does not implement trait method '" + traitMethod.name + "' from trait '" + traitName + "'.");
+                continue; // 继续检查其他方法，输出所有缺失的方法
+            }
+
+            // 4.2 检查方法签名（参数数量、类型、返回值）是否匹配
+            const auto &structMethod = it->second;
+
+            // 检查返回值
+            if (!structMethod.returnType->equals(traitMethod.returnType))
+            {
+                log(*node, "method '" + traitMethod.name + "' return type mismatch: expected '" + traitMethod.returnType->toString() + "', got '" + structMethod.returnType->toString() + "'.");
+            }
+
+            // 检查参数数量
+            if (structMethod.params.size() != traitMethod.params.size())
+            {
+                log(*node, "method '" + traitMethod.name + "' parameter count mismatch: expected " + std::to_string(traitMethod.params.size()) + ", got " + std::to_string(structMethod.params.size()) + ".");
+                continue;
+            }
+
+            // 检查每个参数的类型
+            for (size_t i = 0; i < traitMethod.params.size(); ++i)
+            {
+                const auto &traitParam = traitMethod.params[i];
+                const auto &structParam = structMethod.params[i];
+
+                std::shared_ptr<Type> newTraitType = traitParam.type;
+
+                if (traitParam.type->getKind() == Type::Kind::Self)
+                {
+                    auto traitType = std::static_pointer_cast<SelfType>(traitParam.type);
+
+                    std::shared_ptr<Type> base = structSymbol->type;
+
+                    if (traitType->isReference())
+                    {
+                        base = context->typeContext->getReference(base, traitType->isMutable());
+                    }
+
+                    newTraitType = base;
+                }
+
+                if (!structParam.type->equals(newTraitType))
+                {
+                    log(*node, "method '" + traitMethod.name + "' parameter " + std::to_string(i + 1) + " type mismatch: expected '" + newTraitType->toString() + "', got '" + structParam.type->toString() + "'.");
+                }
+            }
+
+            // 检查是否为静态方法（Trait方法如果要求非静态，结构体实现也必须非静态）
+            if (traitMethod.isStatic != structMethod.isStatic)
+            {
+                log(*node, "method '" + traitMethod.name + "' static modifier mismatch: expected " + (traitMethod.isStatic ? "static" : "non-static") + ", got " + (structMethod.isStatic ? "static" : "non-static") + ".");
+            }
+        }
+
+        // 4.3 更新符号关联信息（双向绑定）
+        auto structSymbol = SymbolTable::getInstance().lookupSymbol(node->structName);
+        structSymbol->implementedTraits.push_back(traitName);
+
+        auto traitSymbol = SymbolTable::getInstance().lookupSymbol(traitName);
+        traitSymbol->structsImplementing.push_back(node->structName);
     }
 
     if (auto *customTy = dynamic_cast<CustomType *>(structType.get()))
@@ -399,12 +519,76 @@ void SemanticAnalyzer::visit(TraitDef *node)
         log(*node, "trait '" + node->name + "' already exists.");
         return;
     }
+
     auto traitSymbol = std::make_unique<Symbol>();
     traitSymbol->kind = SymbolKind::Trait;
     traitSymbol->name = node->name;
+    traitSymbol->type = nullptr;
     SymbolTable::getInstance().insertSymbol(node->name, std::move(traitSymbol));
 
-    // 可以在这里分析 trait 内部的方法签名
+    isInTraitMethod = true;
+    traitName = node->name;
+
+    std::vector<TraitType::Method> traitMethods;
+    for (auto &methodNode : node->methods)
+    {
+        // 2.1 访问方法节点，完成方法签名的语义分析（推导参数/返回值类型）
+        methodNode->accept(this);
+
+        // 2.2 构建方法参数列表（复用CustomType::Field结构）
+        std::vector<CustomType::Field> methodParams;
+
+        if (methodNode->selfParam.has_value())
+        {
+            methodParams.emplace_back("self", methodNode->selfParam.value()->semanticType);
+        }
+
+        for (auto &paramNode : methodNode->params) // 方法参数节点
+        {
+            // 校验参数类型是否有效
+            if (!paramNode->semanticType)
+            {
+                log(*paramNode, "parameter '" + paramNode->name + "' in trait method '" + methodNode->name + "' has invalid type.");
+                continue;
+            }
+            methodParams.emplace_back(paramNode->name, paramNode->semanticType);
+        }
+
+        // 2.3 处理返回类型（无返回值则默认为void）
+        std::shared_ptr<Type> returnType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        if (methodNode->returnType.has_value())
+        {
+            auto &returnTypeNode = methodNode->returnType.value();
+            if (returnTypeNode->semanticType)
+            {
+                returnType = returnTypeNode->semanticType;
+            }
+            else
+            {
+                log(*returnTypeNode, "return type of trait method '" + methodNode->name + "' is invalid.");
+            }
+        }
+
+        TraitType::Method traitMethod{
+            methodNode->name,
+            std::move(methodParams),
+            returnType,
+            !methodNode->selfParam.has_value()};
+
+        traitMethods.push_back(traitMethod);
+    }
+
+    if (auto trait = SymbolTable::getInstance().lookupSymbol(node->name))
+    {
+        trait->type = context->typeContext->createTrait(
+            node->name,
+            std::move(traitMethods));
+
+        node->symbol = trait;
+    }
+
+    isInTraitMethod = false;
+    traitName = "";
 }
 
 void SemanticAnalyzer::visit(CompoundStmt *node)
@@ -414,6 +598,8 @@ void SemanticAnalyzer::visit(CompoundStmt *node)
     // 进入新的作用域
     auto scope = SymbolTable::getInstance().getCurrentScope()->createChild();
     SymbolTable::getInstance().enterScope(scope);
+
+    node->scope = scope;
 
     for (auto &stmt : node->statements)
     {
@@ -428,7 +614,7 @@ void SemanticAnalyzer::visit(IfStmt *node)
     node->condition->accept(this);
     // 检查 condition 是否为 bool
 
-    auto boolTy = typeContext.getPrimitive(PrimitiveType::PrimKind::BOOL);
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
 
     if (!node->condition->type->equals(boolTy))
     {
@@ -457,6 +643,25 @@ void SemanticAnalyzer::visit(DeclStmt *node)
     {
         node->initValue.value()->accept(this);
         initType = node->initValue.value()->type;
+
+        if (auto identExpr = dynamic_cast<IdentifierExpr *>(node->initValue.value().get()))
+        {
+            // 查找右值变量的符号
+            auto sym = SymbolTable::getInstance().lookupSymbol(identExpr->name);
+            if (sym)
+            {
+                // 检查是否已被移动
+                if (sym->state == VarState::Moved)
+                {
+                    log(*node, "use of moved value: '" + identExpr->name + "'");
+                }
+                // 非 Copy 类型，标记为已移动
+                if (sym->type->getKind() == Type::Kind::Custom)
+                {
+                    sym->state = VarState::Moved;
+                }
+            }
+        }
     }
 
     if (node->type.has_value())
@@ -483,7 +688,10 @@ void SemanticAnalyzer::visit(DeclStmt *node)
     symbol->name = node->name;
     symbol->type = varType;
     symbol->isMutable = node->isMutable;
+
     SymbolTable::getInstance().insertSymbol(node->name, std::move(symbol));
+
+    node->symbol = SymbolTable::getInstance().lookupSymbol(node->name);
 }
 
 void SemanticAnalyzer::visit(AssignStmt *node)
@@ -495,6 +703,26 @@ void SemanticAnalyzer::visit(AssignStmt *node)
     {
         log(*node, "assignment type mismatch.");
     }
+
+    if (auto identExpr = dynamic_cast<IdentifierExpr *>(node->value.get()))
+    {
+        // 查找右值变量的符号
+        auto sym = SymbolTable::getInstance().lookupSymbol(identExpr->name);
+        if (sym)
+        {
+            // 检查是否已被移动
+            if (sym->state == VarState::Moved)
+            {
+                log(*node, "use of moved value: '" + identExpr->name + "'");
+            }
+            // 非 Copy 类型，标记为已移动
+            if (sym->type->getKind() == Type::Kind::Custom)
+            {
+                sym->state = VarState::Moved;
+            }
+        }
+    }
+
     // TODO: 这里还应该检查左值是否可修改 (mutable)
 }
 
@@ -512,7 +740,7 @@ void SemanticAnalyzer::visit(ForStmt *node)
     SymbolTable::getInstance().enterScope(loopScope);
 
     // TODO: 这里应该从 iterable 类型中提取元素类型
-    auto elemType = typeContext.getPrimitive(PrimitiveType::PrimKind::I32); // 占位
+    auto elemType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32); // 占位
 
     auto loopSym = std::make_unique<Symbol>();
     loopSym->kind = SymbolKind::LocalVar;
@@ -529,7 +757,7 @@ void SemanticAnalyzer::visit(ForStmt *node)
 void SemanticAnalyzer::visit(WhileStmt *node)
 {
     node->condition->accept(this);
-    auto boolTy = typeContext.getPrimitive(PrimitiveType::PrimKind::BOOL);
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
 
     if (!node->condition->type->equals(boolTy))
     {
@@ -545,17 +773,17 @@ void SemanticAnalyzer::visit(LiteralExpr *node)
     switch (node->kind)
     {
     case LiteralExpr::LiteralType::Int:
-        node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::I32);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
         break;
     case LiteralExpr::LiteralType::Float:
-        node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::F64);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
         break;
     case LiteralExpr::LiteralType::Bool:
-        node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::BOOL);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
         break;
     case LiteralExpr::LiteralType::String:
         // TODO: std.string
-        // node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::);
+        // node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::);
         break;
         // Char...
     }
@@ -569,11 +797,13 @@ void SemanticAnalyzer::visit(IdentifierExpr *node)
     {
         log(*node, "undefined identifier '" + node->name + "'.");
         // 容错
-        node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::VOID);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
 
     node->type = sym->type;
+    node->symbol = sym;
+    node->scope = SymbolTable::getInstance().getCurrentScope();
 }
 
 void SemanticAnalyzer::visit(StructInitExpr *node)
@@ -581,6 +811,7 @@ void SemanticAnalyzer::visit(StructInitExpr *node)
     node->structType->accept(this);
     std::shared_ptr<CustomType> structTy = std::dynamic_pointer_cast<CustomType>(node->structType->semanticType);
     node->type = structTy;
+    node->structSymbol = SymbolTable::getInstance().lookupSymbol(structTy->getName());
 
     const std::vector<CustomType::Field> &fields = structTy->getFields();
 
@@ -602,14 +833,12 @@ void SemanticAnalyzer::visit(FunctionCall *node)
 {
     node->function->accept(this);
 
-    // TODO: 这里简化处理，假设 function 是 IdentifierExpr 且类型是 FunctionType
-    // 实际需要检查 node->function->type 是否为 FunctionType
     auto funcType = std::dynamic_pointer_cast<FunctionType>(node->function->type);
 
     if (!funcType)
     {
         log(*node, "trying to call a non-function.");
-        node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::VOID);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
 
@@ -623,13 +852,197 @@ void SemanticAnalyzer::visit(FunctionCall *node)
     for (size_t i = 0; i < node->arguments.size() && i < funcType->getParams().size(); ++i)
     {
         node->arguments[i]->accept(this);
-        if (!node->arguments[i]->type->equals(funcType->getParams()[i].type))
+        if (!node->arguments[i]->type->equals(funcType->getParams()[i]))
         {
             log(*node->arguments[i], "argument type mismatch.");
         }
     }
 
     node->type = funcType->getReturnType();
+}
+
+void SemanticAnalyzer::visit(MemberFunctionCall *node)
+{
+    if (!node->object)
+    {
+        log(*node, "member function call has no object expression.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    node->object->accept(this);
+    std::shared_ptr<Type> objType = node->object->type;
+
+    std::shared_ptr<Type> baseObjType = objType;
+
+    if (auto refType = std::dynamic_pointer_cast<ReferenceType>(objType))
+    {
+        baseObjType = refType->getBaseType();
+    }
+
+    auto customType = std::dynamic_pointer_cast<CustomType>(baseObjType);
+
+    if (!customType)
+    {
+        log(*node, "cannot call member function on non-struct type '" + objType->toString() + "'.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    if (auto identExpr = dynamic_cast<IdentifierExpr *>(node->object.get()))
+    {
+        auto symbol = SymbolTable::getInstance().lookupSymbol(identExpr->name);
+        if (symbol && (symbol->kind == SymbolKind::Struct || symbol->kind == SymbolKind::Trait))
+        {
+            log(*node, "cannot call instance method on type name '" + objType->toString() + "', did you mean to create an instance first or use static method?");
+            node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+            return;
+        }
+    }
+
+    const auto &methods = customType->getMethods();
+
+    auto methodIt = std::find_if(methods.begin(), methods.end(), [&](const CustomType::Method &method)
+        { return method.name == node->methodName; });
+
+    if (methodIt == methods.end())
+    {
+        log(*node, "struct '" + customType->getName() + "' has no member function named '" + node->methodName + "'.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    const CustomType::Method &targetMethod = *methodIt;
+
+    std::vector<std::shared_ptr<Type>> expectedParamTypes;
+
+    if (targetMethod.isStatic)
+    {
+        log(*node, "the method '" + targetMethod.name + "' of '" + node->methodName + "' is static method, use '::' to call it.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    expectedParamTypes.push_back(targetMethod.params.empty()
+                                     ? objType
+                                     : targetMethod.params[0].type);
+
+    size_t paramStartIdx = targetMethod.isStatic ? 0 : 1;
+
+    for (size_t i = paramStartIdx; i < targetMethod.params.size(); ++i)
+    {
+        expectedParamTypes.push_back(targetMethod.params[i].type);
+    }
+
+    if (node->arguments.size() != (expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)))
+    {
+        log(*node,
+            "member function '" + node->methodName + "' expects " + std::to_string(expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)) + " arguments, but got " + std::to_string(node->arguments.size()) + ".");
+    }
+
+    for (size_t i = 0; i < node->arguments.size() && i < expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1); ++i)
+    {
+        if (!node->arguments[i])
+        {
+            log(*node, "argument at position " + std::to_string(i + 1) + " is null.");
+            continue;
+        }
+
+        node->arguments[i]->accept(this);
+        std::shared_ptr<Type> argType = node->arguments[i]->type;
+
+        if (!argType->equals(expectedParamTypes[i]))
+        {
+            log(*node->arguments[i],
+                "argument type mismatch: expected '" + expectedParamTypes[i]->toString() + "', but got '" + argType->toString() + "'.");
+        }
+    }
+
+    node->type = targetMethod.returnType;
+}
+
+void SemanticAnalyzer::visit(StaticMemberCall *node)
+{
+    // 1. 分析调用的对象表达式
+    if (!node->classType)
+    {
+        log(*node, "static member function call has no object expression.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    node->classType->accept(this);
+    std::shared_ptr<Type> objType = node->classType->semanticType;
+
+    // 3. 检查对象类型是否是自定义结构体类型
+    auto customType = std::dynamic_pointer_cast<CustomType>(objType);
+
+    if (!customType)
+    {
+        log(*node, "cannot call member function on non-struct type '" + objType->toString() + "'.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    // 4. 在结构体的方法列表中查找匹配的方法
+    const auto &methods = customType->getMethods();
+
+    auto methodIt = std::find_if(methods.begin(), methods.end(), [&](const CustomType::Method &method)
+        { return method.name == node->methodName; });
+
+    if (methodIt == methods.end())
+    {
+        log(*node, "struct '" + customType->getName() + "' has no member function named '" + node->methodName + "'.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    const CustomType::Method &targetMethod = *methodIt;
+
+    std::vector<std::shared_ptr<Type>> expectedParamTypes;
+
+    if (!targetMethod.isStatic)
+    {
+        log(*node, "the method '" + targetMethod.name + "' of '" + node->methodName + "' is not a static method, use '.' to call it.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    size_t paramStartIdx = targetMethod.isStatic ? 0 : 1;
+
+    for (size_t i = paramStartIdx; i < targetMethod.params.size(); ++i)
+    {
+        expectedParamTypes.push_back(targetMethod.params[i].type);
+    }
+
+    // 6. 检查参数数量是否匹配
+    if (node->arguments.size() != (expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)))
+    {
+        log(*node,
+            "member function '" + node->methodName + "' expects " + std::to_string(expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)) + " arguments, but got " + std::to_string(node->arguments.size()) + ".");
+    }
+
+    // 7. 检查每个参数的类型是否匹配
+    for (size_t i = 0; i < node->arguments.size() && i < expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1); ++i)
+    {
+        if (!node->arguments[i])
+        {
+            log(*node, "argument at position " + std::to_string(i + 1) + " is null.");
+            continue;
+        }
+
+        node->arguments[i]->accept(this);
+        std::shared_ptr<Type> argType = node->arguments[i]->type;
+
+        if (!argType->equals(expectedParamTypes[i]))
+        {
+            log(*node->arguments[i],
+                "argument type mismatch: expected '" + expectedParamTypes[i]->toString() + "', but got '" + argType->toString() + "'.");
+        }
+    }
+
+    // 8. 设置调用表达式的类型为方法的返回类型
+    node->type = targetMethod.returnType;
 }
 
 void SemanticAnalyzer::visit(MemberAccess *node)
@@ -643,8 +1056,8 @@ void SemanticAnalyzer::visit(MemberAccess *node)
         objType = refType->getBaseType();
     }
 
-    // 查找成员 (逻辑依赖于你的 Type 系统)
-    node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::I32); // 占位
+    // 查找成员
+    node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32); // 占位
 
     if (auto custom = dynamic_cast<CustomType *>(objType.get()))
     {
@@ -674,7 +1087,7 @@ void SemanticAnalyzer::visit(BinaryOp *node)
     // 确定结果类型
     if (node->op == "==" || node->op == "!=" || node->op == "<" || node->op == ">")
     {
-        node->type = typeContext.getPrimitive(PrimitiveType::PrimKind::BOOL);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
     }
     else
     {
@@ -688,7 +1101,93 @@ void SemanticAnalyzer::visit(CastExpr *node)
     node->expression->accept(this);
     node->targetType->accept(this);
     node->type = node->targetType->semanticType;
-    // TODO: 这里应该添加类型转换合法性检查
+
+    std::shared_ptr<Type> fromType = node->expression->type;
+    std::shared_ptr<Type> targetType = node->targetType->semanticType;
+
+    if (fromType->equals(targetType))
+    {
+        log(*node, "useless type translating from '" + fromType->toString() + "' to '" + targetType->toString() + "'.", 1, Logger::LogLevel::INFO);
+
+        // 相同类型直接返回，不用检查了
+        return;
+    }
+
+    switch (fromType->getKind())
+    {
+    case Type::Kind::Primitive:
+    {
+        std::shared_ptr<PrimitiveType> rType = std::dynamic_pointer_cast<PrimitiveType>(fromType);
+
+        switch (rType->getPrimKind())
+        {
+        case PrimitiveType::PrimKind::I8:
+        case PrimitiveType::PrimKind::I16:
+        case PrimitiveType::PrimKind::I32:
+        case PrimitiveType::PrimKind::I64:
+        {
+            // 只允许转换为浮点类型或 int16
+            if (targetType->getKind() != Type::Kind::Primitive)
+            {
+                log(*node, "the integer can only be cast to primitive type, not '" + targetType->toString() + "'.");
+                break;
+            }
+
+            std::shared_ptr<PrimitiveType> tType = std::dynamic_pointer_cast<PrimitiveType>(targetType);
+
+            if (!tType->isFloat() && !tType->isInteger())
+            {
+                log(*node, "the integer can only be cast to float or higer integer type, not '" + targetType->toString() + "'.");
+                break;
+            }
+
+            // 检查是否是大转小
+            if (tType->isInteger() && ((size_t)rType->getPrimKind() > (size_t)tType->getPrimKind()))
+            {
+                log(*node, "the integer can only be cast higer integer type, can not cast to '" + targetType->toString() + "'.");
+            }
+
+            break;
+        }
+        case PrimitiveType::PrimKind::F32:
+        {
+            if (targetType->getKind() != Type::Kind::Primitive || std::dynamic_pointer_cast<PrimitiveType>(targetType)->getPrimKind() != PrimitiveType::PrimKind::F64)
+            {
+                log(*node, "the float32 can only be cast to f64, not '" + targetType->toString() + "'.");
+            }
+            break;
+        }
+        case PrimitiveType::PrimKind::F64:
+        {
+            log(*node, "the float64 is not allowed to type translating.");
+            break;
+        }
+        case PrimitiveType::PrimKind::BOOL:
+        {
+            if (targetType->getKind() != Type::Kind::Primitive || !std::dynamic_pointer_cast<PrimitiveType>(targetType)->isInteger())
+            {
+                log(*node, "the bool can only be cast to integer, not '" + targetType->toString() + "'.");
+            }
+            break;
+        }
+        case PrimitiveType::PrimKind::CHAR:
+        {
+            if (targetType->getKind() != Type::Kind::Primitive || !std::dynamic_pointer_cast<PrimitiveType>(targetType)->isInteger())
+            {
+                log(*node, "the char can only be cast to integer, not '" + targetType->toString() + "'.");
+            }
+            break;
+        }
+        case PrimitiveType::PrimKind::VOID:
+        {
+            log(*node, "void can not cast to any type.");
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    }
 }
 
 void SemanticAnalyzer::visit(ParenExpr *node)

@@ -9,6 +9,7 @@
 
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,8 +18,17 @@
 class TypeContext;
 class Symbol;
 
+namespace detail
+{
+template <typename T, typename... Args>
+bool is_one_of(const T &value, const Args &...args)
+{
+    return ((value == args) || ...);
+}
+} // namespace detail
+
 // --- 基础类型类 ---
-class Type : public std::enable_shared_from_this<Type>
+class Type
 {
 public:
     enum class Kind
@@ -26,7 +36,9 @@ public:
         Primitive, // 原始类型 (int, float)
         Custom,    // 自定义类型 (struct, class)
         Reference, // 引用类型 (&T, &mut T)
-        Function,  // 函数类型
+        Function,  // 函数类型（fn foo() -> i32）
+        Trait,     // trait 类型
+        Self,      // self 参数的类型
     };
 
     explicit Type(Kind kind) : kind(kind) {}
@@ -73,11 +85,20 @@ public:
 
     bool equals(const std::shared_ptr<Type> &other) const override
     {
-        if (auto pt = std::dynamic_pointer_cast<PrimitiveType>(other))
-        {
-            return pt->primKind == primKind;
-        }
-        return false;
+        if (other->getKind() != Kind::Primitive) return false;
+        auto pt = std::static_pointer_cast<PrimitiveType>(other);
+
+        return pt->primKind == primKind;
+    }
+
+    bool isFloat() const
+    {
+        return detail::is_one_of(primKind, PrimKind::F32, PrimKind::F64);
+    }
+
+    bool isInteger() const
+    {
+        return detail::is_one_of(primKind, PrimKind::I8, PrimKind::I16, PrimKind::I32, PrimKind::I64);
     }
 
     std::string toString() const override
@@ -159,11 +180,10 @@ public:
 
     bool equals(const std::shared_ptr<Type> &other) const override
     {
-        if (auto rt = std::dynamic_pointer_cast<ReferenceType>(other))
-        {
-            return rt->isMutable == isMutable && rt->baseType->equals(baseType);
-        }
-        return false;
+        if (other->getKind() != Kind::Reference) return false;
+        auto rt = std::static_pointer_cast<ReferenceType>(other);
+
+        return rt->isMutable == isMutable && rt->baseType->equals(baseType);
     }
 
     std::string toString() const override
@@ -219,6 +239,11 @@ public:
         return fields;
     }
 
+    const std::vector<Method> &getMethods() const
+    {
+        return methods;
+    }
+
     void addMethods(std::vector<Method> methods)
     {
         for (auto &method : methods)
@@ -229,16 +254,15 @@ public:
 
     bool equals(const std::shared_ptr<Type> &other) const override
     {
-        if (auto ct = std::dynamic_pointer_cast<CustomType>(other))
-        {
-            if (name != ct->name || fields.size() != ct->fields.size())
+        if (other->getKind() != Kind::Custom) return false;
+        auto ct = std::static_pointer_cast<CustomType>(other);
+
+        if (name != ct->name || fields.size() != ct->fields.size())
+            return false;
+        for (size_t i = 0; i < fields.size(); ++i)
+            if (fields[i].name != ct->fields[i].name || !fields[i].type->equals(ct->fields[i].type))
                 return false;
-            for (size_t i = 0; i < fields.size(); ++i)
-                if (fields[i].name != ct->fields[i].name || !fields[i].type->equals(ct->fields[i].type))
-                    return false;
-            return true;
-        }
-        return false;
+        return true;
     }
 
     std::string toString() const override
@@ -255,55 +279,166 @@ private:
 class FunctionType : public Type
 {
 public:
-    struct Param
-    {
-        std::string name;
-        std::shared_ptr<Type> type;
-    };
+    FunctionType(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType)
+        : Type(Kind::Function), params(std::move(params)), returnType(returnType) {}
 
-public:
-    FunctionType(std::string name, std::vector<Param> params, std::shared_ptr<Type> returnType)
-        : Type(Kind::Function), name(std::move(name)), params(std::move(params)), returnType(returnType) {}
-
-    const std::string &getName() const
-    {
-        return name;
-    }
-
-    const std::vector<Param> &getParams() const
+    const std::vector<std::shared_ptr<Type>> &getParams() const
     {
         return params;
     }
 
-    std::shared_ptr<Type> getReturnType() const
+    const std::shared_ptr<Type> &getReturnType() const
     {
         return returnType;
     }
 
     bool equals(const std::shared_ptr<Type> &other) const override
     {
-        if (auto ft = std::dynamic_pointer_cast<FunctionType>(other))
-        {
-            if (name != ft->name || params.size() != ft->params.size() || !returnType->equals(ft->returnType))
+        if (other->getKind() != Kind::Function) return false;
+        auto ft = std::static_pointer_cast<FunctionType>(other);
+
+        if (params.size() != ft->params.size() || !returnType->equals(ft->returnType))
+            return false;
+
+        for (size_t i = 0; i < params.size(); ++i)
+            if (!params[i]->equals(ft->params[i]))
                 return false;
 
-            for (size_t i = 0; i < params.size(); ++i)
-                if (params[i].name != ft->params[i].name || !params[i].type->equals(ft->params[i].type))
-                    return false;
-
-            return true;
-        }
-
-        return false;
+        return true;
     }
 
     std::string toString() const override
     {
-        return name;
+        std::string str = "fn(";
+
+        for (size_t i = 0; i < params.size(); i++)
+        {
+            str += params[i]->toString();
+
+            if (i != params.size() - 1)
+            {
+                str += ", ";
+            }
+        }
+
+        str += ") -> " + returnType->toString();
+
+        return str;
     }
 
 private:
-    std::string name;
-    std::vector<Param> params;
+    std::vector<std::shared_ptr<Type>> params;
     std::shared_ptr<Type> returnType;
+};
+
+class TraitType : public Type
+{
+public:
+    // Trait方法定义
+    using Method = CustomType::Method;
+
+    TraitType(std::string name, std::vector<Method> methods)
+        : Type(Kind::Trait), name(std::move(name)), methods(std::move(methods)) {}
+
+    const std::string &getName() const
+    {
+        return name;
+    }
+
+    const std::vector<Method> &getMethods() const
+    {
+        return methods;
+    }
+
+    // 检查方法是否存在
+    std::optional<Method> findMethod(const std::string &methodName) const
+    {
+        for (const auto &method : methods)
+        {
+            if (method.name == methodName)
+            {
+                return method;
+            }
+        }
+        return std::nullopt;
+    }
+
+    // 类型相等判断（Trait按名称唯一）
+    bool equals(const std::shared_ptr<Type> &other) const override
+    {
+        if (other->getKind() != Kind::Trait) return false;
+        auto tt = std::static_pointer_cast<TraitType>(other);
+        return tt->name == name;
+    }
+
+    std::string toString() const override
+    {
+        std::string str = "trait " + name + " { ";
+        for (size_t i = 0; i < methods.size(); ++i)
+        {
+            const auto &method = methods[i];
+            str += method.name + "(";
+            for (size_t j = 0; j < method.params.size(); ++j)
+            {
+                str += method.params[j].type->toString();
+                if (j != method.params.size() - 1) str += ", ";
+            }
+            str += ") -> " + method.returnType->toString();
+            if (i != methods.size() - 1) str += ", ";
+        }
+        str += " }";
+        return str;
+    }
+
+private:
+    std::string name;            // Trait名称
+    std::vector<Method> methods; // Trait声明的方法
+};
+
+class SelfType : public Type
+{
+public:
+    SelfType(const std::string &trait_name, bool isMut, bool isRef)
+        : Type(Kind::Self), trait_name(trait_name), isMut(isMut), isRef(isRef) {}
+
+    const std::string &getTraitName() const
+    {
+        return trait_name;
+    }
+
+    bool isMutable() const
+    {
+        return isMut;
+    }
+
+    bool isReference()
+    {
+        return isRef;
+    }
+
+    bool equals(const std::shared_ptr<Type> &other) const override
+    {
+        if (!other)
+        {
+            return false;
+        }
+
+        auto other_self = std::dynamic_pointer_cast<SelfType>(other);
+        if (!other_self)
+        {
+            return false;
+        }
+
+        return this->trait_name == other_self->trait_name && this->isMut == other_self->isMut && this->isRef == other_self->isRef;
+    }
+
+    std::string toString() const override
+    {
+        return "self<" + trait_name + ">";
+    }
+
+private:
+    std::string trait_name;
+    bool isMut;
+    bool isRef;
 };

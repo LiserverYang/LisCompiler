@@ -26,6 +26,16 @@ public:
     // 创建子作用域（如函数体、循环体）
     std::shared_ptr<Scope> createChild();
 
+    const std::unordered_map<std::string, std::unique_ptr<Symbol>> &getSymbols() const
+    {
+        return symbols_;
+    }
+
+    std::shared_ptr<Scope> getParent()
+    {
+        return parent_;
+    }
+
 private:
     std::shared_ptr<Scope> parent_;                                    // 父作用域
     std::unordered_map<std::string, std::unique_ptr<Symbol>> symbols_; // 当前作用域符号

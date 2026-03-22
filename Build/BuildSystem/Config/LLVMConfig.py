@@ -4,14 +4,15 @@ import subprocess
 
 LLVMLibs: str = ""
 LLVMCommand: str = ""
+LLVMIncludeCommand: str = ""
 
 def InitLLVMConfig(LLVMPosition: str) -> None:
-    global LLVMLibs, LLVMCommand
-    LLVMLibs = " -l".join(lib.split(".")[0] for lib in subprocess.run(f"{LLVMPosition}llvm-config --system-libs --libnames --link-static core".split(" "), stdout=subprocess.PIPE)
+    global LLVMLibs, LLVMCommand, LLVMIncludeCommand
+    LLVMLibs = " -l".join(lib.split(".")[0] for lib in subprocess.run(f"{LLVMPosition}bin/llvm-config --system-libs --libnames --link-static all".split(" "), stdout=subprocess.PIPE)
                             .stdout.decode('utf-8')
-                            .split(" ")) + " -lwinpthread -lmingwex -lmsvcr120"
+                            .replace(" libxml2s.lib", "")
+                            .split(" ")) + " -lwinpthread -lmingwex -lmsvcr120 -lz -lzstd"
+    
+    LLVMIncludeCommand = f"-I{LLVMPosition}include"
 
-    LLVMCommand = (subprocess.run(f"{LLVMPosition}llvm-config --cxxflags --ldflags".split(" "), stdout=subprocess.PIPE).stdout.decode('utf-8').replace("-std:c++17", "-std=c++17")
-                        .replace("/EHs-c- /GR-", "")
-                        .replace("-LIBPATH:", "-L") + f"-l{LLVMLibs}"
-                    ).replace("\n", " ").replace("-llibxml2s", "")
+    LLVMCommand = f"{LLVMIncludeCommand} -L{LLVMPosition}lib/ -l{LLVMLibs}"

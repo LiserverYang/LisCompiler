@@ -9,6 +9,7 @@ from .GenericJson import GenericJson
 from .BuildContext import BuildContext
 from .TimeSolver import FormatDuration
 from .BuildTypeEnum import BuildTypeEnum
+from .Config.LLVMConfig import InitLLVMConfig
 from typing import List
 
 import sys
@@ -86,6 +87,9 @@ def BuildApp(SourceFolder: FileIO, TargetList: List[str]) -> None:
     )
     parser.add_argument("--threads", help="Set the thread number", type=int, default=1)
     BuildContext.Arguments = parser.parse_args()
+
+    if BuildContext.Arguments.llvm_position != "":
+        InitLLVMConfig(BuildContext.Arguments.llvm_position)
 
     Logger.Log(LogLevelEnum.Info, f"Python version {sys.version}")
 

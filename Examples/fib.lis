@@ -14,7 +14,7 @@ fn fib(n: i32) -> i32
 
 fn main() -> i32
 {
-    let y: i32 = 54;
+    let y: i32 = 10;
     let x: i32 = fib(y) + y;
 
     ret 0;

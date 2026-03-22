@@ -12,5 +12,6 @@ class CompilerModule(BuildSystem.ModuleBase):
 
         self.BinaryType = BuildSystem.BinaryTypeEnum.StaticLib
         self.ModulesDependOn = ["Gtest", "MagicEnum"]
+        self.ArgumentsAdded = [BuildSystem.Config.LLVMConfig.LLVMIncludeCommand]
         self.EnableBinaryLibPrefix = False
         self.EnableTests = True

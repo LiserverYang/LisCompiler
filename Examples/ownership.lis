@@ -1,0 +1,45 @@
+trait Drop
+{
+    fn drop(self);
+}
+
+struct Box
+{
+    pub value: i32
+}
+
+impl Box
+{
+    fn new(v: i32) -> Box
+    {
+        ret Box {
+            value: v 
+        };
+    }
+}
+
+impl Drop for Box
+{
+    fn drop(self)
+    {
+        // box droped here
+    }
+}
+
+fn take_box(b: Box) -> i32
+{
+    ret b.value;
+}
+
+fn borrow_box(b: &Box) -> i32
+{
+    ret b.value;
+}
+
+fn main() -> i32
+{
+    let x: Box = Box::new(10);
+    let y = borrow_box(x);
+    let z = x;
+    ret 0;
+}

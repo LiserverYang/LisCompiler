@@ -26,13 +26,23 @@ enum class SymbolKind
     Param
 };
 
+enum class VarState
+{
+    Valid,   // 可用
+    Moved,   // 已移动
+    Borrowed // 被借用
+};
+
 struct Symbol
 {
     SymbolKind kind;
     std::string name;
-    SourcePosition position;    // 声明位置（用于报错）
-    std::shared_ptr<Type> type; // 类型信息
+    SourcePosition position;
+    std::shared_ptr<Type> type;
 
-    std::optional<std::vector<std::unique_ptr<Param>>> funcParams; // 函数参数
-    std::optional<bool> isMutable;                                 // 变量是否可变
+    std::optional<bool> isMutable; // 变量是否可变
+    VarState state;
+
+    std::vector<std::string> implementedTraits;   // 结构体实现的Trait列表
+    std::vector<std::string> structsImplementing; // 实现该Trait的结构体列表
 };

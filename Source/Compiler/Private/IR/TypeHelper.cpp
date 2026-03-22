@@ -1,0 +1,155 @@
+/**
+ * Copyright 2026, LiserverYang. All rights reserved.
+ * MIT License.
+ *
+ * TypeHelper.cpp — implement the four bridge functions declared in MIRToLLVM.hpp.
+ *
+ * This is the ONLY file you need to adapt to your own Type class.
+ * Everything else in MIRToLLVM.cpp calls these functions and knows nothing
+ * about Type internals.
+ *
+ * Replace the stub implementations below with real ones once you know
+ * what your Type::Kind enum and fields look like.
+ */
+
+#include "Analysiser/Type.hpp"
+#include "IR/LLVMIRBuilder.hpp"
+
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Type.h>
+#include <stdexcept>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// semanticTypeToLLVM
+//
+// Adapt this switch to your actual Type::Kind enum.
+// The example below assumes a Type with a `.kind` field and optional `.inner`
+// (for pointers/references) and `.name` (for structs).
+// ─────────────────────────────────────────────────────────────────────────────
+
+llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
+    llvm::LLVMContext &ctx)
+{
+    if (!ty)
+        return llvm::Type::getVoidTy(ctx);
+
+    // ── Replace `Type::Kind::*` with your actual enum values ────────────────
+    switch (ty->getKind())
+    {
+    case Type::Kind::Primitive:
+    {
+        auto newTy = std::static_pointer_cast<PrimitiveType>(ty);
+
+        switch (newTy->getPrimKind())
+        {
+        case PrimitiveType::PrimKind::VOID:
+            return llvm::Type::getVoidTy(ctx);
+        case PrimitiveType::PrimKind::BOOL:
+            return llvm::Type::getInt1Ty(ctx);
+        case PrimitiveType::PrimKind::CHAR:
+            return llvm::Type::getInt32Ty(ctx);
+        case PrimitiveType::PrimKind::I8:
+            return llvm::Type::getInt8Ty(ctx);
+        case PrimitiveType::PrimKind::I16:
+            return llvm::Type::getInt16Ty(ctx);
+        case PrimitiveType::PrimKind::I32:
+            return llvm::Type::getInt32Ty(ctx);
+        case PrimitiveType::PrimKind::I64:
+            return llvm::Type::getInt64Ty(ctx);
+        case PrimitiveType::PrimKind::F32:
+            return llvm::Type::getFloatTy(ctx);
+        case PrimitiveType::PrimKind::F64:
+            return llvm::Type::getDoubleTy(ctx);
+        }
+    }
+
+    // Pointer — LLVM 15+ uses opaque pointers (ptr), not typed ptr<T>.
+    // If you're on an older LLVM that still has typed pointers, use:
+    //   return llvm::PointerType::get(semanticTypeToLLVM(ty->inner, ctx), 0);
+    case Type::Kind::Reference:
+        return llvm::PointerType::getUnqual(ctx); // opaque ptr
+
+    // Struct — looked up by name; the body is set in the struct-decl pass.
+    case Type::Kind::Custom:
+    {
+        // We return a pointer to the named struct type.  The actual
+        // llvm::StructType must already have been created in declareStructTypes().
+        // Here we just return a pointer; the caller dereferences as needed.
+        // If you want value-type structs (not pointer-to-struct), change this
+        // to return the StructType* directly and update all GEP/load/store logic.
+        //
+        // For pass-by-value in MIR assignments, returning the StructType works:
+        auto newTy = std::static_pointer_cast<CustomType>(ty);
+
+        return llvm::StructType::getTypeByName(ctx, newTy->getName());
+    }
+
+    // Function pointer
+    case Type::Kind::Function:
+    {
+        auto newTy = std::static_pointer_cast<FunctionType>(ty);
+
+        std::vector<llvm::Type *> params;
+        for (const auto &p : newTy->getParams())
+            params.push_back(semanticTypeToLLVM(p, ctx));
+        llvm::Type *ret = semanticTypeToLLVM(newTy->getReturnType(), ctx);
+        return llvm::FunctionType::get(ret, params, /*isVarArg=*/false)
+            ->getPointerTo();
+    }
+
+    // Trait objects — fat pointer: (data ptr, vtable ptr).
+    case Type::Kind::Trait:
+    {
+        // Represent as { ptr, ptr } — a data pointer and a vtable pointer.
+        llvm::Type *ptrTy = llvm::PointerType::getUnqual(ctx);
+        return llvm::StructType::get(ctx, {ptrTy, ptrTy});
+    }
+
+    default:
+        throw std::runtime_error("semanticTypeToLLVM: unhandled Type::Kind "
+                                 + ty->toString());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// isCopyType
+//
+// Primitives and raw pointers are Copy.  Structs are Copy only if explicitly
+// marked (e.g. derive(Copy) in Rust).  For now, treat structs as non-Copy
+// unless your Type carries a `isCopy` flag.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool isCopyType(const std::shared_ptr<Type> &ty)
+{
+    if (!ty) return true;
+    // Primitives are Copy; structs / trait objects / references are Move.
+    // Adjust this predicate as your Type system grows.
+
+    return ty->getKind() == Type::Kind::Primitive;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// isPointerLike
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool isPointerLike(const std::shared_ptr<Type> &ty)
+{
+    if (!ty) return false;
+    return ty->getKind() == Type::Kind::Reference;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getStructName
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string getStructName(const std::shared_ptr<Type> &ty)
+{
+    if (!ty) return "";
+    if (ty->getKind() == Type::Kind::Custom)
+    {
+        auto newTy = std::static_pointer_cast<CustomType>(ty);
+        return newTy->getName();
+    }
+    return "";
+}

@@ -6,7 +6,7 @@
 
 trait Drop
 {
-    fn drop(self) {}
+    fn drop(self);
 }
 
 fn fib(n: i32) -> i32
@@ -37,6 +37,7 @@ impl number
 
 impl Drop for number
 {
+    fn drop(self) {}
 }
 
 fn main() -> i32

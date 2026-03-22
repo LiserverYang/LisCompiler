@@ -7,6 +7,7 @@
 
 #include "Analysiser/Scope.hpp"
 #include "Analysiser/Symbol.hpp"
+#include "Core/Debugging.hpp"
 
 class SymbolTable
 {
@@ -26,7 +27,9 @@ public:
     // 进入/退出作用域
     void enterScope(std::shared_ptr<Scope> newScope)
     {
-        currentScope_ = std::move(newScope);
+        newScope->parent_ = currentScope_;
+
+        currentScope_ = newScope;
     }
 
     void exitScope()

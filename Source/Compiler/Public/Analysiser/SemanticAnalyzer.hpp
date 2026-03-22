@@ -14,16 +14,12 @@
 class SemanticAnalyzer : public ASTVisitor, public Pass
 {
 private:
-    TypeContext typeContext;
-
     struct FunctionInfo
     {
-        std::shared_ptr<Type> declaredReturnType; // 可能为空（待推断）
+        std::shared_ptr<Type> declaredReturnType; // 可能为空
         bool hasReturnValue;                      // 函数定义是否显示声明返回类型
         bool isInFunction;                        // 当前是否正在分析函数
     } functionInfo;
-
-    std::shared_ptr<Type> currentStructType;
 
     inline void log(ASTNode &node, std::string msg, size_t errorId = 1, Logger::LogLevel level = Logger::LogLevel::ERROR)
     {
@@ -64,6 +60,10 @@ private:
         return type->getKind() == Type::Kind::Primitive && int(std::dynamic_pointer_cast<PrimitiveType>(type)->getPrimKind()) <= 5;
     }
 
+    std::shared_ptr<Type> currentStructType;
+    std::string traitName;
+    bool isInTraitMethod = false;
+
 public:
     SemanticAnalyzer() = default;
     SemanticAnalyzer(std::shared_ptr<Context> cnt)
@@ -77,9 +77,16 @@ public:
     virtual void run() override
     {
         context->program.accept(this);
+
+        if (context->args->getArg("print_typetable").compare("true") == 0)
+        {
+            context->typeContext->printTypeTable();
+        }
     }
 
 public:
+    // TODO: 目前先不实现模块有关的东西
+
     virtual void visit(Program *node) override;
     virtual void visit(ModulePath *node) {}
     virtual void visit(TypeNode *node) override;
@@ -107,8 +114,8 @@ public:
     virtual void visit(IdentifierExpr *node) override;
     virtual void visit(ModuleIdentifierExpr *node) {}
     virtual void visit(StructInitExpr *node) override;
-    virtual void visit(StaticMemberCall *node) {}
-    virtual void visit(MemberFunctionCall *node) {}
+    virtual void visit(StaticMemberCall *node);
+    virtual void visit(MemberFunctionCall *node);
     virtual void visit(FunctionCall *node) override;
     virtual void visit(MemberAccess *node) override;
     virtual void visit(BinaryOp *node) override;

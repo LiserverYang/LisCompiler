@@ -15,6 +15,8 @@
 #include "Analysiser/Type.hpp"
 #include "Core/SourcePosition.hpp"
 
+class Scope;
+
 // The base class of AST, all kinds of ASTNode should inheritance it
 class ASTNode
 {
@@ -30,6 +32,7 @@ class Expr : public ASTNode
 public:
     std::shared_ptr<Type> type;
 };
+
 class Stmt : public ASTNode
 {
 };
@@ -112,6 +115,7 @@ class StructDef : public ASTNode
 public:
     std::string name;
     std::vector<std::unique_ptr<MemberVarDef>> members;
+    Symbol *symbol;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -124,6 +128,7 @@ class TraitDef : public ASTNode
 public:
     std::string name;
     std::vector<std::unique_ptr<MemberFunctionDef>> methods;
+    Symbol *symbol;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -194,6 +199,8 @@ public:
     std::vector<std::unique_ptr<Param>> params;
     std::optional<std::unique_ptr<TypeNode>> returnType;
     std::unique_ptr<Stmt> body; // CompoundStmt
+    Symbol *symbol;
+    std::shared_ptr<Type> type;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -219,6 +226,7 @@ class CompoundStmt : public Stmt
 {
 public:
     std::vector<std::unique_ptr<Stmt>> statements;
+    std::shared_ptr<Scope> scope;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -257,6 +265,7 @@ public:
     std::string name;
     std::optional<std::unique_ptr<TypeNode>> type;
     std::optional<std::unique_ptr<Expr>> initValue;
+    Symbol *symbol;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -337,6 +346,8 @@ class IdentifierExpr : public Expr
 {
 public:
     std::string name;
+    Symbol *symbol;
+    std::shared_ptr<Scope> scope;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -361,6 +372,7 @@ class StructInitExpr : public Expr
 public:
     std::unique_ptr<TypeNode> structType;
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> memberInits;
+    Symbol *structSymbol;
 
     void accept(ASTVisitor *visitor) override
     {
