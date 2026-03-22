@@ -20,6 +20,7 @@
 #include <system_error>
 
 // LLVM headers
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/TargetRegistry.h>
@@ -27,7 +28,6 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
-#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
@@ -67,15 +67,15 @@ void Emitter::initTargetMachine()
                              : opts_.targetTriple;
 
     std::string errStr;
-    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, errStr);
+    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, errStr);
     if (!target)
         throw std::runtime_error("LLVM target lookup failed for '" + triple + "': " + errStr);
 
     // Resolve CPU and features.
-    std::string cpu      = opts_.cpu.empty()      ? llvm::sys::getHostCPUName().str()
-                                                  : opts_.cpu;
+    std::string cpu = opts_.cpu.empty() ? llvm::sys::getHostCPUName().str()
+                                        : opts_.cpu;
     std::string features = opts_.features;
-    
+
     if (features.empty())
     {
         // Auto-detect host CPU features (e.g. "+avx2,+bmi2").
@@ -83,9 +83,9 @@ void Emitter::initTargetMachine()
 
         llvm::SubtargetFeatures sf;
 
-        for (auto& [name, enabled] : fm)
+        for (auto &[name, enabled] : fm)
             sf.AddFeature(name, enabled);
-        
+
         features = sf.getString();
     }
 
@@ -93,17 +93,14 @@ void Emitter::initTargetMachine()
     llvm::CodeGenOptLevel cgOpt;
     switch (opts_.optLevel)
     {
-    case 0:  cgOpt = llvm::CodeGenOptLevel::None;       break;
-    case 1:  cgOpt = llvm::CodeGenOptLevel::Less;       break;
-    case 3:  cgOpt = llvm::CodeGenOptLevel::Aggressive; break;
-    default: cgOpt = llvm::CodeGenOptLevel::Default;    break;
+    case 0: cgOpt = llvm::CodeGenOptLevel::None; break;
+    case 1: cgOpt = llvm::CodeGenOptLevel::Less; break;
+    case 3: cgOpt = llvm::CodeGenOptLevel::Aggressive; break;
+    default: cgOpt = llvm::CodeGenOptLevel::Default; break;
     }
 
     llvm::TargetOptions to;
-    tm_.reset(target->createTargetMachine(triple, cpu, features, to,
-                                          llvm::Reloc::PIC_,
-                                          llvm::CodeModel::Small,
-                                          cgOpt));
+    tm_.reset(target->createTargetMachine(triple, cpu, features, to, llvm::Reloc::PIC_, llvm::CodeModel::Small, cgOpt));
     if (!tm_)
         throw std::runtime_error("Failed to create TargetMachine for: " + triple);
 }
@@ -112,7 +109,7 @@ void Emitter::initTargetMachine()
 // Optimisation pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Emitter::runOptPipeline(llvm::Module& module)
+void Emitter::runOptPipeline(llvm::Module &module)
 {
     // Set the target data layout so middle-end passes have correct sizes.
     module.setDataLayout(tm_->createDataLayout());
@@ -120,10 +117,10 @@ void Emitter::runOptPipeline(llvm::Module& module)
 
     llvm::PassBuilder pb(tm_.get());
 
-    llvm::LoopAnalysisManager     lam;
+    llvm::LoopAnalysisManager lam;
     llvm::FunctionAnalysisManager fam;
-    llvm::CGSCCAnalysisManager    cgam;
-    llvm::ModuleAnalysisManager   mam;
+    llvm::CGSCCAnalysisManager cgam;
+    llvm::ModuleAnalysisManager mam;
 
     pb.registerModuleAnalyses(mam);
     pb.registerCGSCCAnalyses(cgam);
@@ -134,9 +131,9 @@ void Emitter::runOptPipeline(llvm::Module& module)
     llvm::OptimizationLevel lvl;
     switch (opts_.optLevel)
     {
-    case 0:  lvl = llvm::OptimizationLevel::O0; break;
-    case 1:  lvl = llvm::OptimizationLevel::O1; break;
-    case 3:  lvl = llvm::OptimizationLevel::O3; break;
+    case 0: lvl = llvm::OptimizationLevel::O0; break;
+    case 1: lvl = llvm::OptimizationLevel::O1; break;
+    case 3: lvl = llvm::OptimizationLevel::O3; break;
     default: lvl = llvm::OptimizationLevel::O2; break;
     }
 
@@ -153,7 +150,7 @@ void Emitter::runOptPipeline(llvm::Module& module)
 // Emit — object file
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Emitter::emitObjectFile(llvm::Module& module, const std::string& outPath)
+void Emitter::emitObjectFile(llvm::Module &module, const std::string &outPath)
 {
     // Verify before doing anything (catches codegen bugs early).
     std::string verifyErr;
@@ -174,8 +171,7 @@ void Emitter::emitObjectFile(llvm::Module& module, const std::string& outPath)
     // Emit machine code via the legacy pass manager.
     // (The new pass manager doesn't yet have a codegen emission API.)
     llvm::legacy::PassManager codegenPM;
-    if (tm_->addPassesToEmitFile(codegenPM, dest, nullptr,
-                                 llvm::CodeGenFileType::ObjectFile))
+    if (tm_->addPassesToEmitFile(codegenPM, dest, nullptr, llvm::CodeGenFileType::ObjectFile))
         throw std::runtime_error("TargetMachine cannot emit object files");
 
     codegenPM.run(module);
@@ -183,10 +179,10 @@ void Emitter::emitObjectFile(llvm::Module& module, const std::string& outPath)
 }
 
 // Convenience overload: emit + link in one call.
-void Emitter::emitObjectFile(llvm::Module&                   module,
-                              const std::string&              objPath,
-                              const std::string&              exePath,
-                              const std::vector<std::string>& extraFlags)
+void Emitter::emitObjectFile(llvm::Module &module,
+    const std::string &objPath,
+    const std::string &exePath,
+    const std::vector<std::string> &extraFlags)
 {
     emitObjectFile(module, objPath);
     linkExecutable({objPath}, exePath, extraFlags);
@@ -196,7 +192,7 @@ void Emitter::emitObjectFile(llvm::Module&                   module,
 // Emit — LLVM IR text (for debugging)
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Emitter::emitLLVMIR(llvm::Module& module, const std::string& outPath)
+void Emitter::emitLLVMIR(llvm::Module &module, const std::string &outPath)
 {
     std::error_code ec;
     llvm::raw_fd_ostream dest(outPath, ec, llvm::sys::fs::OF_Text);
@@ -209,7 +205,7 @@ void Emitter::emitLLVMIR(llvm::Module& module, const std::string& outPath)
 // Emit — LLVM bitcode
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Emitter::emitBitcode(llvm::Module& module, const std::string& outPath)
+void Emitter::emitBitcode(llvm::Module &module, const std::string &outPath)
 {
     std::error_code ec;
     llvm::raw_fd_ostream dest(outPath, ec, llvm::sys::fs::OF_None);
@@ -230,9 +226,9 @@ void Emitter::emitBitcode(llvm::Module& module, const std::string& outPath)
 //   Calling ld directly means replicating all of that knowledge yourself.
 //   Using clang -o out a.o is the standard approach used by rustc, zig, etc.
 
-void Emitter::linkExecutable(const std::vector<std::string>& objectFiles,
-                              const std::string&              outPath,
-                              const std::vector<std::string>& extraFlags)
+void Emitter::linkExecutable(const std::vector<std::string> &objectFiles,
+    const std::string &outPath,
+    const std::vector<std::string> &extraFlags)
 {
     if (objectFiles.empty())
         throw std::runtime_error("linkExecutable: no object files provided");
@@ -245,17 +241,17 @@ void Emitter::linkExecutable(const std::vector<std::string>& objectFiles,
     // You can also shell out to link.exe if MSVC is installed.
     cmd << "clang -o ";
     cmd << '"' << outPath << '"';
-    for (const auto& obj : objectFiles)
+    for (const auto &obj : objectFiles)
         cmd << " \"" << obj << '"';
-    for (const auto& flag : extraFlags)
+    for (const auto &flag : extraFlags)
         cmd << " " << flag;
 #else
     // Linux / macOS
     cmd << "clang -o ";
     cmd << '"' << outPath << '"';
-    for (const auto& obj : objectFiles)
+    for (const auto &obj : objectFiles)
         cmd << " \"" << obj << '"';
-    for (const auto& flag : extraFlags)
+    for (const auto &flag : extraFlags)
         cmd << " " << flag;
     // Use lld for faster linking if available (comment out if not installed).
     // cmd << " -fuse-ld=lld";
@@ -264,8 +260,7 @@ void Emitter::linkExecutable(const std::vector<std::string>& objectFiles,
     int ret = std::system(cmd.str().c_str());
     if (ret != 0)
         throw std::runtime_error(
-            "Linker exited with code " + std::to_string(ret) +
-            "\n  Command was: " + cmd.str());
+            "Linker exited with code " + std::to_string(ret) + "\n  Command was: " + cmd.str());
 }
 
 void Emitter::run()
