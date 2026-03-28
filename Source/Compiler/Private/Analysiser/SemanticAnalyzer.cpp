@@ -286,9 +286,9 @@ void SemanticAnalyzer::visit(MemberFunctionDef *node)
         param->accept(this);
     }
 
-    // 3. Return & Body
-    functionInfo.isInFunction = true;
+    functionInfo.hasReturnValue = node->returnType.has_value();
     functionInfo.declaredReturnType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+    functionInfo.isInFunction = true;
 
     if (node->returnType.has_value())
     {
@@ -302,6 +302,8 @@ void SemanticAnalyzer::visit(MemberFunctionDef *node)
     }
 
     functionInfo.isInFunction = false;
+
+    node->declaredReturnType = functionInfo.declaredReturnType;
 
     SymbolTable::getInstance().exitScope();
 }
@@ -407,21 +409,23 @@ void SemanticAnalyzer::visit(StructImpl *node)
 
         std::vector<CustomType::Field> params;
 
-        for (auto &param : method->params)
-        {
-            params.emplace_back(param->name, param->semanticType);
-        }
-
         if (method->selfParam.has_value())
         {
             params.emplace_back("self", method->selfParam.value()->semanticType);
         }
 
+        for (auto &param : method->params)
+        {
+            params.emplace_back(param->name, param->semanticType);
+        }
+
         CustomType::Method structMethod{
             method->name,
+            traitType ? traitType->getName() : "",
             std::move(params),
-            method->returnType.has_value() ? method->returnType.value()->semanticType : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID),
-            !method->selfParam.has_value() // 无self参数则为静态方法
+            functionInfo.declaredReturnType,
+            !method->selfParam.has_value(), // 无self参数则为静态方法
+            traitType != nullptr,
         };
 
         methods.push_back(structMethod);
@@ -571,9 +575,11 @@ void SemanticAnalyzer::visit(TraitDef *node)
 
         TraitType::Method traitMethod{
             methodNode->name,
+            node->name,
             std::move(methodParams),
             returnType,
-            !methodNode->selfParam.has_value()};
+            !methodNode->selfParam.has_value(),
+            true};
 
         traitMethods.push_back(traitMethod);
     }
@@ -914,6 +920,8 @@ void SemanticAnalyzer::visit(MemberFunctionCall *node)
 
     const CustomType::Method &targetMethod = *methodIt;
 
+    node->method = &targetMethod;
+
     std::vector<std::shared_ptr<Type>> expectedParamTypes;
 
     if (targetMethod.isStatic)
@@ -927,20 +935,18 @@ void SemanticAnalyzer::visit(MemberFunctionCall *node)
                                      ? objType
                                      : targetMethod.params[0].type);
 
-    size_t paramStartIdx = targetMethod.isStatic ? 0 : 1;
-
-    for (size_t i = paramStartIdx; i < targetMethod.params.size(); ++i)
+    for (size_t i = 1; i < targetMethod.params.size(); ++i)
     {
         expectedParamTypes.push_back(targetMethod.params[i].type);
     }
 
-    if (node->arguments.size() != (expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)))
+    if (node->arguments.size() != (expectedParamTypes.size() - 1))
     {
         log(*node,
-            "member function '" + node->methodName + "' expects " + std::to_string(expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)) + " arguments, but got " + std::to_string(node->arguments.size()) + ".");
+            "member function '" + node->methodName + "' expects " + std::to_string(expectedParamTypes.size() - 1) + " arguments, but got " + std::to_string(node->arguments.size()) + ".");
     }
 
-    for (size_t i = 0; i < node->arguments.size() && i < expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1); ++i)
+    for (size_t i = 0; i < node->arguments.size() && i < expectedParamTypes.size() - 1; ++i)
     {
         if (!node->arguments[i])
         {
@@ -951,7 +957,7 @@ void SemanticAnalyzer::visit(MemberFunctionCall *node)
         node->arguments[i]->accept(this);
         std::shared_ptr<Type> argType = node->arguments[i]->type;
 
-        if (!argType->equals(expectedParamTypes[i]))
+        if (!argType->equals(expectedParamTypes[i + 1]))
         {
             log(*node->arguments[i],
                 "argument type mismatch: expected '" + expectedParamTypes[i]->toString() + "', but got '" + argType->toString() + "'.");
@@ -963,7 +969,6 @@ void SemanticAnalyzer::visit(MemberFunctionCall *node)
 
 void SemanticAnalyzer::visit(StaticMemberCall *node)
 {
-    // 1. 分析调用的对象表达式
     if (!node->classType)
     {
         log(*node, "static member function call has no object expression.");
@@ -974,7 +979,6 @@ void SemanticAnalyzer::visit(StaticMemberCall *node)
     node->classType->accept(this);
     std::shared_ptr<Type> objType = node->classType->semanticType;
 
-    // 3. 检查对象类型是否是自定义结构体类型
     auto customType = std::dynamic_pointer_cast<CustomType>(objType);
 
     if (!customType)
@@ -984,7 +988,6 @@ void SemanticAnalyzer::visit(StaticMemberCall *node)
         return;
     }
 
-    // 4. 在结构体的方法列表中查找匹配的方法
     const auto &methods = customType->getMethods();
 
     auto methodIt = std::find_if(methods.begin(), methods.end(), [&](const CustomType::Method &method)
@@ -1008,22 +1011,20 @@ void SemanticAnalyzer::visit(StaticMemberCall *node)
         return;
     }
 
-    size_t paramStartIdx = targetMethod.isStatic ? 0 : 1;
-
-    for (size_t i = paramStartIdx; i < targetMethod.params.size(); ++i)
+    for (size_t i = 0; i < targetMethod.params.size(); ++i)
     {
         expectedParamTypes.push_back(targetMethod.params[i].type);
     }
 
     // 6. 检查参数数量是否匹配
-    if (node->arguments.size() != (expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)))
+    if (node->arguments.size() != (expectedParamTypes.size()))
     {
         log(*node,
-            "member function '" + node->methodName + "' expects " + std::to_string(expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1)) + " arguments, but got " + std::to_string(node->arguments.size()) + ".");
+            "member function '" + node->methodName + "' expects " + std::to_string(expectedParamTypes.size()) + " arguments, but got " + std::to_string(node->arguments.size()) + ".");
     }
 
     // 7. 检查每个参数的类型是否匹配
-    for (size_t i = 0; i < node->arguments.size() && i < expectedParamTypes.size() - (targetMethod.isStatic ? 0 : 1); ++i)
+    for (size_t i = 0; i < node->arguments.size() && i < expectedParamTypes.size(); ++i)
     {
         if (!node->arguments[i])
         {
@@ -1041,7 +1042,6 @@ void SemanticAnalyzer::visit(StaticMemberCall *node)
         }
     }
 
-    // 8. 设置调用表达式的类型为方法的返回类型
     node->type = targetMethod.returnType;
 }
 
@@ -1195,4 +1195,11 @@ void SemanticAnalyzer::visit(ParenExpr *node)
     node->expression->accept(this);
 
     node->type = node->expression->type;
+}
+
+void SemanticAnalyzer::visit(BorrowExpr *node)
+{
+    node->expression->accept(this);
+
+    node->type = context->typeContext->getReference(node->expression->type, node->isMutable);
 }

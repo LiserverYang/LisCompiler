@@ -168,10 +168,13 @@ class MemberFunctionDef : public ASTNode
 {
 public:
     std::string name;
+    std::string sturctName;
+    std::string traitName;
     std::optional<std::unique_ptr<SelfParam>> selfParam;
     std::vector<std::unique_ptr<Param>> params;
     std::optional<std::unique_ptr<TypeNode>> returnType;
     std::optional<std::unique_ptr<Stmt>> body; // CompoundStmt, trait can be null
+    std::shared_ptr<Type> declaredReturnType;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -399,6 +402,7 @@ public:
     std::unique_ptr<Expr> object;
     std::string methodName;
     std::vector<std::unique_ptr<Expr>> arguments;
+    const CustomType::Method *method;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -459,6 +463,18 @@ class ParenExpr : public Expr
 {
 public:
     std::unique_ptr<Expr> expression;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+class BorrowExpr : public Expr
+{
+public:
+    std::unique_ptr<Expr> expression;
+    bool isMutable;
 
     void accept(ASTVisitor *visitor) override
     {

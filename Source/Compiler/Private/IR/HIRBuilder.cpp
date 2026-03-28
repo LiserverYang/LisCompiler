@@ -17,6 +17,39 @@ void HIRBuilder::visit(Program *node)
     context->hirProgram->position = node->position;
     context->hirProgram->length = node->length;
 
+    // here we generite all member functions
+
+    auto &symbols = SymbolTable::getInstance().getCurrentScope()->getSymbols();
+
+    for (auto &[name, symbol] : symbols)
+    {
+        if (symbol->kind == SymbolKind::Struct)
+        {
+            std::shared_ptr<CustomType> newTy = std::static_pointer_cast<CustomType>(symbol->type);
+
+            for (auto &method : newTy->getMethods())
+            {
+                std::vector<std::shared_ptr<Type>> params;
+
+                for (CustomType::Field param : method.params)
+                {
+                    params.push_back(param.type);
+                }
+
+                auto type = context->typeContext->getFunction(std::move(params), method.returnType);
+
+                auto funcSymbol = std::make_unique<Symbol>();
+                std::string funcName = name + "::" + (method.isTraitImpl ? (method.traitName + "::") : "") + method.name;
+
+                funcSymbol->kind = SymbolKind::Function;
+                funcSymbol->name = funcName;
+                funcSymbol->position = node->position;
+                funcSymbol->type = type;
+                SymbolTable::getInstance().insertSymbol(funcName, std::move(funcSymbol));
+            }
+        }
+    }
+
     for (auto &it : node->globalStatements)
     {
         it->accept(this);
@@ -60,7 +93,7 @@ void HIRBuilder::visit(MemberFunctionDef *node)
     result->length = node->length;
     result->name = node->name;
     result->isMethod = true;
-    result->returnType = node->returnType.has_value() ? node->returnType.value()->semanticType : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+    result->returnType = node->declaredReturnType;
 
     if (node->body.has_value())
     {
@@ -69,7 +102,8 @@ void HIRBuilder::visit(MemberFunctionDef *node)
         nodeStack.pop();
     }
 
-    // TODO: 结构体名/trait名
+    result->associatedStruct = node->sturctName;
+    result->associatedTrait = node->traitName;
 
     if (node->selfParam.has_value())
     {
@@ -84,13 +118,6 @@ void HIRBuilder::visit(MemberFunctionDef *node)
     {
         param->accept(this);
         result->params.emplace_back(param->name, param->semanticType);
-    }
-
-    if (node->body.has_value())
-    {
-        node->body.value()->accept(this);
-        result->body.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
-        nodeStack.pop();
     }
 
     nodeStack.push(std::move(result));
@@ -214,7 +241,6 @@ void HIRBuilder::visit(CompoundStmt *node)
     auto result = std::make_unique<HIRBlock>();
     result->position = node->position;
     result->length = node->length;
-    result->isExpression = false;
     result->scope = node->scope;
 
     // 转换块内语句
@@ -453,21 +479,18 @@ void HIRBuilder::visit(StaticMemberCall *node)
     result->position = node->position;
     result->length = node->length;
     result->type = node->type;
-    result->isMethod = true;
-    result->isStatic = true;
 
-    // 构建被调用者（结构体名称）
     auto callee = std::make_unique<HIRNameRef>();
-    callee->name = node->classType->typeName;
+    callee->name = node->classType->typeName + "::" + node->methodName;
     callee->symbol = SymbolTable::getInstance().lookupSymbol(node->classType->typeName);
-    callee->type = node->classType->semanticType;
+    callee->type = callee->symbol->type;
     result->callee = std::move(callee);
 
     // 转换参数
     for (auto &arg : node->arguments)
     {
         arg->accept(this);
-        result->args.emplace_back(std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release()));
+        result->args.emplace_back(std::unique_ptr<HIRExpr>(static_cast<HIRExpr *>(nodeStack.top().release())));
         nodeStack.pop();
     }
 
@@ -480,15 +503,31 @@ void HIRBuilder::visit(MemberFunctionCall *node)
     result->position = node->position;
     result->length = node->length;
     result->type = node->type;
-    result->isMethod = true;
-    result->isStatic = false;
 
     // 处理调用对象
-    if (node->object)
+    node->object->accept(this);
+    auto objectExpr = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
+    nodeStack.pop();
+
+    auto callee = std::make_unique<HIRNameRef>();
+    callee->name = std::static_pointer_cast<CustomType>(objectExpr->type)->getName() + "::" + (node->method->isTraitImpl ? (node->method->traitName + "::") : "") + node->methodName;
+    callee->symbol = SymbolTable::getInstance().lookupSymbol(callee->name);
+    callee->type = callee->symbol->type;
+    result->callee = std::move(callee);
+
+    auto newTy = std::static_pointer_cast<FunctionType>(result->callee->type);
+
+    if (newTy->getParams()[0]->getKind() == Type::Kind::Custom)
     {
-        node->object->accept(this);
-        result->callee.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
+        result->args.emplace_back(std::move(objectExpr));
+    }
+    else
+    {
+        auto refExpr = std::make_unique<HIRRef>();
+        refExpr->expr = std::move(objectExpr);
+        refExpr->isMutable = std::static_pointer_cast<ReferenceType>(newTy->getParams()[0])->isMutableRef();
+        refExpr->type = newTy->getParams()[0];
+        result->args.emplace_back(std::move(refExpr));
     }
 
     // 转换参数
@@ -508,8 +547,6 @@ void HIRBuilder::visit(FunctionCall *node)
     result->position = node->position;
     result->length = node->length;
     result->type = node->type;
-    result->isMethod = false;
-    result->isStatic = false;
 
     // 处理被调用函数
     if (node->function)
@@ -652,4 +689,19 @@ void HIRBuilder::visit(ParenExpr *node)
     {
         node->expression->accept(this);
     }
+}
+
+void HIRBuilder::visit(BorrowExpr *node)
+{
+    auto result = std::make_unique<HIRRef>();
+    result->position = node->position;
+    result->length = node->length;
+    result->type = node->type;
+    result->isMutable = node->isMutable;
+
+    node->expression->accept(this);
+    result->expr.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    nodeStack.push(std::move(result));
 }

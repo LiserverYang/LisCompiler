@@ -110,8 +110,6 @@ class HIRCall : public HIRExpr
 public:
     std::unique_ptr<HIRExpr> callee;            // 被调用者
     std::vector<std::unique_ptr<HIRExpr>> args; // 实参
-    bool isMethod;                              // 是否是方法调用
-    bool isStatic;                              // 是否是静态方法调用
 };
 
 class HIRMemberAccess : public HIRExpr
@@ -129,12 +127,18 @@ public:
     std::vector<std::pair<std::string, std::unique_ptr<HIRExpr>>> members; // 成员初始化
 };
 
+class HIRRef : public HIRExpr
+{
+public:
+    std::unique_ptr<HIRExpr> expr;
+    bool isMutable;
+};
+
 class HIRBlock : public HIRStmt
 {
 public:
     std::vector<std::unique_ptr<HIRStmt>> stmts;
     std::shared_ptr<Scope> scope; // 块所属作用域
-    bool isExpression;            // 是否是表达式块（Rust 风格）
 };
 
 class HIRVarDecl : public HIRStmt
@@ -205,7 +209,7 @@ public:
     bool isStatic;                                                     // 是否是静态方法
     bool isTraitMethod;                                                // 是否是 trait 方法
     std::string associatedStruct;                                      // 关联的结构体名
-    std::optional<std::string> associatedTrait;                        // 关联的 trait 名
+    std::string associatedTrait;                                       // 关联的 trait 名
 };
 
 class HIRStruct : public HIRNode

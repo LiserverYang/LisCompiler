@@ -37,6 +37,7 @@ class MemberAccess;
 class BinaryOp;
 class CastExpr;
 class ParenExpr;
+class BorrowExpr;
 
 /**
  * ASTVisitor can visitor the whole AST tree
@@ -81,4 +82,5 @@ public:
     virtual void visit(BinaryOp *node) = 0;
     virtual void visit(CastExpr *node) = 0;
     virtual void visit(ParenExpr *node) = 0;
+    virtual void visit(BorrowExpr *node) = 0;
 };

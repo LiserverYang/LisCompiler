@@ -18,9 +18,9 @@
 #include <llvm/Support/raw_ostream.h>
 
 LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ctx, const std::string &name)
-    : ctx_(ctx),
-      builder_(std::make_unique<llvm::IRBuilder<>>(ctx)),
-      Pass(cnt)
+    : Pass(cnt),
+      ctx_(ctx),
+      builder_(std::make_unique<llvm::IRBuilder<>>(ctx))
 {
     context->module = std::make_unique<llvm::Module>(name, ctx);
 }
@@ -34,33 +34,6 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
     // Pass 1 — struct types (needed for any field GEP to work).
     declareStructTypes(prog);
 
-    auto scope = SymbolTable::getInstance().getCurrentScope();
-
-    while (scope->getParent() != nullptr)
-        scope = scope->getParent();
-
-    for (auto &[name, sym] : scope->getSymbols())
-    {
-        if (sym->kind == SymbolKind::Struct)
-        {
-            auto newTy = std::static_pointer_cast<CustomType>(sym->type);
-            const auto &fields = newTy->getFields();
-
-            // Populate fieldIndex_.
-            for (size_t i = 0; i < fields.size(); i++)
-                fieldIndex_[name][fields[i].name] = i;
-
-            // Set the StructType body so LLVM knows the field layout.
-            // structTypes_[name] was created as opaque in declareStructTypes().
-            std::vector<llvm::Type *> llvmFields;
-            llvmFields.reserve(fields.size());
-            for (const auto &f : fields)
-                llvmFields.push_back(semanticTypeToLLVM(f.type, ctx_));
-
-            structTypes_[name]->setBody(llvmFields, /*isPacked=*/false);
-        }
-    }
-
     // Pass 2 — function signatures (allows forward calls / recursion).
     declareFunctions(prog);
 
@@ -69,11 +42,9 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
 
     // Pass 4 — function bodies.
 
-    std::vector<MIRFunction> funcCopy = prog.functions;
-
-    for (size_t i = 0; i < funcCopy.size(); i++)
+    for (const auto &mirFn : prog.functions)
     {
-        lowerFunctionBody(funcCopy[i]);
+        lowerFunctionBody(mirFn);
     }
 
     // Optional: verify the whole module in debug builds.
@@ -81,7 +52,11 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
     std::string err;
     llvm::raw_string_ostream es(err);
     if (llvm::verifyModule(*context->module, &es))
+    {
+        context->module->print(llvm::outs(), nullptr);
         throw std::runtime_error("LLVM module verification failed:\n" + es.str());
+    }
+
 #endif
 }
 
@@ -93,34 +68,48 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
 
 void LLVMIRBuilder::declareStructTypes(const MIRProgram &prog)
 {
-    // First sub-pass: create all opaque types.
-    for (const auto &fn : prog.functions)
+    auto scope = SymbolTable::getInstance().getCurrentScope();
+
+    while (scope && scope->getParent() != nullptr)
     {
-        // Collect struct names from params / return types.
-        // (In a real compiler you'd iterate a separate struct table;
-        //  here we harvest them from all locals in every body.)
-        for (const auto &local : fn.body.locals)
+        scope = scope->getParent();
+    }
+
+    for (const auto &[name, sym] : scope->getSymbols())
+    {
+        if (sym->kind == SymbolKind::Struct)
         {
-            std::string sName = getStructName(local.type);
-            if (!sName.empty() && structTypes_.find(sName) == structTypes_.end())
-                structTypes_[sName] = llvm::StructType::create(ctx_, sName);
+            if (structTypes_.count(name)) continue;
+
+            structTypes_[name] = llvm::StructType::create(ctx_, name);
         }
     }
 
-    // Second sub-pass: set struct bodies.
-    // This requires knowledge of field order, which lives in your symbol table.
-    // We call a bridge function that you implement alongside your Type system.
-    //
-    //   void setStructBody(const std::string& name,
-    //                      llvm::StructType* st,
-    //                      llvm::LLVMContext& ctx,
-    //                      const fieldIndexMap&);
-    //
-    // For now we leave bodies opaque; callers that know the layout can call
-    // setStructBody() themselves before invoking lowerProgram().
-    //
-    // The accessor fieldIndexOf() is still needed for GEP; populate
-    // fieldIndex_ externally or via a companion pass before lowering.
+    for (const auto &[name, sym] : scope->getSymbols())
+    {
+        if (sym->kind != SymbolKind::Struct) continue;
+
+        llvm::StructType *structTy = structTypes_[name];
+        if (!structTy->isOpaque()) continue;
+
+        auto customType = std::static_pointer_cast<CustomType>(sym->type);
+        const auto &fields = customType->getFields();
+
+        std::vector<llvm::Type *> llvmFields;
+        llvmFields.reserve(fields.size());
+        std::vector<std::pair<std::string, std::shared_ptr<Type>>> _fields;
+        for (const auto &field : fields)
+        {
+            llvm::Type *fieldTy = semanticTypeToLLVM(field.type, ctx_);
+            llvmFields.push_back(fieldTy);
+            _fields.emplace_back(field.name, field.type);
+            fieldIndex_[name][field.name] = llvmFields.size() - 1;
+        }
+
+        structFields_[sym->name] = std::move(_fields);
+
+        structTy->setBody(llvmFields, false);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,12 +173,16 @@ void LLVMIRBuilder::lowerGlobals(const MIRProgram &prog)
             init = llvm::Constant::getNullValue(ty);
         }
 
-        new llvm::GlobalVariable(*context->module,
+        if (context->module->getNamedGlobal(g.name)) continue;
+
+        auto gvar = new llvm::GlobalVariable(*context->module,
             ty,
             /*isConstant=*/false,
-            llvm::GlobalValue::InternalLinkage,
+            llvm::GlobalValue::ExternalLinkage,
             init,
             g.name);
+
+        gvar->setVisibility(llvm::GlobalValue::DefaultVisibility);
     }
 }
 
@@ -259,10 +252,12 @@ void LLVMIRBuilder::createAllocas(FunctionState &fs)
         llvm::Type *ty = toLLVMType(local.type);
         if (ty->isVoidTy())
         {
+            fs.allocas[local.index] = nullptr;
             continue;
         }
         llvm::AllocaInst *alloca =
             builder_->CreateAlloca(ty, nullptr, local.name);
+        assert(local.index >= 0 && "local index cannot be negative");
         fs.allocas[local.index] = alloca;
     }
 }
@@ -361,9 +356,14 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     else
     {
         // Ordinary call.
+        llvm::Type *retTy = callee->getFunctionType()->getReturnType();
+        bool isVoid = retTy->isVoidTy();
+
         llvm::CallInst *call =
-            builder_->CreateCall(callee->getFunctionType(), callee, args, s.dest.has_value() ? s.funcName + ".ret" : "");
-        if (s.dest.has_value())
+            builder_->CreateCall(callee->getFunctionType(), callee, args,
+                isVoid ? "" : s.funcName + ".ret"); // void calls must have no name
+
+        if (s.dest.has_value() && !isVoid) // don't store a void result
             storePlace(fs, *s.dest, call);
     }
 }
@@ -475,10 +475,52 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
             switch (r.op)
             {
             // Arithmetic
-            case Op::Add:  return isFP ? builder_->CreateFAdd(lhs, rhs)
-                                       : builder_->CreateAdd(lhs, rhs);
-            case Op::Sub:  return isFP ? builder_->CreateFSub(lhs, rhs)
-                                       : builder_->CreateSub(lhs, rhs);
+            case Op::Add:
+            {
+                if (isFP)
+                    return builder_->CreateFAdd(lhs, rhs);
+
+                llvm::Type* lhsTy = lhs->getType();
+                llvm::Type* rhsTy = rhs->getType();
+                llvm::Type* i8    = llvm::Type::getInt8Ty(builder_->getContext());
+
+                if (lhsTy->isPointerTy() && rhsTy->isIntegerTy())
+                    return builder_->CreateGEP(i8, lhs, rhs);           // ptr + int
+                if (rhsTy->isPointerTy() && lhsTy->isIntegerTy())
+                    return builder_->CreateGEP(i8, rhs, lhs);           // int + ptr
+
+                // ptr + ptr is semantically invalid — surface it loudly rather than
+                // silently emitting broken IR.
+                assert(!lhsTy->isPointerTy() && !rhsTy->isPointerTy() &&
+                    "BUG: pointer + pointer reached binary Add lowering");
+
+                return builder_->CreateAdd(lhs, rhs);
+            }
+
+            case Op::Sub:
+            {
+                if (isFP)
+                    return builder_->CreateFSub(lhs, rhs);
+
+                llvm::Type* lhsTy = lhs->getType();
+                llvm::Type* rhsTy = rhs->getType();
+                llvm::Type* i8    = llvm::Type::getInt8Ty(builder_->getContext());
+
+                if (lhsTy->isPointerTy() && rhsTy->isIntegerTy()) {
+                    // ptr - int  →  GEP with negated offset
+                    llvm::Value* neg = builder_->CreateNeg(rhs);
+                    return builder_->CreateGEP(i8, lhs, neg);
+                }
+                if (lhsTy->isPointerTy() && rhsTy->isPointerTy()) {
+                    // ptr - ptr  →  byte difference as i64
+                    llvm::Type* i64 = llvm::Type::getInt64Ty(builder_->getContext());
+                    llvm::Value* lhsInt = builder_->CreatePtrToInt(lhs, i64);
+                    llvm::Value* rhsInt = builder_->CreatePtrToInt(rhs, i64);
+                    return builder_->CreateSub(lhsInt, rhsInt);
+                }
+
+                return builder_->CreateSub(lhs, rhs);
+            }
             case Op::Mul:  return isFP ? builder_->CreateFMul(lhs, rhs)
                                        : builder_->CreateMul(lhs, rhs);
             case Op::Div:  return isFP ? builder_->CreateFDiv(lhs, rhs)
@@ -665,126 +707,76 @@ llvm::Value *LLVMIRBuilder::lowerConst(const MIRConst &c)
 // Place — compute a pointer to the place
 // ─────────────────────────────────────────────────────────────────────────────
 
-llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(FunctionState &fs, const MIRPlace &p)
+llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
+    FunctionState &fs,
+    const MIRPlace &p,
+    std::shared_ptr<Type> *outFinalTy)
 {
-    // Start from the base local's alloca.
     llvm::Value *ptr = nullptr;
+    std::shared_ptr<Type> currentTy = nullptr;
 
     switch (p.base)
     {
     case PlaceBase::Local:
     case PlaceBase::Return:
-        // 增加边界检查，避免访问越界
-        if (p.index >= fs.allocas.size())
-        {
-            throw std::runtime_error("Invalid local index: " + std::to_string(p.index));
-        }
         ptr = fs.allocas.at(p.index);
-        // 检查allocas中的值是否有效
-        if (!ptr)
-        {
-            throw std::runtime_error("Null alloca for local index: " + std::to_string(p.index));
-        }
+        currentTy = fs.body->locals[p.index].type;
         break;
-
     case PlaceBase::Global:
         ptr = context->module->getNamedGlobal(p.name);
-        if (!ptr)
-        { // 替换assert为运行时错误，更友好
-            throw std::runtime_error("Unknown global variable: " + p.name);
-        }
+        currentTy = p.type;
         break;
-
-    // 处理未知的PlaceBase类型
-    default:
-        throw std::runtime_error("Unsupported PlaceBase type: " + std::to_string(static_cast<int>(p.base)));
     }
 
-    // 前置检查：确保ptr不为空再处理投影
-    if (!ptr)
-    {
-        throw std::runtime_error("Null pointer at start of place projection for: " + p.name);
-    }
-
-    // Walk projections — each one adjusts the pointer.
     for (const auto &proj : p.projections)
     {
         switch (proj.kind)
         {
-        case ProjectionKind::Field:
-        {
-            // GEP into a struct: getelementptr %T, ptr, 0, fieldIdx
-            // The type the pointer currently points to must be a struct.
-            std::string sName = getStructName(p.type);
-            // 检查结构体类型是否存在
-            if (structTypes_.find(sName) == structTypes_.end())
-            {
-                throw std::runtime_error("Unknown struct type: " + sName);
-            }
-            unsigned idx = fieldIndexOf(sName, proj.field);
-            llvm::StructType *st = structTypes_.at(sName);
-            ptr = builder_->CreateStructGEP(st, ptr, idx, proj.field);
-            break;
-        }
         case ProjectionKind::Deref:
         {
-            // Load the pointer value, then use that as the new ptr.
-            // 检查ptr类型是否为指针
-            llvm::PointerType *ptrTy = llvm::dyn_cast<llvm::PointerType>(ptr->getType());
-            if (!ptrTy)
-            {
-                throw std::runtime_error("Deref projection on non-pointer type");
-            }
-            ptr = builder_->CreateLoad(
-                llvm::PointerType::getUnqual(ctx_), ptr, "deref");
-            // 检查load结果是否有效
-            if (!ptr)
-            {
-                throw std::runtime_error("Null pointer after deref projection");
-            }
+            assert(currentTy->getKind() == Type::Kind::Reference);
+            auto refTy = std::static_pointer_cast<ReferenceType>(currentTy);
+            auto innerTy = refTy->getBaseType();
+
+            ptr = builder_->CreateGEP(
+                toLLVMType(innerTy),
+                ptr,
+                {builder_->getInt32(0)},
+                "deref");
+            currentTy = innerTy;
+            break;
+        }
+        case ProjectionKind::Field:
+        {
+            assert(currentTy->getKind() == Type::Kind::Custom && "Field access requires a struct type");
+
+            std::string sName = getStructName(currentTy);
+            unsigned idx = fieldIndexOf(sName, proj.field);
+            llvm::StructType *st = structTypes_.at(sName);
+
+            ptr = builder_->CreateStructGEP(st, ptr, idx, proj.field.c_str());
+            currentTy = fieldTypeOf(sName, proj.field);
             break;
         }
         case ProjectionKind::Index:
         {
+            auto elemTy = getElementType(currentTy);
             MIRPlace idxPlace{PlaceBase::Local, proj.localIndex, "_idx", {}, fs.body->locals[proj.localIndex].type};
             llvm::Value *idx = loadPlace(fs, idxPlace);
-            // 检查索引值是否有效
-            if (!idx)
-            {
-                throw std::runtime_error("Null index value for array projection");
-            }
 
-            llvm::PointerType *ptrTy = llvm::dyn_cast<llvm::PointerType>(ptr->getType());
-            if (!ptrTy)
-            {
-                throw std::runtime_error("Index projection on non-pointer type");
-            }
-            llvm::Type *elemTy = ptrTy->getArrayElementType();
-            // 检查数组元素类型是否有效
-            if (!elemTy)
-            {
-                throw std::runtime_error("Null array element type for index projection");
-            }
-            ptr = builder_->CreateGEP(elemTy, ptr, {idx}, "idx");
-            // 检查GEP结果是否有效
-            if (!ptr)
-            {
-                throw std::runtime_error("Null pointer after index projection");
-            }
+            ptr = builder_->CreateGEP(
+                toLLVMType(elemTy),
+                ptr,
+                {idx},
+                "idx");
+            currentTy = elemTy;
             break;
         }
-
-        // 处理未知的ProjectionKind类型
-        default:
-            throw std::runtime_error("Unsupported ProjectionKind: " + std::to_string(static_cast<int>(proj.kind)));
-        }
-
-        // 每次投影后检查ptr有效性
-        if (!ptr)
-        {
-            throw std::runtime_error("Null pointer after projection step");
         }
     }
+
+    if (outFinalTy)
+        *outFinalTy = currentTy;
 
     return ptr;
 }
@@ -795,9 +787,9 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(FunctionState &fs, const MIRPlace &p
 
 llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
 {
-    llvm::Value *ptr = lowerPlaceAsPtr(fs, p);
-    llvm::Type *ty = toLLVMType(p.type);
-    return builder_->CreateLoad(ty, ptr, p.name);
+    std::shared_ptr<Type> finalTy;
+    llvm::Value *ptr = lowerPlaceAsPtr(fs, p, &finalTy);
+    return builder_->CreateLoad(toLLVMType(finalTy), ptr, "load");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -807,7 +799,8 @@ llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
 void LLVMIRBuilder::storePlace(FunctionState &fs, const MIRPlace &p, llvm::Value *val)
 {
     llvm::Value *ptr = lowerPlaceAsPtr(fs, p);
-    builder_->CreateStore(val, ptr);
+    if (fs.allocas[p.index] != nullptr)
+        builder_->CreateStore(val, ptr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -832,10 +825,14 @@ llvm::Function *LLVMIRBuilder::getOrDeclareDropGlue(const std::string &structNam
         {llvm::PointerType::getUnqual(ctx_)},
         /*isVarArg=*/false);
 
-    return llvm::Function::Create(fty,
+    llvm::Function *func = llvm::Function::Create(fty,
         llvm::GlobalValue::ExternalLinkage,
         name,
         context->module.get());
+
+    func->setVisibility(llvm::GlobalValue::DefaultVisibility);
+
+    return func;
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)
@@ -858,7 +855,7 @@ std::string LLVMIRBuilder::mangleName(const MIRFunction &fn) const
     // Simple mangling: for methods → "StructName::methodName",
     // for trait impls → "StructName::TraitName::methodName",
     // for free functions → just "funcName".
-    if (!fn.isMethod)
+    if (fn.associatedStruct.empty())
         return fn.name;
 
     std::string mangled = fn.associatedStruct + "::";
@@ -887,4 +884,33 @@ unsigned LLVMIRBuilder::fieldIndexOf(const std::string &structName,
     if (fit == sit->second.end())
         throw std::runtime_error("Unknown field: " + structName + "::" + fieldName);
     return fit->second;
+}
+
+std::shared_ptr<Type>
+LLVMIRBuilder::fieldTypeOf(const std::string &structName,
+    const std::string &fieldName)
+{
+    auto it = structFields_.find(structName);
+    assert(it != structFields_.end()
+           && "fieldTypeOf: unknown struct");
+
+    for (const auto &[name, ty] : it->second)
+    {
+        if (name == fieldName)
+            return ty;
+    }
+    llvm_unreachable(("fieldTypeOf: field '" + fieldName + "' not found in '" + structName + "'").c_str());
+}
+
+std::shared_ptr<Type>
+LLVMIRBuilder::getElementType(const std::shared_ptr<Type> &ty)
+{
+    switch (ty->getKind())
+    {
+    case Type::Kind::Reference:
+        return std::static_pointer_cast<ReferenceType>(ty)->getBaseType();
+
+    default:
+        llvm_unreachable("getElementType: type has no element type");
+    }
 }

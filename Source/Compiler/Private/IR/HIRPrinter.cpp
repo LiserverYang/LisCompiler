@@ -197,8 +197,6 @@ public:
     {
         printCommon(node);
         os << " call: "
-           << (node->isMethod ? "method " : "function ")
-           << (node->isStatic ? "static " : "")
            << "args_count: " << node->args.size();
     }
 
@@ -232,7 +230,6 @@ public:
     {
         printCommon(node);
         os << " [Block] stmts_count: " << node->stmts.size()
-           << (node->isExpression ? " (expression block)" : "")
            << " scope: " << detail::formatAddress(node->scope.get());
     }
 

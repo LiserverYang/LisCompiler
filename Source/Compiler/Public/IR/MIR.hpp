@@ -134,10 +134,12 @@ struct MIRRValueRef
     MIRPlace place;
     bool isMut;
 }; // &x / &mut x
+
 struct MIRRValueAddrOf
 {
     MIRPlace place;
 }; // raw addr-of
+
 struct MIRRValueStructInit
 {
     std::string structName;
@@ -169,8 +171,6 @@ struct MIRStmtCall
     MIROperand callee;            // func pointer / name operand
     std::string funcName;         // for debug / direct calls
     std::vector<MIROperand> args;
-    bool isMethod;
-    bool isStatic;
 };
 
 struct MIRStmtDrop

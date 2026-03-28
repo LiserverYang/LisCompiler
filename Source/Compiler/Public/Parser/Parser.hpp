@@ -200,6 +200,7 @@ protected:
     std::unique_ptr<Expr> parseFunctionCall(Token name);
     std::unique_ptr<Expr> parseMemberAccessChain(std::unique_ptr<Expr> left);
     std::unique_ptr<TraitDef> parseTraitDefinition();
+    std::unique_ptr<BorrowExpr> parseBorrowExpression();
 };
 
 /**

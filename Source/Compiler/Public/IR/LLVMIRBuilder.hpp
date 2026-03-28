@@ -93,6 +93,10 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, unsigned>>
         fieldIndex_;
 
+    std::unordered_map<std::string,
+        std::vector<std::pair<std::string, std::shared_ptr<Type>>>>
+        structFields_;
+
     // ── Per-function state ───────────────────────────────────────────────────
     struct FunctionState
     {
@@ -148,7 +152,10 @@ private:
     llvm::Value *lowerConst(const MIRConst &c);
 
     /// Returns a pointer to the place (always a pointer — callers load/store).
-    llvm::Value *lowerPlaceAsPtr(FunctionState &fs, const MIRPlace &p);
+    llvm::Value *lowerPlaceAsPtr(
+        FunctionState &fs,
+        const MIRPlace &p,
+        std::shared_ptr<Type> *outFinalTy = nullptr);
 
     /// Returns the loaded value at the place.
     llvm::Value *loadPlace(FunctionState &fs, const MIRPlace &p);
@@ -170,4 +177,11 @@ private:
 
     unsigned fieldIndexOf(const std::string &structName,
         const std::string &fieldName) const;
+
+    std::shared_ptr<Type>
+    getElementType(const std::shared_ptr<Type> &ty);
+
+    std::shared_ptr<Type>
+    fieldTypeOf(const std::string &structName,
+        const std::string &fieldName);
 };

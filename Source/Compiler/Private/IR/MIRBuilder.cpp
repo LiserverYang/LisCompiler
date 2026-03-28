@@ -316,7 +316,11 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     out.isMethod = fn->isMethod;
     out.isStatic = fn->isStatic;
     out.associatedStruct = fn->associatedStruct;
-    out.associatedTrait = fn->associatedTrait;
+
+    if (!fn->associatedTrait.empty())
+    {
+        out.associatedTrait = fn->associatedTrait;
+    }
 
     body_ = nullptr;
     return out;
@@ -557,6 +561,9 @@ MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
     if (auto *si = dynamic_cast<HIRStructInit *>(expr))
         return buildStructInit(si);
 
+    if (auto *ref = dynamic_cast<HIRRef *>(expr))
+        return buildRef(ref);
+
     throw std::runtime_error("MIRBuilder::buildExpr: unhandled HIRExpr subtype");
 }
 
@@ -648,6 +655,19 @@ MIRPlace MIRBuilder::buildCast(HIRCast *cast)
     return tmp;
 }
 
+// ── borrow expressions ──────────────────────────────────────────────────────────
+
+MIRPlace MIRBuilder::buildRef(HIRRef *ref)
+{
+    MIRPlace place = buildExpr(ref->expr.get());
+
+    MIRPlace tmp = makeTempPlace(ref->type);
+
+    emitAssign(tmp, MIRRValueRef{.place = std::move(place), .isMut = ref->isMutable});
+
+    return tmp;
+}
+
 // ── function / method calls ───────────────────────────────────────────────────
 
 MIRPlace MIRBuilder::buildCall(HIRCall *call)
@@ -682,10 +702,7 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         .dest = dest,
         .callee = std::move(calleeOp),
         .funcName = funcName,
-        .args = std::move(args),
-        .isMethod = call->isMethod,
-        .isStatic = call->isStatic,
-    });
+        .args = std::move(args)});
 
     return dest;
 }
@@ -696,6 +713,14 @@ MIRPlace MIRBuilder::buildMemberAccess(HIRMemberAccess *ma)
 {
     // Lower the object, then project into the field.
     MIRPlace obj = buildExpr(ma->object.get());
+
+    while (obj.type->getKind() == Type::Kind::Reference)
+    {
+        obj.projections.insert(obj.projections.begin(), Projection{.kind = ProjectionKind::Deref});
+        auto refTy = std::static_pointer_cast<ReferenceType>(obj.type);
+        obj.type = refTy->getBaseType();
+    }
+
     obj.projections.push_back(Projection{
         .kind = ProjectionKind::Field,
         .field = ma->memberName,

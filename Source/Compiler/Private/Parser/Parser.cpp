@@ -107,7 +107,9 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
 
     while (!match(TokenCode::RBRACE))
     {
-        traitDef->methods.push_back(parseMemberFunctionDefinition());
+        auto it = parseMemberFunctionDefinition();
+        it->traitName = traitDef->name;
+        traitDef->methods.push_back(std::move(it));
     }
 
     knownTypes.insert(traitDef->name);
@@ -147,7 +149,10 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     while (!check(TokenCode::RBRACE))
     {
-        impl->methods.push_back(parseMemberFunctionDefinition());
+        auto it = parseMemberFunctionDefinition();
+        it->sturctName = impl->structName;
+        it->traitName = impl->traitName.has_value() ? impl->traitName.value() : "";
+        impl->methods.push_back(std::move(it));
     }
 
     consume(TokenCode::RBRACE, "expect a '}'", E_ExpectARBRACE);
@@ -651,11 +656,28 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return parseMemberAccessChain(std::move(self));
     }
 
+    if (match(TokenCode::REFERENCE))
+    {
+        auto expr = parseBorrowExpression();
+        recorder.bindNode(expr.get());
+        return expr;
+    }
+
     Logger::LogInfo logInfo;
     initLogInfo(currentToken(), logInfo, "expected expression", E_ExpectedExpression);
     Logger::Log(Logger::LogLevel::ERROR, logInfo);
 
     return nullptr;
+}
+
+std::unique_ptr<BorrowExpr> Parser::parseBorrowExpression()
+{
+    PositionRecorder recorder(this, nullptr);
+    auto expr = std::make_unique<BorrowExpr>();
+    if (match(TokenCode::MUT))
+        expr->isMutable = true;
+    expr->expression = parseExpression();
+    return expr;
 }
 
 std::unique_ptr<ParenExpr> Parser::parseParenthesized()

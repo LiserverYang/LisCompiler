@@ -95,6 +95,7 @@ private:
     MIRPlace buildCall(HIRCall *call);
     MIRPlace buildMemberAccess(HIRMemberAccess *ma);
     MIRPlace buildStructInit(HIRStructInit *si);
+    MIRPlace buildRef(HIRRef *ref);
 
     // ── operand helpers ───────────────────────────────────────────────────────
     /**

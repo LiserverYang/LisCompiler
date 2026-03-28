@@ -76,4 +76,5 @@ public:
     virtual void visit(BinaryOp *node) override;
     virtual void visit(CastExpr *node) override;
     virtual void visit(ParenExpr *node) override;
+    virtual void visit(BorrowExpr *node) override;
 };

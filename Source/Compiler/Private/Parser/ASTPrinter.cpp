@@ -361,6 +361,17 @@ void ASTPrinter::visit(ParenExpr *node)
     os << " [ParenExpr]";
 }
 
+void ASTPrinter::visit(BorrowExpr *node)
+{
+    printCommon(node);
+    os << " borrow";
+
+    if (node->isMutable)
+    {
+        os << "(mutable)";
+    }
+}
+
 // 获取节点的子节点列表
 std::vector<ASTNode *> getChildren(ASTNode *node)
 {
@@ -574,6 +585,11 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
         {
             children.push_back(method.get());
         }
+    }
+    else if (auto borrow = dynamic_cast<BorrowExpr *>(node))
+    {
+        if (borrow->expression)
+            children.push_back(borrow->expression.get());
     }
 
     return children;

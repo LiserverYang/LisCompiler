@@ -219,9 +219,11 @@ public:
     struct Method
     {
         std::string name;                 // 方法名
+        std::string traitName;            // trait 名
         std::vector<Field> params;        // 参数（复用Field结构，因为参数也是"名+类型"）
         std::shared_ptr<Type> returnType; // 返回类型
         bool isStatic;                    // 是否为静态方法
+        bool isTraitImpl;                 // 是否是 trait 实现
     };
 
 public:

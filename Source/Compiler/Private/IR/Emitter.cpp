@@ -253,8 +253,8 @@ void Emitter::linkExecutable(const std::vector<std::string> &objectFiles,
         cmd << " \"" << obj << '"';
     for (const auto &flag : extraFlags)
         cmd << " " << flag;
-    // Use lld for faster linking if available (comment out if not installed).
-    // cmd << " -fuse-ld=lld";
+        // Use lld for faster linking if available (comment out if not installed).
+        // cmd << " -fuse-ld=lld";
 #endif
 
     int ret = std::system(cmd.str().c_str());

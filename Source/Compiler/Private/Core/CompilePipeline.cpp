@@ -16,6 +16,7 @@
 #include "Lexer/Lexer.hpp"
 #include "Parser/Parser.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -36,6 +37,41 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--print-mir"}, setAsTrue, "false", "Print the parsed MIR."});
     argParser->registRule(ArgParseRule{{"--print-llvmir"}, setAsTrue, "false", "Print the parsed LLVM IR."});
     argParser->registRule(ArgParseRule{{"-o"}, setAsValue, "2", "The optimise level(0-3), default is 2."});
+
+    // here we load the standard library definations
+    // the standard library will export into %binary_path%/lstdlib/*.lis
+
+    namespace fs = std::filesystem;
+
+    fs::path stdLibDir = fs::path(argv[0]).parent_path() / "lstdlib";
+
+    if (!fs::exists(stdLibDir))
+    {
+        std::runtime_error("could not find the standard library, please check the binary_path/lstdlib!");
+    }
+
+    std::string originalFilePath = context->filePath;
+    std::string originalFileValue = context->fileValue;
+
+    for (auto &entry : fs::directory_iterator(stdLibDir))
+    {
+        if (entry.path().extension() == ".lis")
+        {
+            std::ifstream file(entry.path());
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+            context->filePath = entry.path().string();
+            context->fileValue = content;
+
+            Lexer lexer(context);
+            Parser parser(context);
+            lexer.run();
+            parser.run();
+        }
+    }
+
+    context->filePath = originalFilePath;
+    context->fileValue = originalFileValue;
 
     passes.emplace_back(argParser.release());
     passes.emplace_back(std::make_unique<LambdaPass>(context, [](std::shared_ptr<Context> ctx)

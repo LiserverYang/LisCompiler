@@ -276,9 +276,6 @@ static std::string fmtStatement(const MIRStatement &stmt)
                 s << fmtOperand(v.args[i]);
             }
             s << col(C::OP) << ")" << col(C::RST);
-
-            if (v.isMethod)
-                s << col(C::DIM) << (v.isStatic ? "  // static method" : "  // method") << col(C::RST);
         }
         else if constexpr (std::is_same_v<T, MIRStmtDrop>)
         {
@@ -421,11 +418,26 @@ void printMIRBody(const MIRBody &body, std::ostream &out)
 
 // ─── Function ────────────────────────────────────────────────────────────────
 
+static std::string mangleName(const MIRFunction &fn)
+{
+    // Simple mangling: for methods → "StructName::methodName",
+    // for trait impls → "StructName::TraitName::methodName",
+    // for free functions → just "funcName".
+    if (fn.associatedStruct.empty())
+        return fn.name;
+
+    std::string mangled = fn.associatedStruct + "::";
+    if (fn.associatedTrait.has_value())
+        mangled += *fn.associatedTrait + "::";
+    mangled += fn.name;
+    return mangled;
+}
+
 void printMIRFunction(const MIRFunction &fn, std::ostream &out)
 {
     // Signature header
     out << col(C::KW) << "fn " << col(C::RST)
-        << col(C::BOLD) << fn.name << col(C::RST);
+        << col(C::BOLD) << mangleName(fn) << col(C::RST);
 
     if (!fn.associatedStruct.empty())
     {

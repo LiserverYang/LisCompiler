@@ -25,6 +25,8 @@ public:
     Lexer(std::shared_ptr<Context> cnt)
     {
         context = cnt;
+
+        cnt->tokenStream.clear();
     }
 
     ~Lexer() {}

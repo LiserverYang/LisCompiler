@@ -54,6 +54,7 @@ public:
     void visit(CastExpr *node) override;
     void visit(ParenExpr *node) override;
     void visit(TraitDef *node) override;
+    void visit(BorrowExpr *node) override;
 };
 
 std::vector<ASTNode *> getChildren(ASTNode *node);
