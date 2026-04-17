@@ -201,6 +201,11 @@ protected:
     std::unique_ptr<Expr> parseMemberAccessChain(std::unique_ptr<Expr> left);
     std::unique_ptr<TraitDef> parseTraitDefinition();
     std::unique_ptr<BorrowExpr> parseBorrowExpression();
+    std::vector<std::unique_ptr<GenericParam>> parseGenericParams();
+    std::vector<std::unique_ptr<TypeNode>> parseCallGenericParams();
+    std::vector<std::string> parseGenericConstraints();
+
+    bool looksLikeCallGenericParams();
 };
 
 /**

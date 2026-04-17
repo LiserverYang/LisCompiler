@@ -160,6 +160,20 @@ void ASTPrinter::visit(Param *node)
     }
 }
 
+void ASTPrinter::visit(GenericParam *node)
+{
+    printCommon(node);
+    os << " " << node->name << ": ";
+
+    for (size_t i = 0; i < node->constraints.size(); i ++)
+    {
+        os << node->constraints[i] << " ";
+
+        if (i != node->constraints.size() - 1)
+            os << "+ ";
+    }
+}
+
 void ASTPrinter::visit(SelfParam *node)
 {
     printCommon(node);
@@ -410,44 +424,39 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
     }
     else if (auto mf = dynamic_cast<MemberFunctionDef *>(node))
     {
+        for (auto &gparam : mf->genericParams)
+            children.push_back(gparam.get());
+        
         if (mf->selfParam && *mf->selfParam)
-        {
             children.push_back(mf->selfParam->get());
-        }
+        
         for (auto &param : mf->params)
-        {
             children.push_back(param.get());
-        }
+
         if (mf->returnType && *mf->returnType)
-        {
             children.push_back(mf->returnType->get());
-        }
+        
         if (mf->body && mf->body.value())
-        {
             children.push_back(mf->body.value().get());
-        }
     }
     else if (auto si = dynamic_cast<StructImpl *>(node))
     {
         for (auto &method : si->methods)
-        {
             children.push_back(method.get());
-        }
     }
     else if (auto fd = dynamic_cast<FunctionDef *>(node))
     {
+        for (auto &gparam : fd->genericParams)
+            children.push_back(gparam.get());
+        
         for (auto &param : fd->params)
-        {
             children.push_back(param.get());
-        }
+        
         if (fd->returnType && *fd->returnType)
-        {
             children.push_back(fd->returnType->get());
-        }
+        
         if (fd->body)
-        {
             children.push_back(fd->body.get());
-        }
     }
     else if (auto gv = dynamic_cast<GlobalVarDef *>(node))
     {
@@ -552,9 +561,7 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
         if (fc->function)
             children.push_back(fc->function.get());
         for (auto &arg : fc->arguments)
-        {
             children.push_back(arg.get());
-        }
     }
     else if (auto ma = dynamic_cast<MemberAccess *>(node))
     {

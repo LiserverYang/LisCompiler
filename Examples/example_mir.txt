@@ -1,0 +1,298 @@
+// --- functions ---
+
+fn fib {
+    // locals
+    // total 17 locals
+    // return slot
+    let mut _0: int32;
+    arg n: int32;
+    let mut _1: int32;
+    let mut _2: bool;
+    let mut _3: int32;
+    let mut _4: bool;
+    let mut _5: bool;
+    let mut _6: int32;
+    let mut _7: int32;
+    let mut _8: int32;
+    let mut _9: fn(int32) -> int32;
+    let mut _10: int32;
+    let mut _11: int32;
+    let mut _12: int32;
+    let mut _13: fn(int32) -> int32;
+    let mut _14: int32;
+    let mut _15: int32;
+
+    bb0 (entry): {
+        _1 = const 0: int32;
+        _2 = BinaryOp(copy n == copy _1);
+        _3 = const 1: int32;
+        _4 = BinaryOp(copy n == copy _3);
+        _5 = BinaryOp(copy _2 || copy _4);
+        // term
+        switchInt(copy _5) -> [true: bb1, false: bb2];
+    }
+    bb1 (then): {
+        _6 = const 1: int32;
+        _0 = copy _6;
+        // term
+        return;
+    }
+    bb2 (if_join): {
+        _7 = const 2: int32;
+        _8 = BinaryOp(copy n - copy _7);
+        _9 = const "fib": fn(int32) -> int32;
+        _10 = call fib(copy _8);
+        _11 = const 1: int32;
+        _12 = BinaryOp(copy n - copy _11);
+        _13 = const "fib": fn(int32) -> int32;
+        _14 = call fib(copy _12);
+        _15 = BinaryOp(copy _10 + copy _14);
+        _0 = copy _15;
+        // term
+        return;
+    }
+}
+
+fn number::new  // impl number {
+    // locals
+    // total 4 locals
+    // return slot
+    let mut _0: number;
+    arg a: int32;
+    arg b: int32;
+    let mut _1: number;
+
+    bb0 (entry): {
+        _1 = number { a: copy a, b: copy b };
+        _0 = move _1;
+        // term
+        return;
+    }
+}
+
+fn number::add  // impl number {
+    // locals
+    // total 6 locals
+    // return slot
+    let mut _0: void;
+    arg self: &mut number;
+    arg a: int32;
+    arg b: int32;
+    let mut _1: int32;
+    let mut _2: int32;
+
+    bb0 (entry): {
+        _1 = BinaryOp(move (*self).a + copy a);
+        (*self).a = copy _1;
+        _2 = BinaryOp(move (*self).b + copy b);
+        (*self).b = copy _2;
+        // term
+        return;
+    }
+}
+
+fn number::add_other  // impl number {
+    // locals
+    // total 5 locals
+    // return slot
+    let mut _0: void;
+    arg self: &mut number;
+    arg other: &number;
+    let mut _1: int32;
+    let mut _2: int32;
+
+    bb0 (entry): {
+        _1 = BinaryOp(move (*self).a + move (*other).a);
+        (*self).a = copy _1;
+        _2 = BinaryOp(move (*self).b + move (*other).b);
+        (*self).b = copy _2;
+        // term
+        return;
+    }
+}
+
+fn number::drop  // impl number for Drop {
+    // locals
+    // total 2 locals
+    // return slot
+    let mut _0: void;
+    arg self: number;
+
+    bb0 (entry): {
+        // term
+        return;
+    }
+}
+
+fn value {
+    // locals
+    // total 2 locals
+    // return slot
+    let mut _0: T;
+    arg u: T;
+
+    bb0 (entry): {
+        _0 = move u;
+        // term
+        return;
+    }
+}
+
+fn box::new  // impl box {
+    // locals
+    // total 3 locals
+    // return slot
+    let mut _0: box$T;
+    arg _v: T;
+    let mut _1: box$T;
+
+    bb0 (entry): {
+        _1 = box$T { v: move _v };
+        _0 = move _1;
+        // term
+        return;
+    }
+}
+
+fn main {
+    // locals
+    // total 36 locals
+    // return slot
+    let mut _0: int32;
+    let x: int32;
+    let mut _1: int32;
+    let mut _2: fn(int32) -> int32;
+    let mut _3: int32;
+    let mut _4: int32;
+    let mut y: number;
+    let mut _5: int32;
+    let mut _6: int32;
+    let mut _7: fn(int32, int32) -> number;
+    let mut _8: number;
+    let mut _9: &mut number;
+    let mut _10: int32;
+    let mut _11: fn(&mut number, int32, int32) -> void;
+    let mut _12: void;
+    let m: number;
+    let mut _13: fn(box$box$int32) -> box$box$int32;
+    let mut _14: number;
+    let u: box$box$int32;
+    let mut _15: int32;
+    let mut _16: fn(box$box$int32) -> box$box$box$int32;
+    let mut _17: box$int32;
+    let mut _18: fn(box$box$int32) -> box$box$box$int32;
+    let mut _19: box$box$int32;
+    let mut _20: fn(box$box$int32) -> box$box$int32;
+    let mut _21: box$box$int32;
+    let z: number;
+    let mut _22: int32;
+    let mut _23: int32;
+    let mut _24: fn(int32, int32) -> number;
+    let mut _25: number;
+    let mut _26: &mut number;
+    let mut _27: &number;
+    let mut _28: fn(&mut number, &number) -> void;
+    let mut _29: void;
+    let mut _30: int32;
+
+    bb0 (entry): {
+        _1 = const 4: int32;
+        _2 = const "fib": fn(int32) -> int32;
+        _3 = call fib(copy _1);
+        _4 = copy _3 as int32;
+        x = copy _4;
+        _5 = const 1: int32;
+        _6 = const 2: int32;
+        _7 = const "number::new": fn(int32, int32) -> number;
+        _8 = call number::new(copy _5, copy _6);
+        y = move _8;
+        _9 = &mut y;
+        _10 = const 2: int32;
+        _11 = const "number::add": fn(&mut number, int32, int32) -> void;
+        _12 = call number::add(move _9, copy x, copy _10);
+        _13 = const "value": fn(box$box$int32) -> box$box$int32;
+        _14 = call value_Mono_number(move y);
+        m = move _14;
+        _15 = const 10: int32;
+        _16 = const "box::new": fn(box$box$int32) -> box$box$box$int32;
+        _17 = call box::new_Mono_int32(copy _15);
+        _18 = const "box::new": fn(box$box$int32) -> box$box$box$int32;
+        _19 = call box::new_Mono_box$int32(move _17);
+        _20 = const "value": fn(box$box$int32) -> box$box$int32;
+        _21 = call value_Mono_box$box$int32(move _19);
+        u = move _21;
+        _22 = const 1: int32;
+        _23 = const 2: int32;
+        _24 = const "number::new": fn(int32, int32) -> number;
+        _25 = call number::new(copy _22, copy _23);
+        z = move _25;
+        _26 = &mut y;
+        _27 = &z;
+        _28 = const "number::add_other": fn(&mut number, &number) -> void;
+        _29 = call number::add_other(move _26, move _27);
+        _30 = const 0: int32;
+        _0 = copy _30;
+        // term
+        return;
+    }
+}
+
+fn value_Mono_number {
+    // locals
+    // total 2 locals
+    // return slot
+    let mut _0: number;
+    arg u: number;
+
+    bb0 (entry): {
+        _0 = move u;
+        // term
+        return;
+    }
+}
+
+fn box::new_Mono_int32  // impl box {
+    // locals
+    // total 3 locals
+    // return slot
+    let mut _0: box$int32;
+    arg _v: int32;
+    let mut _1: box$int32;
+
+    bb0 (entry): {
+        _1 = box$int32 { v: move _v };
+        _0 = move _1;
+        // term
+        return;
+    }
+}
+
+fn box::new_Mono_box$int32  // impl box {
+    // locals
+    // total 3 locals
+    // return slot
+    let mut _0: box$box$int32;
+    arg _v: box$int32;
+    let mut _1: box$box$int32;
+
+    bb0 (entry): {
+        _1 = box$box$int32 { v: move _v };
+        _0 = move _1;
+        // term
+        return;
+    }
+}
+
+fn value_Mono_box$box$int32 {
+    // locals
+    // total 2 locals
+    // return slot
+    let mut _0: box$box$int32;
+    arg u: box$box$int32;
+
+    bb0 (entry): {
+        _0 = move u;
+        // term
+        return;
+    }
+}

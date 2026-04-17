@@ -55,6 +55,18 @@ public:
     }
 };
 
+class GenericParam : public ASTNode
+{
+public:
+    std::string name;
+    std::vector<std::string> constraints;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
 class ModulePath : public ASTNode
 {
 public:
@@ -77,6 +89,7 @@ public:
     std::string typeName; // base type name or idenfiter
     std::unique_ptr<ModulePath> modulePath;
     std::shared_ptr<Type> semanticType;
+    std::vector<std::unique_ptr<TypeNode>> genericArgs;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -115,6 +128,7 @@ class StructDef : public ASTNode
 public:
     std::string name;
     std::vector<std::unique_ptr<MemberVarDef>> members;
+    std::vector<std::unique_ptr<GenericParam>> genericParams;
     Symbol *symbol;
 
     void accept(ASTVisitor *visitor) override
@@ -168,11 +182,12 @@ class MemberFunctionDef : public ASTNode
 {
 public:
     std::string name;
-    std::string sturctName;
+    std::string structName;
     std::string traitName;
     std::optional<std::unique_ptr<SelfParam>> selfParam;
     std::vector<std::unique_ptr<Param>> params;
     std::optional<std::unique_ptr<TypeNode>> returnType;
+    std::vector<std::unique_ptr<GenericParam>> genericParams;
     std::optional<std::unique_ptr<Stmt>> body; // CompoundStmt, trait can be null
     std::shared_ptr<Type> declaredReturnType;
 
@@ -188,6 +203,8 @@ public:
     std::string structName;
     std::vector<std::unique_ptr<MemberFunctionDef>> methods;
     std::optional<std::string> traitName;
+    std::vector<std::unique_ptr<GenericParam>> genericParams;
+    std::vector<std::unique_ptr<TypeNode>> structGenericArgs;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -204,6 +221,7 @@ public:
     std::unique_ptr<Stmt> body; // CompoundStmt
     Symbol *symbol;
     std::shared_ptr<Type> type;
+    std::vector<std::unique_ptr<GenericParam>> genericParams;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -376,6 +394,7 @@ public:
     std::unique_ptr<TypeNode> structType;
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> memberInits;
     Symbol *structSymbol;
+    std::vector<std::unique_ptr<TypeNode>> genericParams;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -389,6 +408,7 @@ public:
     std::unique_ptr<TypeNode> classType;
     std::string methodName;
     std::vector<std::unique_ptr<Expr>> arguments;
+    std::vector<std::unique_ptr<TypeNode>> genericParams;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -403,6 +423,7 @@ public:
     std::string methodName;
     std::vector<std::unique_ptr<Expr>> arguments;
     const CustomType::Method *method;
+    std::vector<std::unique_ptr<TypeNode>> genericParams;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -415,6 +436,7 @@ class FunctionCall : public Expr
 public:
     std::unique_ptr<Expr> function;
     std::vector<std::unique_ptr<Expr>> arguments;
+    std::vector<std::unique_ptr<TypeNode>> genericParams;
 
     void accept(ASTVisitor *visitor) override
     {

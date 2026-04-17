@@ -26,3 +26,5 @@ compile_commands.json
 book
 
 Build/Binaries/lstdlib
+
+*.d

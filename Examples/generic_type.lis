@@ -1,0 +1,54 @@
+struct Box<T>
+{
+    pub a: T
+}
+
+trait Value
+{
+    fn value<T>(v: T) -> T;
+}
+
+impl Box
+{
+    fn new<T>(_a: T)
+    {
+        ret Box {
+            a: _a
+        };
+    }
+}
+
+impl Value for Box
+{
+    fn value<T>(v: T)
+    {
+        ret v;
+    }
+}
+
+fn value<T>(v: T)
+{
+    ret v;
+}
+
+fn max<T>(u: T, v: T)
+{
+    if (u < v) {
+        ret v;
+    }
+
+    ret u;
+}
+
+fn main()
+{
+    let x = Box::value(10);
+    let y = value<i32>(10);
+    let u = value(Box::new(10));
+
+    let z = max(1, 2);
+
+    let a = Box<Box<i32>>::new(Box<i32>::new(10));
+
+    ret 0;
+}

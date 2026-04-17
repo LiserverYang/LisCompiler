@@ -1,15 +1,6 @@
 /**
  * Copyright 2026, LiserverYang. All rights reserved.
  * MIT License.
- *
- * Emitter.cpp
- *
- * Link against (add to your CMakeLists):
- *   llvm_map_components_to_libnames(LLVM_LIBS
- *       core support target analysis passes
- *       X86        # add AArch64 / RISCV / WebAssembly etc. as needed
- *       X86AsmParser X86CodeGen X86Desc X86Info
- *   )
  */
 
 #include "IR/Emitter.hpp"
@@ -33,31 +24,16 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 
-// ─────────────────────────────────────────────────────────────────────────────
-// One-time LLVM backend initialisation.
-// Call this before constructing any Emitter.  It is idempotent.
-// ─────────────────────────────────────────────────────────────────────────────
-
 static void initLLVMTargets()
 {
     static bool done = false;
     if (done) return;
     done = true;
 
-    // Native target (the machine this compiler is running on).
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
-
-    // Cross-compilation targets — add whichever you want to support.
-    // LLVMInitializeX86Target() etc. are pulled in by the linker when you
-    // include the X86 component in CMakeLists.  Uncomment as needed:
-    //
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Target machine construction
-// ─────────────────────────────────────────────────────────────────────────────
 
 void Emitter::initTargetMachine()
 {
@@ -137,11 +113,6 @@ void Emitter::runOptPipeline(llvm::Module &module)
     default: lvl = llvm::OptimizationLevel::O2; break;
     }
 
-    // buildPerModuleDefaultPipeline includes:
-    //   • mem2reg         (alloca → SSA phi nodes)
-    //   • instcombine     (algebraic simplification)
-    //   • simplifycfg     (dead block elimination, branch merging)
-    //   • inlining, loop vectorisation, etc. at O2+
     llvm::ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(lvl);
     mpm.run(module, mam);
 }
@@ -237,8 +208,7 @@ void Emitter::linkExecutable(const std::vector<std::string> &objectFiles,
     std::ostringstream cmd;
 
 #if defined(_WIN32)
-    // On Windows, prefer clang-cl or lld-link.
-    // You can also shell out to link.exe if MSVC is installed.
+    // On Windows, prefer clang-cl or lld-link.\
     cmd << "clang -o ";
     cmd << '"' << outPath << '"';
     for (const auto &obj : objectFiles)
@@ -253,8 +223,6 @@ void Emitter::linkExecutable(const std::vector<std::string> &objectFiles,
         cmd << " \"" << obj << '"';
     for (const auto &flag : extraFlags)
         cmd << " " << flag;
-        // Use lld for faster linking if available (comment out if not installed).
-        // cmd << " -fuse-ld=lld";
 #endif
 
     int ret = std::system(cmd.str().c_str());
@@ -269,6 +237,8 @@ void Emitter::run()
     initTargetMachine();
 
     std::string targetPath = "./a.o";
+
+    runOptPipeline(*context->module.get());
 
     emitObjectFile(*context->module.get(), targetPath);
 }

@@ -51,11 +51,6 @@ public:
     virtual void run() override
     {
         context->mirProgram = std::make_unique<MIRProgram>(buildProgram(context->hirProgram.get()));
-
-        if (context->args->getArg("print_mir").compare("true") == 0)
-        {
-            printMIRProgram(*context->mirProgram.get(), std::cout);
-        }
     }
 
     /** Entry point. Consumes an HIRProgram and returns a fully built MIRProgram. */

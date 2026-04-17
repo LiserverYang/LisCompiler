@@ -9,6 +9,22 @@
 #include <cassert>
 #include <stdexcept>
 
+/**
+ * 这是我以前放在 LLVM IR 阶段的 mangle 函数，你可能会用到
+ */
+std::string mangleName(const MIRFunction &fn)
+{
+    // Simple mangling: for methods → "StructName::methodName",
+    // for free functions → just "funcName".
+    if (fn.associatedStruct.empty())
+        return fn.name;
+
+    std::string mangled = fn.associatedStruct + "::";
+
+    mangled += fn.name;
+    return mangled;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers: copy-semantics predicate
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,13 +208,13 @@ MIRProgram MIRBuilder::buildProgram(HIRProgram *prog)
 
         if (auto *fn = dynamic_cast<HIRFunction *>(raw))
         {
-            out.functions.push_back(buildFunction(fn));
+            out.functions.push_back(std::make_shared<MIRFunction>(buildFunction(fn)));
         }
         else if (auto *impl = dynamic_cast<HIRImpl *>(raw))
         {
             // Each impl method becomes its own MIRFunction.
             for (auto &method : impl->methods)
-                out.functions.push_back(buildFunction(method.get()));
+                out.functions.push_back(std::make_shared<MIRFunction>(buildFunction(method.get())));
         }
         else if (auto *decl = dynamic_cast<HIRVarDecl *>(raw))
         {
@@ -316,6 +332,13 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     out.isMethod = fn->isMethod;
     out.isStatic = fn->isStatic;
     out.associatedStruct = fn->associatedStruct;
+
+    out.name = mangleName(out);
+    
+    for (auto &gParam : fn->gParams)
+    {
+        out.genericParams.push_back(gParam->getParamName());
+    }
 
     if (!fn->associatedTrait.empty())
     {
@@ -702,7 +725,9 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         .dest = dest,
         .callee = std::move(calleeOp),
         .funcName = funcName,
-        .args = std::move(args)});
+        .args = std::move(args),
+        .genericParams = std::move(call->typedGenericParams)}
+    );
 
     return dest;
 }

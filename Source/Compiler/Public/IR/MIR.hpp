@@ -171,6 +171,7 @@ struct MIRStmtCall
     MIROperand callee;            // func pointer / name operand
     std::string funcName;         // for debug / direct calls
     std::vector<MIROperand> args;
+    std::vector<std::shared_ptr<Type>> genericParams;
 };
 
 struct MIRStmtDrop
@@ -270,6 +271,7 @@ struct MIRFunction
     bool isStatic;
     std::string associatedStruct;
     std::optional<std::string> associatedTrait;
+    std::vector<std::string> genericParams;
 };
 
 struct MIRGlobal
@@ -281,6 +283,6 @@ struct MIRGlobal
 
 struct MIRProgram
 {
-    std::vector<MIRFunction> functions;
+    std::vector<std::shared_ptr<MIRFunction>> functions;
     std::vector<MIRGlobal> globals;
 };

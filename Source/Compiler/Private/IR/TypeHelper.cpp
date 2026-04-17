@@ -3,13 +3,6 @@
  * MIT License.
  *
  * TypeHelper.cpp — implement the four bridge functions declared in MIRToLLVM.hpp.
- *
- * This is the ONLY file you need to adapt to your own Type class.
- * Everything else in MIRToLLVM.cpp calls these functions and knows nothing
- * about Type internals.
- *
- * Replace the stub implementations below with real ones once you know
- * what your Type::Kind enum and fields look like.
  */
 
 #include "Analysiser/Type.hpp"
@@ -64,25 +57,26 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
         }
     }
 
-    // Pointer — LLVM 15+ uses opaque pointers (ptr), not typed ptr<T>.
-    // If you're on an older LLVM that still has typed pointers, use:
-    //   return llvm::PointerType::get(semanticTypeToLLVM(ty->inner, ctx), 0);
     case Type::Kind::Reference:
         return llvm::PointerType::getUnqual(ctx); // opaque ptr
 
-    // Struct — looked up by name; the body is set in the struct-decl pass.
+        // Struct — looked up by name; the body is set in the struct-decl pass.
     case Type::Kind::Custom:
     {
-        // We return a pointer to the named struct type.  The actual
-        // llvm::StructType must already have been created in declareStructTypes().
-        // Here we just return a pointer; the caller dereferences as needed.
-        // If you want value-type structs (not pointer-to-struct), change this
-        // to return the StructType* directly and update all GEP/load/store logic.
-        //
-        // For pass-by-value in MIR assignments, returning the StructType works:
-        auto newTy = std::static_pointer_cast<CustomType>(ty);
+        auto ct = std::static_pointer_cast<CustomType>(ty);
 
-        return llvm::StructType::getTypeByName(ctx, newTy->getName());
+        // Fast path: already declared.
+        if (auto *existing = llvm::StructType::getTypeByName(ctx, ct->getName()))
+            return existing;
+
+        // Lazily create and set the body. Create opaque first to handle
+        // self-referential types (e.g. via references) without infinite recursion.
+        auto *st = llvm::StructType::create(ctx, ct->getName());
+        std::vector<llvm::Type *> fieldTys;
+        for (const auto &f : ct->getFields())
+            fieldTys.push_back(semanticTypeToLLVM(f.type, ctx));
+        st->setBody(fieldTys, /*isPacked=*/false);
+        return st;
     }
 
     // Function pointer

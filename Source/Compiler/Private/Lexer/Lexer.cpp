@@ -1,5 +1,6 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
+ * MIT License.
  */
 
 #include "Lexer/Lexer.hpp"

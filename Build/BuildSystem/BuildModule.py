@@ -11,340 +11,529 @@ from .TestModule import TestModule
 from .FormatCheck import CheckFormat
 from .ModuleBase import ModuleBase
 
-from typing import List
+from typing import List, Tuple
 
 import subprocess
 import concurrent.futures
+import hashlib
 import os
+import sys
+import threading
+
+
+# --------------------------------------------------------------------------- #
+# Transient status line
+# --------------------------------------------------------------------------- #
+#
+# A single "bottom line" that is overwritten every time a new source file
+# starts compiling, the way ninja / cmake show progress. Writes go through
+# a lock because the compile pool is multi-threaded.
+
+_StatusLock = threading.Lock()
+_StatusLastLen: int = 0
+
+
+def _PrintStatus(Text: str) -> None:
+    """Overwrite the transient status line with ``Text``."""
+    global _StatusLastLen
+    with _StatusLock:
+        Padding = max(0, _StatusLastLen - len(Text))
+        sys.stdout.write("\r" + Text + (" " * Padding))
+        sys.stdout.flush()
+        _StatusLastLen = len(Text)
+
+
+def _ClearStatus() -> None:
+    """Erase the transient status line so the next real print starts clean."""
+    global _StatusLastLen
+    with _StatusLock:
+        if _StatusLastLen > 0:
+            sys.stdout.write("\r" + (" " * _StatusLastLen) + "\r")
+            sys.stdout.flush()
+            _StatusLastLen = 0
+
+
+# --------------------------------------------------------------------------- #
+# Short hash (used to disambiguate same-named sources in one module)
+# --------------------------------------------------------------------------- #
+
+
+def _ShortHash(Text: str, Length: int = 8) -> str:
+    return hashlib.md5(Text.encode("utf-8")).hexdigest()[:Length]
+
+
+# --------------------------------------------------------------------------- #
+# Platform helpers
+# --------------------------------------------------------------------------- #
+
+
+def _ExecutableSuffix() -> str:
+    return ".exe" if GetCurrentSystem() == SystemEnum.Windows else ""
+
+
+def _DynamicLibSuffix() -> str:
+    return ".dll" if GetCurrentSystem() == SystemEnum.Windows else ".so"
+
+
+# --------------------------------------------------------------------------- #
+# Source discovery
+# --------------------------------------------------------------------------- #
+
+
+def _CollectSourceFiles(RootFolder: FileIO) -> Tuple[List[str], List[str]]:
+    """
+    Recursively collect C and C++ source files under ``RootFolder``.
+
+    :returns: ``(c_files, cpp_files)``
+    """
+    CFiles: List[str] = []
+    CppFiles: List[str] = []
+
+    def Walk(Folder: FileIO) -> None:
+        for SubFileStr in Folder.GetSubFiles():
+            SubFile: FileIO = FileIO(SubFileStr)
+            if SubFile.IsFolder():
+                Walk(SubFile)
+                continue
+
+            Ext = SubFile.EndsWith()
+            if Ext == ".cpp" or Ext == ".cc":
+                CppFiles.append(SubFile.FilePathStr)
+            elif Ext == ".c":
+                CFiles.append(SubFile.FilePathStr)
+
+    Walk(RootFolder)
+    return CFiles, CppFiles
+
+
+# --------------------------------------------------------------------------- #
+# Intermediate file paths
+# --------------------------------------------------------------------------- #
+
+
+def _ObjectFilePath(MiddleFilesDir: str, SourceFile: str) -> str:
+    Base = FileIO(SourceFile).FileName()
+    Hash = _ShortHash(os.path.abspath(SourceFile))
+    return f"{MiddleFilesDir}/{Base}.{Hash}.o"
+
+
+def _DependencyFilePath(MiddleFilesDir: str, SourceFile: str) -> str:
+    Base = FileIO(SourceFile).FileName()
+    Hash = _ShortHash(os.path.abspath(SourceFile))
+    return f"{MiddleFilesDir}/{Base}.{Hash}.d"
+
+
+# --------------------------------------------------------------------------- #
+# Header-dependency tracking
+# --------------------------------------------------------------------------- #
+
+
+def _ParseDependencyFile(DepFilePath: str) -> List[str]:
+    """
+    Parse a ``.d`` dependency file produced by ``gcc/g++`` with
+    ``-MMD -MP -MF``.
+
+    The Make-style format looks like::
+
+        target.o: src.cpp /path/to/header1.h \\
+          /path/to/header2.h
+
+        /path/to/header1.h:
+        /path/to/header2.h:
+
+    The trailing "phony" entries come from ``-MP`` and are harmless here
+    because we only look at the RHS of the first colon.
+
+    :returns: the list of header / source paths the object depends on
+        (the right-hand side of the first rule). An empty list is
+        returned if the file does not exist or cannot be read.
+    """
+    DepFile = FileIO(DepFilePath)
+    if not DepFile.Exists():
+        return []
+
+    try:
+        with open(DepFilePath, "r", encoding="UTF-8") as Handle:
+            Content = Handle.read()
+    except OSError:
+        return []
+
+    # Collapse line continuations so we can split on whitespace.
+    Content = Content.replace("\\\r\n", " ").replace("\\\n", " ")
+
+    ColonIndex = Content.find(":")
+    if ColonIndex < 0:
+        return []
+
+    # Everything up to the next newline is the first rule's dependency
+    # list. Subsequent lines (from -MP) are phony targets we ignore.
+    FirstRule = Content[ColonIndex + 1 :].split("\n", 1)[0]
+    return [Token for Token in FirstRule.split() if Token]
+
+
+def _ObjectIsUpToDate(
+    SourceFile: str,
+    ObjectFile: FileIO,
+    MiddleFilesDir: str,
+) -> bool:
+    """
+    Decide whether ``ObjectFile`` can be reused without recompiling
+    ``SourceFile``.
+
+    An object is stale if:
+      * it does not exist, or
+      * the source file is newer than the object, or
+      * any header listed in the matching ``.d`` file is newer than
+        the object, or
+      * any header listed in the matching ``.d`` file has disappeared
+        (forces a safe rebuild).
+    """
+    if not ObjectFile.Exists():
+        return False
+
+    SourceTime = FileIO(SourceFile).LastChange()
+    ObjectTime = ObjectFile.LastChange()
+
+    if SourceTime >= ObjectTime:
+        return False
+
+    DepFilePath = _DependencyFilePath(MiddleFilesDir, SourceFile)
+    for Dependency in _ParseDependencyFile(DepFilePath):
+        DepFile = FileIO(Dependency)
+        if not DepFile.Exists():
+            return False
+        if DepFile.LastChange() >= ObjectTime:
+            return False
+
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Output path helpers
+# --------------------------------------------------------------------------- #
+
+
+def _EntryPointOutputPath(BinaryFilesDir: str, TargetName: str) -> str:
+    return f"{BinaryFilesDir}/{TargetName}{_ExecutableSuffix()}"
+
+
+def _DynamicLibOutputPath(BinaryFilesDir: str, LibPrefix: str, ModuleName: str) -> str:
+    return f"{BinaryFilesDir}/{LibPrefix}{ModuleName}{_DynamicLibSuffix()}"
+
+
+def _StaticLibOutputPath(BinaryFilesDir: str, LibPrefix: str, ModuleName: str) -> str:
+    return f"{BinaryFilesDir}/lib{LibPrefix}{ModuleName}.a"
+
+
+# --------------------------------------------------------------------------- #
+# Main entry
+# --------------------------------------------------------------------------- #
 
 
 def BuildModule(ModuleName: str):
     """
     Build a module.
 
-    ATTENTION: the module bust have been discoverd by build system.
+    ATTENTION: the module must have been discovered by the build system.
 
     :param ModuleName: the name of the module
     :type ModuleName: str
     """
 
-    # Get the id of module
     ModuleID: int = BuildContext.BuildOrder.index(ModuleName)
-    ModuleConfiguation: ModuleBase = BuildContext.ModuleConfiguration[ModuleID]
+    ModuleConfiguration: ModuleBase = BuildContext.ModuleConfiguration[ModuleID]
     TargetName: str = BuildContext.TargetName
 
-    # If we shouldn't build this module, return
-    if not ModuleConfiguation.BuildThisModule:
+    if not ModuleConfiguration.BuildThisModule:
         return
 
-    # Check if anymodule that this module depends on have not built
-    for Depend in ModuleConfiguation.ModulesDependOn:
+    # --- Verify dependencies were built before this module --------------- #
+    for Depend in ModuleConfiguration.ModulesDependOn:
         if not BuildContext.BuildedModule[BuildContext.BuildOrder.index(Depend)]:
             Logger.Log(
                 LogLevelEnum.Error,
-                "Module '"
-                + ModuleName
-                + "' depend on module '"
-                + Depend
-                + "', but it didn't build.",
+                f"Module '{ModuleName}' depend on module '{Depend}', "
+                f"but it didn't build.",
                 True,
                 -1,
             )
 
     Logger.Log(
         LogLevelEnum.Info,
-        f"[{ModuleID + 1}/{len(BuildContext.BuildOrder)}] Building module '{ModuleName}'",
+        f"[{ModuleID + 1}/{len(BuildContext.BuildOrder)}] "
+        f"Building module '{ModuleName}'",
     )
 
-    # Get some paths of binary files
+    # --- Directory layout ------------------------------------------------- #
     MiddleFilesDir: str = f"./Build/Intermediate/{TargetName}/{ModuleName}"
     BinaryFilesDir: str = "./Build/Binaries"
 
-    try:
-        os.makedirs(MiddleFilesDir)
-    except:
-        # The folder already exsits
-        pass
+    os.makedirs(MiddleFilesDir, exist_ok=True)
+    os.makedirs(BinaryFilesDir, exist_ok=True)
 
-    # The list of every c++ files waiting to build
-    WaitCompileCFilesList: list[str] = []
-    WaitCompileCppFilesList: list[str] = []
+    # --- Discover sources ------------------------------------------------- #
+    ModuleRoot: str = os.path.dirname(BuildContext.ModulePath[ModuleID])
+    WaitCompileCFilesList, WaitCompileCppFilesList = _CollectSourceFiles(
+        FileIO(f"{ModuleRoot}/Private/")
+    )
 
-    COFilesList: list[str] = []
-    CxxOFilesList: list[str] = []
+    COFilesList: List[str] = []
+    CxxOFilesList: List[str] = []
 
-    def Search(Folder: FileIO):
-        """
-        Search c and cpp files in Folder.
-
-        :param Folder: the folder to search
-        :type Folder: FileIO
-        """
-
-        for SubFileStr in Folder.GetSubFiles():
-            SubFileFileIO: FileIO = FileIO(SubFileStr)
-            if SubFileFileIO.IsFolder():
-                Search(SubFileFileIO)
-                continue
-
-            # If cpp files
-            if (
-                SubFileFileIO.EndSwitch() == ".cpp"
-                or SubFileFileIO.EndSwitch()
-                == ".cc"
-            ):
-                WaitCompileCppFilesList.append(SubFileFileIO.FilePathStr)
-            # If c files
-            elif SubFileFileIO.EndSwitch() == ".c":
-                WaitCompileCFilesList.append(SubFileFileIO.FilePathStr)
-
-    # Search all .c and .cpp files
-    Search(FileIO(os.path.dirname(BuildContext.ModulePath[ModuleID]) + "/Private/"))
-
-    # If a source file has been compiled, skip
+    # --- Prune sources whose objects are already up to date --------------- #
+    # This is where header-dependency tracking kicks in: _ObjectIsUpToDate
+    # consults the matching .d file produced by a previous compile.
     if not BuildContext.Arguments.donot_use_o_files:
-        for File in WaitCompileCFilesList + WaitCompileCppFilesList:
-            FileFileIO: FileIO = FileIO(File)
-            MidFileFileIO: FileIO = FileIO(
-                f"{MiddleFilesDir}/{FileIO(File).FileName()}.o"
-            )
-            if (
-                MidFileFileIO.Exists()
-                and MidFileFileIO.LastChange()
-                > FileFileIO.LastChange()  # Check if it's newer
-            ):
-                if File in WaitCompileCFilesList:
-                    WaitCompileCFilesList.remove(File)
-                    COFilesList.append(f"{MiddleFilesDir}/{FileIO(File).FileName()}.o")
-                else:
-                    WaitCompileCppFilesList.remove(File)
-                    CxxOFilesList.append(
-                        f"{MiddleFilesDir}/{FileIO(File).FileName()}.o"
-                    )
+        FreshCFiles: List[str] = []
+        FreshCppFiles: List[str] = []
 
-    AllDependsSkiped: bool = True
-    TargetExists: bool = True
-    PlatFormEndSwitchExe: str = (
-        ".exe" if GetCurrentSystem() == SystemEnum.Windows else ""
-    )
-    PlatFormEndSwitchDy: str = (
-        ".dll" if GetCurrentSystem() == SystemEnum.Windows else ".so"
+        for File in WaitCompileCFilesList:
+            ObjectPath = _ObjectFilePath(MiddleFilesDir, File)
+            if _ObjectIsUpToDate(File, FileIO(ObjectPath), MiddleFilesDir):
+                COFilesList.append(ObjectPath)
+            else:
+                FreshCFiles.append(File)
+
+        for File in WaitCompileCppFilesList:
+            ObjectPath = _ObjectFilePath(MiddleFilesDir, File)
+            if _ObjectIsUpToDate(File, FileIO(ObjectPath), MiddleFilesDir):
+                CxxOFilesList.append(ObjectPath)
+            else:
+                FreshCppFiles.append(File)
+
+        WaitCompileCFilesList = FreshCFiles
+        WaitCompileCppFilesList = FreshCppFiles
+
+    # --- Decide the final output path for this module -------------------- #
+    LibPrefix: str = (
+        f"{TargetName}-" if ModuleConfiguration.EnableBinaryLibPrefix else ""
     )
 
-    for Depend in ModuleConfiguation.ModulesDependOn:
-        if not BuildContext.SkipedModule[BuildContext.BuildOrder.index(Depend)]:
-            AllDependsSkiped = False
-            break
-
-    # Check if the target exists
-    if ModuleConfiguation.BinaryType == BinaryTypeEnum.EntryPoint:
-        TargetExists = FileIO(
-            f"./Build/Binaries/{ModuleName}{PlatFormEndSwitchExe}"
-        ).Exists()
-    elif ModuleConfiguation.BinaryType == BinaryTypeEnum.DynamicLib:
-        if ModuleConfiguation.EnableBinaryLibPrefix:
-            TargetExists = FileIO(
-                f"./Build/Binaries/{TargetName}-{ModuleName}{PlatFormEndSwitchDy}"
-            ).Exists()
-        else:
-            TargetExists = FileIO(
-                f"./Build/Binaries/{ModuleName}{PlatFormEndSwitchDy}"
-            ).Exists()
+    if ModuleConfiguration.BinaryType == BinaryTypeEnum.EntryPoint:
+        TargetOutputPath = _EntryPointOutputPath(BinaryFilesDir, TargetName)
+    elif ModuleConfiguration.BinaryType == BinaryTypeEnum.DynamicLib:
+        TargetOutputPath = _DynamicLibOutputPath(BinaryFilesDir, LibPrefix, ModuleName)
     else:
-        if ModuleConfiguation.EnableBinaryLibPrefix:
-            TargetExists = FileIO(
-                f"./Build/Binaries/{TargetName}-{ModuleName}.a"
-            ).Exists()
-        else:
-            TargetExists = FileIO(f"./Build/Binaries/{ModuleName}.a").Exists()
+        TargetOutputPath = _StaticLibOutputPath(BinaryFilesDir, LibPrefix, ModuleName)
 
-    # And if everything is compiled, skip this module building
-    if ModuleConfiguation.AutoSkiped or (
-        len(WaitCompileCFilesList) == len(WaitCompileCppFilesList) == 0
-        and AllDependsSkiped
-        and TargetExists
+    TargetExists: bool = FileIO(TargetOutputPath).Exists()
+
+    # --- Can we skip this whole module? ---------------------------------- #
+    AllDependsSkiped: bool = all(
+        BuildContext.SkipedModule[BuildContext.BuildOrder.index(Depend)]
+        for Depend in ModuleConfiguration.ModulesDependOn
+    )
+    NothingToCompile: bool = not WaitCompileCFilesList and not WaitCompileCppFilesList
+
+    if ModuleConfiguration.AutoSkiped or (
+        NothingToCompile and AllDependsSkiped and TargetExists
     ):
         BuildContext.BuildedModule[ModuleID] = True
         BuildContext.SkipedModule[ModuleID] = True
         return
 
+    # --- Optional format check ------------------------------------------- #
     if (
-        ModuleConfiguation.EnableFormatCheck
+        ModuleConfiguration.EnableFormatCheck
         and BuildContext.Arguments.enable_format_check
     ):
-        for file in WaitCompileCppFilesList:
-            if CheckFormat(file) != 0:
+        for File in WaitCompileCppFilesList:
+            if CheckFormat(File) != 0:
                 Logger.Log(
                     LogLevelEnum.Error,
-                    f"Format check faild in file {file}, see log for detailed informations",
+                    f"Format check failed in file {File}, "
+                    f"see log for detailed informations",
                     True,
                     1,
                 )
 
-    # Start to compile files
-
-    # Some variables in configuation
-    CStanderd: str = ModuleConfiguation.CStanderd
-    CxxStanderd: str = ModuleConfiguation.CxxStanderd
-    ModuleAddedArguments: str = " ".join(ModuleConfiguation.ArgumentsAdded)
+    # --- Assemble compile flags ------------------------------------------ #
+    CStanderd: str = ModuleConfiguration.CStanderd
+    CxxStanderd: str = ModuleConfiguration.CxxStanderd
+    ModuleAddedArguments: str = " ".join(ModuleConfiguration.ArgumentsAdded)
     TargetAddedArguments: str = " ".join(
         BuildContext.TargetConfiguration.ArgumentsAdded
     )
+
     IncludePaths: str = " -I".join(
-        [
-            os.path.abspath(
-                os.path.dirname(
-                    BuildContext.ModulePath[BuildContext.BuildOrder.index(depend)]
-                )
-                + "/Public/"
+        os.path.abspath(
+            os.path.dirname(
+                BuildContext.ModulePath[BuildContext.BuildOrder.index(Depend)]
             )
-            for depend in ModuleConfiguation.ModulesDependOn + [ModuleName]
-        ]
+            + "/Public/"
+        )
+        for Depend in ModuleConfiguration.ModulesDependOn + [ModuleName]
     )
+
+    # -l flags for every linkable dependency.
     DependsModules: List[str] = []
+    for Name in ModuleConfiguration.ModulesDependOn:
+        DependConfig: ModuleBase = BuildContext.ModuleConfiguration[
+            BuildContext.BuildOrder.index(Name)
+        ]
+        if not DependConfig.LinkThisModule:
+            continue
+        if DependConfig.EnableBinaryLibPrefix:
+            DependsModules.append(f"{TargetName}-{Name}")
+        else:
+            DependsModules.append(Name)
 
-    for name in ModuleConfiguation.ModulesDependOn:
-        if BuildContext.ModuleConfiguration[
-            BuildContext.BuildOrder.index(name)
-        ].LinkThisModule:
-            if BuildContext.ModuleConfiguration[
-                BuildContext.BuildOrder.index(name)
-            ].EnableBinaryLibPrefix:
-                DependsModules.append(TargetName + "-" + name)
-            else:
-                DependsModules.append(name)
+    LinkDependsStr: str = " ".join(f"-l{Name}" for Name in DependsModules)
 
-    LinkDependsStr: str = ("-l" if len(DependsModules) > 0 else "") + " -l".join(
-        DependsModules
-    )
-    LibPrefix: str = (
-        f"{TargetName}-"
-        if BuildContext.ModuleConfiguration[ModuleID].EnableBinaryLibPrefix
-        else ""
-    )
-
-    BuildResult: int = 0
-
+    # --- Per-source compile commands ------------------------------------- #
     def TransformCommand(BuildCommand: str, SourceName: str) -> dict:
         """
-        Transform build command to a dictionary that can be read by clangd.
+        Transform a build command into the clangd
+        ``compile_commands.json`` schema.
         """
-        ResultValue: dict = {}
+        return {
+            "file": FileIO(SourceName).FileName(),
+            "directory": os.path.abspath(os.path.dirname(SourceName)),
+            "arguments": ["clang++"] + BuildCommand.split(" ")[1:-1],
+        }
 
-        ResultValue["file"] = FileIO(SourceName).FileName()
-        ResultValue["directory"] = os.path.abspath(os.path.dirname(SourceName))
-        ResultValue["arguments"] = ["clang++"] + BuildCommand.split(" ")[1:-1]
-
-        return ResultValue
-
-    # Build all source to .o file
-
-    CompileCommands: List[str] = []
+    CompileCommands: List[Tuple[str, str]] = []  # (source_file, command)
 
     for CFile in WaitCompileCFilesList:
-        TargetFileName: str = f"{MiddleFilesDir}/{FileIO(CFile).FileName()}.o"
-        COFilesList.append(TargetFileName)
+        ObjectPath = _ObjectFilePath(MiddleFilesDir, CFile)
+        DepPath = _DependencyFilePath(MiddleFilesDir, CFile)
+        COFilesList.append(ObjectPath)
+
         BuildCommand: str = (
-            f"gcc {CFile} -o {TargetFileName} -std={CStanderd} {ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -c"
+            f"gcc {CFile} -o {ObjectPath} -std={CStanderd} "
+            f"-MMD -MP -MF {DepPath} "
+            f"{ModuleAddedArguments} {TargetAddedArguments} "
+            f"-I{IncludePaths} -c"
         )
         BuildContext.CompileCommands.append(TransformCommand(BuildCommand, CFile))
-        CompileCommands.append(BuildCommand)
+        CompileCommands.append((CFile, BuildCommand))
 
     for CppFile in WaitCompileCppFilesList:
-        TargetFileName: str = f"{MiddleFilesDir}/{FileIO(CppFile).FileName()}.o"
-        CxxOFilesList.append(TargetFileName)
+        ObjectPath = _ObjectFilePath(MiddleFilesDir, CppFile)
+        DepPath = _DependencyFilePath(MiddleFilesDir, CppFile)
+        CxxOFilesList.append(ObjectPath)
+
         BuildCommand: str = (
-            f"g++ {CppFile} -o {TargetFileName} -std={CxxStanderd} {ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -c"
+            f"g++ {CppFile} -o {ObjectPath} -std={CxxStanderd} "
+            f"-MMD -MP -MF {DepPath} "
+            f"{ModuleAddedArguments} {TargetAddedArguments} "
+            f"-I{IncludePaths} -c"
         )
         BuildContext.CompileCommands.append(TransformCommand(BuildCommand, CppFile))
-        CompileCommands.append(BuildCommand)
+        CompileCommands.append((CppFile, BuildCommand))
 
+    # --- Run compile commands in parallel -------------------------------- #
     if not BuildContext.Arguments.donot_build_files and CompileCommands:
 
-        def RunCompileCommand(cmd):
-            """
-            Execute single command and check the result
-            """
+        def RunCompileCommand(Job: Tuple[str, str]):
+            SourceFile, Cmd = Job
+            _PrintStatus(f"Compiling {SourceFile}")
 
-            result = subprocess.run(
-                cmd,
+            Result = subprocess.run(
+                Cmd,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                encoding="UTF-8"
+                encoding="UTF-8",
             )
-            if result.returncode != 0:
-                return (False, cmd, result.stderr)
-            return (True, cmd, "")
+            if Result.returncode != 0:
+                return (False, Cmd, Result.stderr)
+            return (True, Cmd, "")
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=BuildContext.Arguments.threads
-        ) as executor:
-            futures = {
-                executor.submit(RunCompileCommand, cmd): cmd for cmd in CompileCommands
+        ) as Executor:
+            Futures = {
+                Executor.submit(RunCompileCommand, Job): Job for Job in CompileCommands
             }
 
-            for future in concurrent.futures.as_completed(futures):
-                success, cmd, error = future.result()
-                if not success:
-                    # Cancle all not finished job
-                    for f in futures:
-                        f.cancel()
-                    print(error.replace("\n\n", "\n"))
-                    Logger.Log(
-                        LogLevelEnum.Error,
-                        f"Compile faild when running command {cmd}, see error in the log.",
-                        True,
-                        -1,
-                    )
+            for Future in concurrent.futures.as_completed(Futures):
+                Success, Cmd, Error = Future.result()
+                if Success:
+                    continue
+
+                # Cancel everything still pending and fail loudly.
+                for Pending in Futures:
+                    Pending.cancel()
+                _ClearStatus()
+                print(Error.replace("\n\n", "\n"))
+                Logger.Log(
+                    LogLevelEnum.Error,
+                    f"Compile failed when running command {Cmd}, "
+                    f"see error in the log.",
+                    True,
+                    -1,
+                )
+
+        _ClearStatus()
 
     if BuildContext.Arguments.donot_build_files:
         BuildContext.BuildedModule[ModuleID] = True
         return
 
-    if ModuleConfiguation.BinaryType == BinaryTypeEnum.EntryPoint:
-        # Build executeable
-        link_command = f"g++ {' '.join(COFilesList)} {' '.join(CxxOFilesList)} -o {BinaryFilesDir}/{TargetName} -L./Build/Binaries/ {LinkDependsStr} {ModuleAddedArguments} {TargetAddedArguments}"
-        BuildResult = os.system(link_command)
-    elif ModuleConfiguation.BinaryType == BinaryTypeEnum.DynamicLib:
-        # Build dynamic lib
-        link_command = f"g++ {' '.join(COFilesList)} {' '.join(CxxOFilesList)} -o {BinaryFilesDir}/{LibPrefix}{ModuleName}.dll -L./Build/Binaries/ {LinkDependsStr} -fPIC -shared {ModuleAddedArguments} {TargetAddedArguments}"
-        BuildResult = os.system(link_command)
-    elif ModuleConfiguation.BinaryType == BinaryTypeEnum.StaticLib:
-        # Build static lib
-        link_command = f"ar rcs {BinaryFilesDir}/lib{LibPrefix}{ModuleName}.a {' '.join(COFilesList)} {' '.join(CxxOFilesList)}"
-        for name in ModuleConfiguation.ModulesDependOn:
-            Configuation: ModuleBase = BuildContext.ModuleConfiguration[
-                BuildContext.BuildOrder.index(name)
+    # --- Link step -------------------------------------------------------- #
+    ObjectsStr: str = " ".join(COFilesList + CxxOFilesList)
+    BuildResult: int = 0
+
+    if ModuleConfiguration.BinaryType == BinaryTypeEnum.EntryPoint:
+        LinkCommand = (
+            f"g++ {ObjectsStr} "
+            f"-o {_EntryPointOutputPath(BinaryFilesDir, TargetName)} "
+            f"-L{BinaryFilesDir}/ {LinkDependsStr} "
+            f"{ModuleAddedArguments} {TargetAddedArguments}"
+        )
+        BuildResult = os.system(LinkCommand)
+
+    elif ModuleConfiguration.BinaryType == BinaryTypeEnum.DynamicLib:
+        LinkCommand = (
+            f"g++ {ObjectsStr} "
+            f"-o {_DynamicLibOutputPath(BinaryFilesDir, LibPrefix, ModuleName)} "
+            f"-L{BinaryFilesDir}/ {LinkDependsStr} -fPIC -shared "
+            f"{ModuleAddedArguments} {TargetAddedArguments}"
+        )
+        BuildResult = os.system(LinkCommand)
+
+    else:  # StaticLib
+        StaticLibPath = _StaticLibOutputPath(BinaryFilesDir, LibPrefix, ModuleName)
+        LinkCommand = f"ar rcs {StaticLibPath} {ObjectsStr}"
+
+        for Name in ModuleConfiguration.ModulesDependOn:
+            DependConfig: ModuleBase = BuildContext.ModuleConfiguration[
+                BuildContext.BuildOrder.index(Name)
             ]
-            if (
-                Configuation.LinkThisModule
-                and Configuation.BinaryType == BinaryTypeEnum.StaticLib
+            if not (
+                DependConfig.LinkThisModule
+                and DependConfig.BinaryType == BinaryTypeEnum.StaticLib
             ):
-                if BuildContext.ModuleConfiguration[
-                    BuildContext.BuildOrder.index(name)
-                ].EnableBinaryLibPrefix:
-                    link_command += f" {BinaryFilesDir}/lib{TargetName}-{name}.a"
-                else:
-                    link_command += f" {BinaryFilesDir}/lib{name}.a"
-        BuildResult = os.system(link_command)
+                continue
+
+            DependPrefix = (
+                f"{TargetName}-" if DependConfig.EnableBinaryLibPrefix else ""
+            )
+            LinkCommand += f" {BinaryFilesDir}/lib{DependPrefix}{Name}.a"
+
+        BuildResult = os.system(LinkCommand)
 
     if BuildResult == 0:
         BuildContext.BuildedModule[ModuleID] = True
     else:
         Logger.Log(
             LogLevelEnum.Error,
-            f"There's something error when build module '{ModuleName}' in target '{TargetName}', and the compiler return value '{BuildResult}' not 0.",
+            f"There's something error when build module '{ModuleName}' in "
+            f"target '{TargetName}', and the compiler return value "
+            f"'{BuildResult}' not 0.",
             True,
             -1,
         )
 
-    # Run test
-    if BuildContext.Arguments.enable_tests and ModuleConfiguation.EnableTests:
+    # --- Tests ----------------------------------------------------------- #
+    if BuildContext.Arguments.enable_tests and ModuleConfiguration.EnableTests:
         TestModule(
             ModuleName,
             os.path.dirname(BuildContext.ModulePath[ModuleID]),
             CxxOFilesList,
-            f"{ModuleAddedArguments} {TargetAddedArguments} -I{IncludePaths} -L ./Build/Binaries/ {LinkDependsStr} -l{LibPrefix}{ModuleName}",
+            f"{ModuleAddedArguments} {TargetAddedArguments} "
+            f"-I{IncludePaths} -L ./Build/Binaries/ {LinkDependsStr} "
+            f"-l{LibPrefix}{ModuleName}",
         )

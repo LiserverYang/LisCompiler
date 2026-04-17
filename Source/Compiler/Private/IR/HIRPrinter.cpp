@@ -15,7 +15,6 @@
 
 namespace detail
 {
-// 复用 ASTPrinter 的符号名解析函数
 static std::string demangle(const char *mangled)
 {
     int status;
@@ -24,7 +23,6 @@ static std::string demangle(const char *mangled)
     {
         std::string result(demangled);
         free(demangled);
-        // 移除命名空间前缀，只保留类名
         size_t pos = result.find_last_of(':');
         if (pos != std::string::npos)
         {
@@ -35,7 +33,6 @@ static std::string demangle(const char *mangled)
     return mangled;
 }
 
-// 格式化指针地址为可读字符串
 static std::string formatAddress(const void *addr)
 {
     std::stringstream ss;
@@ -44,7 +41,6 @@ static std::string formatAddress(const void *addr)
     return ss.str();
 }
 
-// 将二进制操作符枚举转换为可读字符串
 std::string opKindToString(HIRBinaryOp::OpKind kind)
 {
     switch (kind)
@@ -71,7 +67,6 @@ std::string opKindToString(HIRBinaryOp::OpKind kind)
     }
 }
 
-// 将字面量类型枚举转换为可读字符串
 std::string literalKindToString(HIRLiteral::Kind kind)
 {
     switch (kind)
@@ -96,11 +91,10 @@ std::string loopKindToString(HIRLoop::Kind kind)
     }
 }
 
-// 简化打印 Type 信息（假设 Type 类有 getName 方法）
 std::string typeToString(const std::shared_ptr<Type> &type)
 {
     if (!type) return "<unknown type>";
-    // 这里根据你的 Type 类实际实现调整，示例返回类型名称
+
     return type->toString();
 }
 
@@ -131,22 +125,19 @@ public:
 
     explicit HIRPrinter(std::ostream &os = std::cout) : os(os) {}
 
-    // 打印所有节点的通用信息（类型、位置、地址）
     void printCommon(HIRNode *node)
     {
         std::string nodeType = detail::demangle(typeid(*node).name());
         std::string address = detail::formatAddress(node);
 
-        // 绿色打印节点类型
         os << "\033[38;5;10m" << nodeType << "\033[0m";
-        // 打印位置信息
+
         os << " <" << node->position.line << ":" << node->position.col
            << ":" << node->length << ">";
-        // 黄色打印地址
-        os << " " << "\033[38;5;3m" << address << "\033[0m";
+
+           os << " " << "\033[38;5;3m" << address << "\033[0m";
     }
 
-    // 访问各类 HIR 节点的方法
     void visit(HIRProgram *node)
     {
         printCommon(node);
@@ -525,17 +516,14 @@ void printHIR(HIRNode *node, const std::string &prefix = "", bool isLast = true)
         printHIR(children[i], newPrefix, lastChild);
     }
 
-    // 重置颜色
     std::cout << "\033[0m";
 }
 
-// 重载：打印整个 HIRProgram
 void printHIR(HIRProgram &program)
 {
     printHIR(&program, "", true);
 }
 
-// 重载：打印任意 HIRNode 指针
 void printHIR(HIRNode *node)
 {
     printHIR(node, "", true);

@@ -6,26 +6,15 @@
 #pragma once
 
 #include <string>
-
-#include <cassert>
 #include <memory>
 #include <optional>
-#include <string>
-#include <unordered_map>
 #include <vector>
+#include <unordered_map>
 
 // 前向声明
 class TypeContext;
 class Symbol;
-
-namespace detail
-{
-template <typename T, typename... Args>
-bool is_one_of(const T &value, const Args &...args)
-{
-    return ((value == args) || ...);
-}
-} // namespace detail
+class TraitType;
 
 // --- 基础类型类 ---
 class Type
@@ -33,27 +22,23 @@ class Type
 public:
     enum class Kind
     {
-        Primitive, // 原始类型 (int, float)
-        Custom,    // 自定义类型 (struct, class)
-        Reference, // 引用类型 (&T, &mut T)
-        Function,  // 函数类型（fn foo() -> i32）
-        Trait,     // trait 类型
-        Self,      // self 参数的类型
+        Primitive,
+        Custom,
+        Reference,
+        Function,
+        Trait,
+        Self,
+        GenericParam,
     };
 
-    explicit Type(Kind kind) : kind(kind) {}
+    explicit Type(Kind kind);
     virtual ~Type() = default;
 
-    Kind getKind() const
-    {
-        return kind;
-    }
-
-    // 类型相等判断 (核心接口)
+    Kind getKind() const;
     virtual bool equals(const std::shared_ptr<Type> &other) const = 0;
-
-    // 调试用字符串
     virtual std::string toString() const = 0;
+
+    std::vector<std::shared_ptr<TraitType>> implTrait;
 
 private:
     Kind kind;
@@ -65,138 +50,38 @@ class PrimitiveType : public Type
 public:
     enum class PrimKind
     {
-        I8 = 0,
-        I16,
-        I32,
-        I64,
-        F32,
-        F64,
-        BOOL,
-        CHAR,
-        VOID
+        I8 = 0, I16, I32, I64,
+        F32, F64, BOOL, CHAR, VOID
     };
 
-    explicit PrimitiveType(PrimKind pk) : Type(Kind::Primitive), primKind(pk) {}
-
-    PrimKind getPrimKind() const
-    {
-        return primKind;
-    }
-
-    bool equals(const std::shared_ptr<Type> &other) const override
-    {
-        if (other->getKind() != Kind::Primitive) return false;
-        auto pt = std::static_pointer_cast<PrimitiveType>(other);
-
-        return pt->primKind == primKind;
-    }
-
-    bool isFloat() const
-    {
-        return detail::is_one_of(primKind, PrimKind::F32, PrimKind::F64);
-    }
-
-    bool isInteger() const
-    {
-        return detail::is_one_of(primKind, PrimKind::I8, PrimKind::I16, PrimKind::I32, PrimKind::I64);
-    }
-
-    std::string toString() const override
-    {
-        switch (primKind)
-        {
-        case PrimKind::I8: return "int8";
-        case PrimKind::I16: return "int16";
-        case PrimKind::I32: return "int32";
-        case PrimKind::I64: return "int64";
-        case PrimKind::F32: return "float32";
-        case PrimKind::F64: return "float64";
-        case PrimKind::BOOL: return "bool";
-        case PrimKind::CHAR: return "char";
-        case PrimKind::VOID: return "void";
-        default: return "unknown";
-        }
-    }
-
-    static PrimKind getKind(std::string str)
-    {
-        if (str == "i8")
-        {
-            return PrimKind::I8;
-        }
-        else if (str == "i16")
-        {
-            return PrimKind::I16;
-        }
-        else if (str == "i32")
-        {
-            return PrimKind::I32;
-        }
-        else if (str == "i64")
-        {
-            return PrimKind::I64;
-        }
-        else if (str == "f32")
-        {
-            return PrimKind::F32;
-        }
-        else if (str == "f64")
-        {
-            return PrimKind::F64;
-        }
-        else if (str == "bool")
-        {
-            return PrimKind::BOOL;
-        }
-        if (str == "char")
-        {
-            return PrimKind::CHAR;
-        }
-
-        return PrimKind::VOID;
-    }
+    explicit PrimitiveType(PrimKind pk);
+    PrimKind getPrimKind() const;
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    bool isFloat() const;
+    bool isInteger() const;
+    std::string toString() const override;
+    static PrimKind getKind(std::string str);
 
 private:
     PrimKind primKind;
 };
 
 // --- 2. 引用类型 ---
-// 专门处理 isReference 和 isMutReference
 class ReferenceType : public Type
 {
 public:
-    ReferenceType(std::shared_ptr<Type> base, bool isMutable)
-        : Type(Kind::Reference), baseType(std::move(base)), isMutable(isMutable) {}
-
-    std::shared_ptr<Type> getBaseType() const
-    {
-        return baseType;
-    }
-
-    bool isMutableRef() const
-    {
-        return isMutable;
-    }
-
-    bool equals(const std::shared_ptr<Type> &other) const override
-    {
-        if (other->getKind() != Kind::Reference) return false;
-        auto rt = std::static_pointer_cast<ReferenceType>(other);
-
-        return rt->isMutable == isMutable && rt->baseType->equals(baseType);
-    }
-
-    std::string toString() const override
-    {
-        return (isMutable ? "&mut " : "&") + baseType->toString();
-    }
+    ReferenceType(std::shared_ptr<Type> base, bool isMutable);
+    std::shared_ptr<Type> getBaseType() const;
+    bool isMutableRef() const;
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
 
 private:
     std::shared_ptr<Type> baseType;
     bool isMutable;
 };
 
-// --- 3. 自定义类型 (Nominal Type) ---
+// --- 3. 自定义类型 ---
 class CustomType : public Type
 {
 public:
@@ -204,243 +89,122 @@ public:
     {
         std::string name;
         std::shared_ptr<Type> type;
-
-        bool operator==(const Field &other) const
-        {
-            return name == other.name && type->equals(other.type);
-        }
-
-        bool operator==(const std::string &other) const
-        {
-            return name == other;
-        }
+        bool operator==(const Field &other) const;
+        bool operator==(const std::string &other) const;
     };
 
     struct Method
     {
-        std::string name;                 // 方法名
-        std::string traitName;            // trait 名
-        std::vector<Field> params;        // 参数（复用Field结构，因为参数也是"名+类型"）
-        std::shared_ptr<Type> returnType; // 返回类型
-        bool isStatic;                    // 是否为静态方法
-        bool isTraitImpl;                 // 是否是 trait 实现
+        std::string name;
+        std::string traitName;
+        std::vector<Field> params;
+        std::shared_ptr<Type> returnType;
+        bool isStatic;
+        bool isTraitImpl;
     };
 
 public:
-    // name: 类型名
-    CustomType(std::string name, std::vector<Field> fields)
-        : Type(Kind::Custom), name(std::move(name)), fields(std::move(fields)) {}
+    CustomType(std::string name, std::vector<Field> fields);
+    CustomType(std::string name,
+               std::vector<std::shared_ptr<Type>> genericParams,
+               std::vector<Field> fields);
 
-    const std::string &getName() const
-    {
-        return name;
-    }
+    const std::string &getName() const;
+    const std::vector<Field> &getFields() const;
+    const std::vector<Method> &getMethods() const;
+    void addMethods(std::vector<Method> methods);
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
 
-    const std::vector<Field> &getFields() const
-    {
-        return fields;
-    }
+    // --- generics ---
+    bool isGeneric() const { return !genericParams.empty() && genericArgs.empty(); }
+    bool isInstantiated() const { return !genericArgs.empty(); }
+    const std::vector<std::shared_ptr<Type>> &getGenericParams() const { return genericParams; }
+    const std::vector<std::shared_ptr<Type>> &getGenericArgs() const { return genericArgs; }
+    void setGenericArgs(std::vector<std::shared_ptr<Type>> args) { genericArgs = std::move(args); }
+    void setFields(std::vector<Field> f) { fields = std::move(f); }
 
-    const std::vector<Method> &getMethods() const
-    {
-        return methods;
-    }
-
-    void addMethods(std::vector<Method> methods)
-    {
-        for (auto &method : methods)
-        {
-            this->methods.push_back(method);
-        }
-    }
-
-    bool equals(const std::shared_ptr<Type> &other) const override
-    {
-        if (other->getKind() != Kind::Custom) return false;
-        auto ct = std::static_pointer_cast<CustomType>(other);
-
-        if (name != ct->name || fields.size() != ct->fields.size())
-            return false;
-        for (size_t i = 0; i < fields.size(); ++i)
-            if (fields[i].name != ct->fields[i].name || !fields[i].type->equals(ct->fields[i].type))
-                return false;
-        return true;
-    }
-
-    std::string toString() const override
-    {
-        return name;
-    }
+    // For instantiations: points to the generic definition.
+    // Methods always live on the origin; instantiations look them up there.
+    std::shared_ptr<CustomType> genericOrigin;
 
 private:
     std::string name;
     std::vector<Field> fields;
     std::vector<Method> methods;
+    std::vector<std::shared_ptr<Type>> genericParams;
+    std::vector<std::shared_ptr<Type>> genericArgs;
 };
 
+// --- 4. 函数类型 ---
 class FunctionType : public Type
 {
 public:
-    FunctionType(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType)
-        : Type(Kind::Function), params(std::move(params)), returnType(returnType) {}
+    FunctionType(std::vector<std::shared_ptr<Type>> params,
+                 std::shared_ptr<Type> returnType);
+    FunctionType(std::vector<std::shared_ptr<Type>> genericParams,
+                 std::vector<std::shared_ptr<Type>> params,
+                 std::shared_ptr<Type> returnType);
 
-    const std::vector<std::shared_ptr<Type>> &getParams() const
-    {
-        return params;
-    }
-
-    const std::shared_ptr<Type> &getReturnType() const
-    {
-        return returnType;
-    }
-
-    bool equals(const std::shared_ptr<Type> &other) const override
-    {
-        if (other->getKind() != Kind::Function) return false;
-        auto ft = std::static_pointer_cast<FunctionType>(other);
-
-        if (params.size() != ft->params.size() || !returnType->equals(ft->returnType))
-            return false;
-
-        for (size_t i = 0; i < params.size(); ++i)
-            if (!params[i]->equals(ft->params[i]))
-                return false;
-
-        return true;
-    }
-
-    std::string toString() const override
-    {
-        std::string str = "fn(";
-
-        for (size_t i = 0; i < params.size(); i++)
-        {
-            str += params[i]->toString();
-
-            if (i != params.size() - 1)
-            {
-                str += ", ";
-            }
-        }
-
-        str += ") -> " + returnType->toString();
-
-        return str;
-    }
+    bool isGeneric() const;
+    const std::vector<std::shared_ptr<Type>> &getParams() const;
+    const std::vector<std::shared_ptr<Type>> &getGenericParams() const;
+    const std::shared_ptr<Type> &getReturnType() const;
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
 
 private:
     std::vector<std::shared_ptr<Type>> params;
     std::shared_ptr<Type> returnType;
+    std::vector<std::shared_ptr<Type>> genericParams;
 };
 
+// --- 5. Trait 类型 ---
 class TraitType : public Type
 {
 public:
-    // Trait方法定义
     using Method = CustomType::Method;
-
-    TraitType(std::string name, std::vector<Method> methods)
-        : Type(Kind::Trait), name(std::move(name)), methods(std::move(methods)) {}
-
-    const std::string &getName() const
-    {
-        return name;
-    }
-
-    const std::vector<Method> &getMethods() const
-    {
-        return methods;
-    }
-
-    // 检查方法是否存在
-    std::optional<Method> findMethod(const std::string &methodName) const
-    {
-        for (const auto &method : methods)
-        {
-            if (method.name == methodName)
-            {
-                return method;
-            }
-        }
-        return std::nullopt;
-    }
-
-    // 类型相等判断（Trait按名称唯一）
-    bool equals(const std::shared_ptr<Type> &other) const override
-    {
-        if (other->getKind() != Kind::Trait) return false;
-        auto tt = std::static_pointer_cast<TraitType>(other);
-        return tt->name == name;
-    }
-
-    std::string toString() const override
-    {
-        std::string str = "trait " + name + " { ";
-        for (size_t i = 0; i < methods.size(); ++i)
-        {
-            const auto &method = methods[i];
-            str += method.name + "(";
-            for (size_t j = 0; j < method.params.size(); ++j)
-            {
-                str += method.params[j].type->toString();
-                if (j != method.params.size() - 1) str += ", ";
-            }
-            str += ") -> " + method.returnType->toString();
-            if (i != methods.size() - 1) str += ", ";
-        }
-        str += " }";
-        return str;
-    }
+    TraitType(std::string name, std::vector<Method> methods);
+    const std::string &getName() const;
+    const std::vector<Method> &getMethods() const;
+    std::optional<Method> findMethod(const std::string &methodName) const;
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
 
 private:
-    std::string name;            // Trait名称
-    std::vector<Method> methods; // Trait声明的方法
+    std::string name;
+    std::vector<Method> methods;
 };
 
+// --- 6. Self 类型 ---
 class SelfType : public Type
 {
 public:
-    SelfType(const std::string &trait_name, bool isMut, bool isRef)
-        : Type(Kind::Self), trait_name(trait_name), isMut(isMut), isRef(isRef) {}
-
-    const std::string &getTraitName() const
-    {
-        return trait_name;
-    }
-
-    bool isMutable() const
-    {
-        return isMut;
-    }
-
-    bool isReference()
-    {
-        return isRef;
-    }
-
-    bool equals(const std::shared_ptr<Type> &other) const override
-    {
-        if (!other)
-        {
-            return false;
-        }
-
-        auto other_self = std::dynamic_pointer_cast<SelfType>(other);
-        if (!other_self)
-        {
-            return false;
-        }
-
-        return this->trait_name == other_self->trait_name && this->isMut == other_self->isMut && this->isRef == other_self->isRef;
-    }
-
-    std::string toString() const override
-    {
-        return "self<" + trait_name + ">";
-    }
+    SelfType(const std::string &trait_name, bool isMut, bool isRef);
+    const std::string &getTraitName() const;
+    bool isMutable() const;
+    bool isReference();
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
 
 private:
     std::string trait_name;
     bool isMut;
     bool isRef;
+};
+
+// --- 7. 泛型参数类型 ---
+class GenericParamType : public Type
+{
+public:
+    explicit GenericParamType(std::string paramName);
+    const std::string &getParamName() const;
+    const std::vector<std::shared_ptr<TraitType>> &getConstraints() const;
+    void updateContraints(std::vector<std::shared_ptr<TraitType>> constraints);
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
+
+private:
+    std::string paramName;
+    std::vector<std::shared_ptr<TraitType>> constraints;
 };

@@ -69,6 +69,11 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
     createSnapshot();
     structDef->name = consume(TokenCode::IDENTIFIER, "expect an identifier as the struct name", E_ExpectAnIdentifier).value;
 
+    if (check(TokenCode::LT))
+    {
+        structDef->genericParams = std::move(parseGenericParams());
+    }
+
     if (knownTypes.count(structDef->name) > 0)
     {
         backToSnapshot();
@@ -123,7 +128,11 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
     match(TokenCode::IMPL);
 
     auto impl = std::make_unique<StructImpl>();
-    createSnapshot();
+
+    if (check(TokenCode::LT))
+    {
+        impl->genericParams = std::move(parseGenericParams());
+    }
 
     std::string name = consume(TokenCode::IDENTIFIER, "expect a identifer after impl", E_ExpectAnIdentifier).value;
 
@@ -137,11 +146,20 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
         impl->structName = name;
     }
 
+    if (match(TokenCode::LT))
+    {
+        do
+        {
+            impl->structGenericArgs.push_back(std::move(parseType()));
+        } while (match(TokenCode::COMMA));
+
+        match(TokenCode::GT);
+    }
+
     recorder.bindNode(impl.get());
 
     if (knownTypes.count(impl->structName) == 0)
     {
-        backToSnapshot();
         consume(TokenCode::UNDEFINED, "undefined struct '" + impl->structName + "'", E_UndefinedStruct);
     }
 
@@ -150,7 +168,7 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
     while (!check(TokenCode::RBRACE))
     {
         auto it = parseMemberFunctionDefinition();
-        it->sturctName = impl->structName;
+        it->structName = impl->structName;
         it->traitName = impl->traitName.has_value() ? impl->traitName.value() : "";
         impl->methods.push_back(std::move(it));
     }
@@ -170,6 +188,11 @@ std::unique_ptr<FunctionDef> Parser::parseFunctionDefinition()
     func->name = consume(TokenCode::IDENTIFIER, "expect a function name", E_ExpectAnIdentifier).value;
 
     recorder.bindNode(func.get());
+
+    if (check(TokenCode::LT))
+    {
+        func->genericParams = parseGenericParams();
+    }
 
     consume(TokenCode::LPAREN, "expect a '(' after function name", E_ExpectALPAREN);
     func->params = parseParameterList();
@@ -249,14 +272,21 @@ std::unique_ptr<TypeNode> Parser::parseType()
 
     if (check(TokenCode::IDENTIFIER))
     {
-        if (knownTypes.count(currentToken().value) == 0)
-        {
-            consume(TokenCode::UNDEFINED, "undefined type '" + currentToken().value + "'", E_UndefinedType);
-        }
-
         type->kind = TypeNode::TypeKind::Custom;
         type->typeName = currentToken().value;
+
         advance();
+
+        if (match(TokenCode::LT))
+        {
+            do
+            {
+                type->genericArgs.push_back(std::move(parseType()));
+            } while (match(TokenCode::COMMA));
+
+            consume(TokenCode::GT, "expect '>' after generic args", E_ExpectedKeyword);
+        }
+
         return type;
     }
 
@@ -278,11 +308,18 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
 
     recorder.bindNode(func.get());
 
+    if (check(TokenCode::LT))
+    {
+        func->genericParams = parseGenericParams();
+    }
+
     consume(TokenCode::LPAREN, "expected '(' after function name", E_ExpectALPAREN);
+
+    auto selfParam = std::make_unique<SelfParam>();
+    PositionRecorder selfRecorder(this, selfParam.get());
 
     if (match(TokenCode::SELF))
     {
-        auto selfParam = std::make_unique<SelfParam>();
         selfParam->isRef = false;
         selfParam->isMut = false;
 
@@ -302,9 +339,12 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
         {
             func->params = parseParameterList();
         }
+
+        selfRecorder.~PositionRecorder();
     }
     else
     {
+        selfParam.release();
         func->params = parseParameterList();
     }
 
@@ -635,6 +675,23 @@ std::unique_ptr<Expr> Parser::parsePrimary()
             return expr;
         }
 
+        if (check(TokenCode::LT))
+        {
+            if (looksLikeCallGenericParams())
+            {
+                auto expr = parseFunctionCall(identifier);
+                recorder.bindNode(expr.get());
+                return expr;
+            }
+            else
+            {
+                auto id = std::make_unique<IdentifierExpr>();
+                recorder.bindNode(id.get());
+                id->name = identifier.value;
+                return parseMemberAccessChain(std::move(id));
+            }
+        }
+
         if (match(TokenCode::LPAREN) || check(TokenCode::DOUBLE_COLON))
         {
             auto expr = parseFunctionCall(identifier);
@@ -753,6 +810,11 @@ std::unique_ptr<StructInitExpr> Parser::parseStructInitialization(Token typeName
     type->length = typeName.value.length();
     init->structType = std::move(type);
 
+    if (check(TokenCode::LT))
+    {
+        init->genericParams = std::move(parseCallGenericParams());
+    }
+
     if (!match(TokenCode::RBRACE))
     {
         do
@@ -773,6 +835,14 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
 {
     PositionRecorder recorder(this, nullptr);
 
+    std::vector<std::unique_ptr<TypeNode>> genericParams;
+
+    if (check(TokenCode::LT))
+    {
+        genericParams = std::move(parseCallGenericParams());
+        match(TokenCode::LPAREN);
+    }
+
     // (TypeNode::method)
     if (match(TokenCode::DOUBLE_COLON))
     {
@@ -787,6 +857,11 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
         staticCall->classType = std::move(type);
 
         staticCall->methodName = consume(TokenCode::IDENTIFIER, "expected method name", E_ExpectAnIdentifier).value;
+        if (check(TokenCode::LT))
+        {
+            genericParams = std::move(parseCallGenericParams());
+            staticCall->genericParams = std::move(genericParams);
+        }
         consume(TokenCode::LPAREN, "expected '(' after method name", E_ExpectALPAREN);
         staticCall->arguments = parseArgumentList();
         consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectARPAREN);
@@ -800,6 +875,7 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
     static_cast<IdentifierExpr *>(call->function.get())->name = name.value;
     call->function->position = name.position;
     call->function->length = name.value.length();
+    if (!genericParams.empty()) call->genericParams = std::move(genericParams);
     call->arguments = parseArgumentList();
 
     consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectARPAREN);
@@ -814,6 +890,7 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
         memberCall->object = std::move(call);
         memberCall->methodName = consume(TokenCode::IDENTIFIER, "expected method name", E_ExpectAnIdentifier).value;
         consume(TokenCode::LPAREN, "expected '(' after method name", E_ExpectALBRACE);
+        if (check(TokenCode::LT)) memberCall->genericParams = parseCallGenericParams();
         memberCall->arguments = parseArgumentList();
 
         consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectARBRACE);
@@ -851,6 +928,7 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
             recorder.bindNode(call.get());
             call->object = std::move(left);
             call->methodName = member.value;
+            if (check(TokenCode::LT)) call->genericParams = parseCallGenericParams();
             call->arguments = parseArgumentList();
             consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectAnIdentifier);
             left = std::move(call);
@@ -865,4 +943,93 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
         }
     }
     return left;
+}
+
+std::vector<std::string> Parser::parseGenericConstraints()
+{
+    std::vector<std::string> result;
+
+    do
+    {
+        result.push_back(consume(TokenCode::IDENTIFIER, "expected a idenfiter for constraint trait name", E_ExpectAnIdentifier).value);
+    } while (match(TokenCode::PLUS));
+
+    return result;
+}
+
+std::vector<std::unique_ptr<GenericParam>> Parser::parseGenericParams()
+{
+    consume(TokenCode::LT, "expected '<' before generic type params", E_ExpectAnIdentifier);
+
+    std::vector<std::unique_ptr<GenericParam>> params;
+
+    if (!check(TokenCode::GT))
+    {
+        do
+        {
+            PositionRecorder recorder(this, nullptr);
+            auto genericParam = std::make_unique<GenericParam>();
+            recorder.bindNode(genericParam.get());
+            genericParam->name = consume(TokenCode::IDENTIFIER, "expected a idenfiter for the generic type name", E_ExpectAnIdentifier).value;
+            if (match(TokenCode::COLON))
+                genericParam->constraints = Parser::parseGenericConstraints();
+            params.push_back(std::move(genericParam));
+        } while (match(TokenCode::COMMA));
+    }
+
+    consume(TokenCode::GT, "expected '>' after generic type params", E_ExpectAnIdentifier);
+
+    return params;
+}
+
+std::vector<std::unique_ptr<TypeNode>> Parser::parseCallGenericParams()
+{
+    consume(TokenCode::LT, "expected '<' before generic type params", E_ExpectAnIdentifier);
+
+    std::vector<std::unique_ptr<TypeNode>> params;
+
+    if (!check(TokenCode::GT))
+    {
+        do
+        {
+            params.push_back(std::move(parseType()));
+        } while (match(TokenCode::COMMA));
+    }
+
+    consume(TokenCode::GT, "expected '>' after generic type params", E_ExpectAnIdentifier);
+
+    return params;
+}
+
+bool Parser::looksLikeCallGenericParams()
+{
+    createSnapshot();
+
+    if (!match(TokenCode::LT))
+    {
+        backToSnapshot();
+        return false;
+    }
+
+    int depth = 1;
+    while (!finished() && depth > 0)
+    {
+        if (match(TokenCode::LT))
+            depth++;
+        else if (match(TokenCode::GT))
+            depth--;
+        else if (check(TokenCode::SEMI) || check(TokenCode::LBRACE) || check(TokenCode::RBRACE) || check(TokenCode::ASSIGN))
+        {
+            // Looks like a comparison expression, not generics
+            backToSnapshot();
+            return false;
+        }
+        else
+            advance();
+    }
+
+    // Only treat it as generic params if immediately followed by '(' or '::'
+    bool result = check(TokenCode::LPAREN) || check(TokenCode::DOUBLE_COLON);
+    backToSnapshot();
+    return result;
 }

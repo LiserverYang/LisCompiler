@@ -23,7 +23,7 @@ def BuildApp(SourceFolder: FileIO, TargetList: List[str]) -> None:
     
     :param SourceFolder: the folder's FILEIO where stored source file
     :type SourceFolder: FileIO
-    :param TargetList: a list of target's configuation file path(*.target.py), build system will build the target in the order of the list.
+    :param TargetList: a list of target's configuration file path(*.target.py), build system will build the target in the order of the list.
     :type TargetList: List[str]
     
     For example, if can call it:

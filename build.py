@@ -1,9 +1,7 @@
 # Copyright 2025, LiserverYang. All rights reserved.
 
-# Import buildsystem
 import Build.BuildSystem as BuildSystem
 
-# We could only run this script by command line not import
 if __name__ != "__main__":
     BuildSystem.Logger.Log(
         BuildSystem.LogLevelEnum.Error,
@@ -12,7 +10,6 @@ if __name__ != "__main__":
         -1,
     )
 
-# And we should check the type of current operating system
 if BuildSystem.GetCurrentSystem() == BuildSystem.SystemEnum.Other:
     # Log and exit
     BuildSystem.Logger.Log(

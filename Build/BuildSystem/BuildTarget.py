@@ -92,7 +92,7 @@ def BuildTarget(TargetPath: FileIO) -> None:
 
     Logger.Log(
         LogLevelEnum.Info,
-        f"Building target '{TargetPath.FileName()[0:-10]}', contains {len(BuildOrder)} modules wait for build.",
+        f"Building target '{TargetPath.FileName()[0:-10]}', contains {len(BuildOrder)} modules wait to build.",
     )
 
     for Module in BuildOrder:

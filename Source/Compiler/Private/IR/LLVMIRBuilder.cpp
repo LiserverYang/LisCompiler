@@ -44,7 +44,7 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
 
     for (const auto &mirFn : prog.functions)
     {
-        lowerFunctionBody(mirFn);
+        lowerFunctionBody(*mirFn.get());
     }
 
     // Optional: verify the whole module in debug builds.
@@ -68,46 +68,55 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
 
 void LLVMIRBuilder::declareStructTypes(const MIRProgram &prog)
 {
+    // Collect every CustomType we need to lower: non-generic definitions
+    // from the symbol table + every instantiation from the type context.
+    std::vector<std::shared_ptr<CustomType>> toDeclare;
+
     auto scope = SymbolTable::getInstance().getCurrentScope();
-
-    while (scope && scope->getParent() != nullptr)
-    {
-        scope = scope->getParent();
-    }
-
-    for (const auto &[name, sym] : scope->getSymbols())
-    {
-        if (sym->kind == SymbolKind::Struct)
-        {
-            if (structTypes_.count(name)) continue;
-
-            structTypes_[name] = llvm::StructType::create(ctx_, name);
-        }
-    }
+    while (scope && scope->getParent() != nullptr) scope = scope->getParent();
 
     for (const auto &[name, sym] : scope->getSymbols())
     {
         if (sym->kind != SymbolKind::Struct) continue;
+        auto ct = std::dynamic_pointer_cast<CustomType>(sym->type);
+        if (!ct) continue;
+        if (ct->isGeneric()) continue; // skip definitions like Box<T>
+        toDeclare.push_back(ct);
+    }
 
+    for (const auto &[name, type] : context->typeContext->getInstantiatedCustoms())
+    {
+        toDeclare.push_back(type);
+    }
+
+    // Pass 1: create opaque struct types so self-referential fields work.
+    for (const auto &ct : toDeclare)
+    {
+        std::string name = ct->getName();
+        if (structTypes_.count(name)) continue;
+        structTypes_[name] = llvm::StructType::create(ctx_, name);
+    }
+
+    // Pass 2: set bodies.
+    for (const auto &ct : toDeclare)
+    {
+        std::string name = ct->getName();
         llvm::StructType *structTy = structTypes_[name];
         if (!structTy->isOpaque()) continue;
 
-        auto customType = std::static_pointer_cast<CustomType>(sym->type);
-        const auto &fields = customType->getFields();
-
+        const auto &fields = ct->getFields();
         std::vector<llvm::Type *> llvmFields;
         llvmFields.reserve(fields.size());
         std::vector<std::pair<std::string, std::shared_ptr<Type>>> _fields;
+
         for (const auto &field : fields)
         {
-            llvm::Type *fieldTy = semanticTypeToLLVM(field.type, ctx_);
-            llvmFields.push_back(fieldTy);
+            llvmFields.push_back(semanticTypeToLLVM(field.type, ctx_));
             _fields.emplace_back(field.name, field.type);
             fieldIndex_[name][field.name] = llvmFields.size() - 1;
         }
 
-        structFields_[sym->name] = std::move(_fields);
-
+        structFields_[name] = std::move(_fields);
         structTy->setBody(llvmFields, false);
     }
 }
@@ -120,13 +129,14 @@ void LLVMIRBuilder::declareFunctions(const MIRProgram &prog)
 {
     for (const auto &mirFn : prog.functions)
     {
-        std::string mangledName = mangleName(mirFn);
-
-        // Skip if already declared (e.g. declared as external).
-        if (context->module->getFunction(mangledName))
+        if (!mirFn->genericParams.empty())
             continue;
 
-        const MIRBody &body = mirFn.body;
+        // Skip if already declared (e.g. declared as external).
+        if (context->module->getFunction(mirFn->name))
+            continue;
+
+        const MIRBody &body = mirFn->body;
 
         // Build LLVM parameter types from locals[1..argCount].
         std::vector<llvm::Type *> paramTypes;
@@ -139,7 +149,7 @@ void LLVMIRBuilder::declareFunctions(const MIRProgram &prog)
 
         llvm::Function::Create(fty,
             llvm::GlobalValue::ExternalLinkage,
-            mangledName,
+            mirFn->name,
             context->module.get());
     }
 }
@@ -192,7 +202,10 @@ void LLVMIRBuilder::lowerGlobals(const MIRProgram &prog)
 
 void LLVMIRBuilder::lowerFunctionBody(const MIRFunction &mirFn)
 {
-    llvm::Function *fn = context->module->getFunction(mangleName(mirFn));
+    if (!mirFn.genericParams.empty())
+        return;
+
+    llvm::Function *fn = context->module->getFunction(mirFn.name);
     assert(fn && "Function must be declared before its body is lowered");
 
     const MIRBody &body = mirFn.body;
@@ -658,8 +671,6 @@ llvm::Value *LLVMIRBuilder::lowerOperand(FunctionState &fs, const MIROperand &op
         }
         else if constexpr (std::is_same_v<T, MIRMove>)
         {
-            // Load the value.  In a full borrow-checked compiler you'd also
-            // poison the source slot here; for now just load it.
             return loadPlace(fs, o.place);
         }
         llvm_unreachable("unhandled MIROperand variant"); },
@@ -809,7 +820,6 @@ void LLVMIRBuilder::storePlace(FunctionState &fs, const MIRPlace &p, llvm::Value
 
 llvm::Type *LLVMIRBuilder::toLLVMType(const std::shared_ptr<Type> &ty)
 {
-    // Delegate to the bridge function you implement in TypeHelper.cpp.
     return semanticTypeToLLVM(ty, ctx_);
 }
 
@@ -848,21 +858,6 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)
         llvm::GlobalValue::ExternalLinkage,
         name,
         context->module.get());
-}
-
-std::string LLVMIRBuilder::mangleName(const MIRFunction &fn) const
-{
-    // Simple mangling: for methods → "StructName::methodName",
-    // for trait impls → "StructName::TraitName::methodName",
-    // for free functions → just "funcName".
-    if (fn.associatedStruct.empty())
-        return fn.name;
-
-    std::string mangled = fn.associatedStruct + "::";
-    if (fn.associatedTrait.has_value())
-        mangled += *fn.associatedTrait + "::";
-    mangled += fn.name;
-    return mangled;
 }
 
 llvm::AllocaInst *LLVMIRBuilder::emitEntryAlloca(llvm::Function *fn,

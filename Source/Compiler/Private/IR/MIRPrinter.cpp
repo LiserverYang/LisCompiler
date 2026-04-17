@@ -363,8 +363,7 @@ static void printBlock(const MIRBasicBlock &bb, std::ostream &out)
 
     // Statements
     for (const auto &stmt : bb.stmts)
-    {
-        // Skip pure nops unless you want to see them
+    {\
         if (std::holds_alternative<MIRStmtNop>(stmt)) continue;
         out << "        " << fmtStatement(stmt) << ";\n";
     }
@@ -389,19 +388,21 @@ void printMIRBody(const MIRBody &body, std::ostream &out)
         out << "    ";
 
         if (loc.index == 0)
+        {
             out << col(C::DIM) << "// return slot\n"
-                << col(C::RST);
+                << col(C::RST)
+                << "    ";
+        }
 
         const char *tag = loc.isArg    ? "arg"
-                          : loc.isTemp ? "let" // temps use 'let' too; isTemp is metadata
+                          : loc.isTemp ? "let"
                                        : "let";
 
-        out << "    " << col(C::KW) << tag << col(C::RST) << " ";
+        out << col(C::KW) << tag << col(C::RST) << " ";
 
         if (loc.isMutable)
             out << col(C::KW) << "mut " << col(C::RST);
 
-        // temp names are _N, user names are plain
         const char *nameCol = loc.isTemp ? C::TMP : C::VAR;
         out << col(nameCol)
             << (loc.name.empty() ? "_" + std::to_string(loc.index) : loc.name)
@@ -418,26 +419,11 @@ void printMIRBody(const MIRBody &body, std::ostream &out)
 
 // ─── Function ────────────────────────────────────────────────────────────────
 
-static std::string mangleName(const MIRFunction &fn)
-{
-    // Simple mangling: for methods → "StructName::methodName",
-    // for trait impls → "StructName::TraitName::methodName",
-    // for free functions → just "funcName".
-    if (fn.associatedStruct.empty())
-        return fn.name;
-
-    std::string mangled = fn.associatedStruct + "::";
-    if (fn.associatedTrait.has_value())
-        mangled += *fn.associatedTrait + "::";
-    mangled += fn.name;
-    return mangled;
-}
-
 void printMIRFunction(const MIRFunction &fn, std::ostream &out)
 {
     // Signature header
     out << col(C::KW) << "fn " << col(C::RST)
-        << col(C::BOLD) << mangleName(fn) << col(C::RST);
+        << col(C::BOLD) << fn.name << col(C::RST);
 
     if (!fn.associatedStruct.empty())
     {
@@ -480,5 +466,5 @@ void printMIRProgram(const MIRProgram &prog, std::ostream &out)
     out << col(C::DIM) << "// --- functions ---\n\n"
         << col(C::RST);
     for (const auto &fn : prog.functions)
-        printMIRFunction(fn, out);
+        printMIRFunction(*fn.get(), out);
 }

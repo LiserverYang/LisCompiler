@@ -1,4 +1,5 @@
 // Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
 
 // this is a language-example for lis language to show what this language looks like and some compiler behaviors
 // we recommend a new line after function def, and not new line after a control-stream condiction statement
@@ -47,16 +48,43 @@ impl Drop for number
     fn drop(self) {}
 }
 
+fn value<T>(u: T)
+{
+    ret u;
+}
+
+struct box<T>
+{
+    pub v: T
+}
+
+impl box
+{
+    fn new<T>(_v: T)
+    {
+        ret box {
+            v: _v
+        };
+    }
+}
+
 fn main() -> i32
 {
     let x: i32 = fib(4) as i32; // compiler will warn: useless type translating
     
-    let y: number = number::new(1, 2);
+    let mut y: number = number::new(1, 2);
 
     y.add(x, 2);
 
     // i64 -> i32 error: high-to-low type translating
     // but you can use #[i_know = "high-to-low type translating can cause data overflow and other undefined behaviors"] before the statement
+    // to avoid compiler error(still have warning)
+
+    let m = value(y);
+
+    let u = value(box::new(box::new(10))); // auto type and generic arg determind
+
+    // y; // error: variable m has been moved
 
     {
         let z: number = number::new(1, 2);

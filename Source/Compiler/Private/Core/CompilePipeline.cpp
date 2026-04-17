@@ -1,18 +1,20 @@
 /**
  * Copyright 2025, LiserverYang. All rights reserved.
+ * MIT License.
  * Implement the compile pipeline
  */
 
 #include "Core/CompilePipeline.hpp"
-#include "Analysiser/SemanticAnalyzer.hpp"
 #include "Argparser/Argparser.hpp"
 #include "Argparser/Behaviors.hpp"
 #include "Core/Debugging.hpp"
 #include "Core/LambdaPass.hpp"
 #include "IR/Emitter.hpp"
 #include "IR/HIRBuilder.hpp"
+#include "IR/HIRSemanticAnalyzer.hpp"
 #include "IR/LLVMIRBuilder.hpp"
 #include "IR/MIRBuilder.hpp"
+#include "IR/MIRMonomorphization.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Parser/Parser.hpp"
 
@@ -81,10 +83,11 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
             ctx->fileValue = (std::stringstream{} << std::ifstream{ctx->filePath, std::ios::binary}.rdbuf()).str(); }));
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
-    passes.emplace_back(std::make_unique<SemanticAnalyzer>(context));
     passes.emplace_back(std::make_unique<HIRBuilder>(context));
+    passes.emplace_back(std::make_unique<HIRSemanticAnalyzer>(context));
     passes.emplace_back(std::make_unique<MIRBuilder>(context));
-    passes.emplace_back(std::make_unique<LLVMIRBuilder>(context, context->llvmContext, "LLVMIRBuilder"));
+    passes.emplace_back(std::make_unique<MIRMonomorphization>(context));
+    passes.emplace_back(std::make_unique<LLVMIRBuilder>(context, context->llvmContext, context->args->getArg("filePath")));
 
     Emitter::Options emitOpts;
     int optLevel = std::stoi(context->args->getArg("o"));

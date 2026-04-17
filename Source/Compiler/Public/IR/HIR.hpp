@@ -11,44 +11,76 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <unordered_map>
 
 #include "Analysiser/Scope.hpp"
 #include "Analysiser/Symbol.hpp"
 #include "Analysiser/Type.hpp"
 #include "Core/SourcePosition.hpp"
+#include "IR/HIRVisitor.hpp"
 
+// ---------------------------------------------------------------------------
+// Raw (unresolved) type reference — filled by HIRBuilder from the AST TypeNode,
+// resolved into std::shared_ptr<Type> by HIRSemanticAnalyzer.
+// ---------------------------------------------------------------------------
+struct HIRRawType
+{
+    std::string name;
+    bool isRef = false;
+    bool isMutRef = false;
+    bool isPresent = false;  // false = "not explicitly written"
+    bool isPrimitive = true; // false = custom / struct type
+
+    std::vector<HIRRawType> genericArgs;
+};
+
+// ---------------------------------------------------------------------------
+// Base nodes
+// ---------------------------------------------------------------------------
 class HIRNode
 {
 public:
     SourcePosition position;
     size_t length;
     virtual ~HIRNode() = default;
+    virtual void accept(HIRVisitor *visitor) = 0;
 };
 
 class HIRExpr : public HIRNode
 {
 public:
-    std::shared_ptr<Type> type;
+    std::shared_ptr<Type> type; // filled by HIRSemanticAnalyzer
 };
 
 class HIRStmt : public HIRNode
 {
 };
 
+// ---------------------------------------------------------------------------
 class HIRProgram : public HIRNode
 {
 public:
     std::vector<std::unique_ptr<HIRNode>> items;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRNameRef : public HIRExpr
 {
 public:
     std::string name;
-    Symbol *symbol;
+    Symbol *symbol = nullptr; // filled by HIRSemanticAnalyzer
     std::shared_ptr<Scope> scope;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRLiteral : public HIRExpr
 {
 public:
@@ -62,111 +94,190 @@ public:
     };
     Kind kind;
     std::variant<int64_t, double, std::string, bool, char> value;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRBinaryOp : public HIRExpr
 {
 public:
     enum class OpKind
     {
-        // 算术运算
         Add,
         Sub,
         Mul,
         Div,
         Mod,
-        // 比较运算
         Eq,
         Ne,
         Lt,
         Gt,
         Le,
         Ge,
-        // 逻辑运算
         And,
         Or,
-        // 位运算
         BitAnd,
         BitOr,
         BitXor,
         ShiftLeft,
         ShiftRight
     };
-
     std::unique_ptr<HIRExpr> left;
     std::unique_ptr<HIRExpr> right;
     OpKind opKind;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRCast : public HIRExpr
 {
 public:
     std::unique_ptr<HIRExpr> expr;
-    std::shared_ptr<Type> targetType;
+    HIRRawType rawTargetType;         // set by HIRBuilder
+    std::shared_ptr<Type> targetType; // filled by HIRSemanticAnalyzer
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
+// A single HIRCall covers regular calls, instance-method calls, and static
+// calls.  HIRBuilder sets callKind + the appropriate raw fields; the semantic
+// analyser resolves callee, symbol, and type.
 class HIRCall : public HIRExpr
 {
 public:
-    std::unique_ptr<HIRExpr> callee;            // 被调用者
-    std::vector<std::unique_ptr<HIRExpr>> args; // 实参
+    enum class CallKind
+    {
+        Regular,
+        Method,
+        Static
+    };
+    CallKind callKind = CallKind::Regular;
+
+    // Regular call: function expression
+    std::unique_ptr<HIRExpr> callee;
+
+    // Method call: receiver object + method name
+    std::unique_ptr<HIRExpr> object;
+    std::string methodName;
+
+    // Static call: type name + method name (object is null, callee is null)
+    std::string staticTypeName;
+
+    std::vector<HIRRawType> genericParams;
+    std::vector<std::shared_ptr<Type>> typedGenericParams;
+
+    std::vector<std::unique_ptr<HIRExpr>> args;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRMemberAccess : public HIRExpr
 {
 public:
-    std::unique_ptr<HIRExpr> object; // 被访问的对象
-    std::string memberName;          // 成员名称
-    Symbol *memberSymbol;            // 成员符号（来自符号表）
+    std::unique_ptr<HIRExpr> object;
+    std::string memberName;
+    Symbol *memberSymbol = nullptr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRStructInit : public HIRExpr
 {
 public:
-    Symbol *structSymbol;                                                  // 结构体符号
-    std::vector<std::pair<std::string, std::unique_ptr<HIRExpr>>> members; // 成员初始化
+    std::string structName;         // raw name — set by HIRBuilder
+    Symbol *structSymbol = nullptr; // filled by HIRSemanticAnalyzer
+    std::vector<std::pair<std::string, std::unique_ptr<HIRExpr>>> members;
+    std::vector<HIRRawType> genericArgs;
+    std::vector<std::shared_ptr<Type>> typedGenericParams;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRRef : public HIRExpr
 {
 public:
     std::unique_ptr<HIRExpr> expr;
-    bool isMutable;
+    bool isMutable = false;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRBlock : public HIRStmt
 {
 public:
     std::vector<std::unique_ptr<HIRStmt>> stmts;
-    std::shared_ptr<Scope> scope; // 块所属作用域
+    std::shared_ptr<Scope> scope;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRVarDecl : public HIRStmt
 {
 public:
-    std::string name;                             // 变量名
-    std::shared_ptr<Type> type;                   // 变量类型（语义类型）
-    std::optional<std::unique_ptr<HIRExpr>> init; // 初始化值
-    bool isMutable;                               // 是否可变
-    bool isGlobal;                                // 是否是全局变量
-    Symbol *varSymbol;                            // 变量符号
+    std::string name;
+    HIRRawType rawType; // set by HIRBuilder (if explicit)
+    bool hasExplicitType = false;
+    std::shared_ptr<Type> type; // filled by HIRSemanticAnalyzer
+    std::optional<std::unique_ptr<HIRExpr>> init;
+    bool isMutable = false;
+    bool isGlobal = false;
+    Symbol *varSymbol = nullptr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRAssign : public HIRStmt
 {
 public:
-    std::unique_ptr<HIRExpr> target; // 赋值目标（必须是左值）
-    std::unique_ptr<HIRExpr> value;  // 赋值值
+    std::unique_ptr<HIRExpr> target;
+    std::unique_ptr<HIRExpr> value;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRIf : public HIRStmt
 {
 public:
-    std::unique_ptr<HIRExpr> cond;                      // 条件表达式
-    std::unique_ptr<HIRBlock> thenBlock;                // then 分支
-    std::optional<std::unique_ptr<HIRBlock>> elseBlock; // else 分支
+    std::unique_ptr<HIRExpr> cond;
+    std::unique_ptr<HIRBlock> thenBlock;
+    std::optional<std::unique_ptr<HIRBlock>> elseBlock;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRLoop : public HIRStmt
 {
 public:
@@ -176,83 +287,139 @@ public:
         For
     };
     Kind kind;
-
-    // While 循环：条件表达式
-    // For 循环：迭代器表达式 + 循环变量
-    std::optional<std::unique_ptr<HIRExpr>> cond; // While 条件 / For 迭代器
-    // std::optional<std::pair<std::string, Type>> loopVar; // For 循环变量（名称+类型）
-    std::unique_ptr<HIRBlock> body; // 循环体
+    std::optional<std::unique_ptr<HIRExpr>> cond;
+    std::unique_ptr<HIRBlock> body;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRReturn : public HIRStmt
 {
 public:
-    std::optional<std::unique_ptr<HIRExpr>> value; // 返回值
+    std::optional<std::unique_ptr<HIRExpr>> value;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRExprStmt : public HIRStmt
 {
 public:
     std::unique_ptr<HIRExpr> expr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRFunction : public HIRNode
 {
 public:
-    std::string name;                                                  // 函数名
-    std::vector<std::pair<std::string, std::shared_ptr<Type>>> params; // 参数（名称/类型）
-    std::shared_ptr<Type> returnType;                                  // 返回类型
-    std::shared_ptr<Type> type;                                        // 函数类型
-    std::unique_ptr<HIRBlock> body;                                    // 函数体
-    Symbol *funcSymbol;                                                // 函数符号
-    bool isMethod;                                                     // 是否是方法
-    bool isStatic;                                                     // 是否是静态方法
-    bool isTraitMethod;                                                // 是否是 trait 方法
-    std::string associatedStruct;                                      // 关联的结构体名
-    std::string associatedTrait;                                       // 关联的 trait 名
+    std::string name;
+
+    // Raw info — set by HIRBuilder
+    std::vector<std::pair<std::string, HIRRawType>> rawParams;
+    HIRRawType rawReturnType;
+    bool hasReturnType = false;
+
+    // Self param info (for methods)
+    bool hasSelf = false;
+    bool selfIsRef = false;
+    bool selfIsMut = false;
+    std::shared_ptr<Type> selfType; // filled by HIRSemanticAnalyzer
+
+    // Resolved — filled by HIRSemanticAnalyzer
+    std::vector<std::pair<std::string, std::shared_ptr<Type>>> params;
+    std::vector<std::shared_ptr<GenericParamType>> gParams;
+    std::unordered_map<std::string, std::vector<std::string>> unsolveConstraints;
+    std::shared_ptr<Type> returnType;
+    std::shared_ptr<Type> type;
+
+    std::unique_ptr<HIRBlock> body;
+    Symbol *funcSymbol = nullptr;
+
+    bool isMethod = false;
+    bool isStatic = false;
+    bool isTraitMethod = false;
+    bool isGeneric = false;
+    std::string associatedStruct;
+    std::string associatedTrait;
+
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRStruct : public HIRNode
 {
 public:
-    struct Method
+    struct Member
     {
         std::string name;
-        std::shared_ptr<Type> type;
-        bool isPublic;
+        HIRRawType rawType;         // set by HIRBuilder
+        std::shared_ptr<Type> type; // filled by HIRSemanticAnalyzer
+        bool isPublic = false;
     };
 
-public:
-    std::string name;                        // 结构体名
-    std::vector<Method> members;             // 成员（名称+类型）
-    std::vector<Symbol *> implementedTraits; // 实现的 trait 列表
-    Symbol *structSymbol;                    // 结构体符号
+    std::string name;
+    std::vector<Member> members;
+    std::vector<Symbol *> implementedTraits;
+    bool isGeneric;
+
+    std::vector<std::shared_ptr<GenericParamType>> gParams;
+    std::unordered_map<std::string, std::vector<std::string>> unsolveConstraints;
+    Symbol *structSymbol = nullptr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRTrait : public HIRNode
 {
 public:
-    std::string name;                                  // Trait 名
-    std::vector<std::unique_ptr<HIRFunction>> methods; // 方法声明
-    Symbol *traitSymbol;                               // Trait 符号
+    std::string name;
+    std::vector<std::unique_ptr<HIRFunction>> methods;
+    Symbol *traitSymbol = nullptr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
-// TODO: 暂时不考虑模块管理
-
+// ---------------------------------------------------------------------------
 class HIRImpl : public HIRNode
 {
 public:
-    std::string structName;                            // 关联的结构体名
-    std::optional<std::string> traitName;              // 关联的 trait 名（空则为普通 impl）
-    std::vector<std::unique_ptr<HIRFunction>> methods; // 实现的方法
+    std::string structName;
+    std::optional<std::string> traitName;
+    std::vector<std::unique_ptr<HIRFunction>> methods;
+    std::vector<std::shared_ptr<GenericParamType>> gParams;
+    std::unordered_map<std::string, std::vector<std::string>> unsolveConstraints;
+    std::vector<HIRRawType> structGenericArgs;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
+// ---------------------------------------------------------------------------
 class HIRImport : public HIRNode
 {
 public:
-    std::vector<std::string> path;                   // 模块路径
-    std::optional<std::vector<std::string>> symbols; // 导入的符号
-    std::optional<std::string> alias;                // 别名
+    std::vector<std::string> path;
+    std::optional<std::vector<std::string>> symbols;
+    std::optional<std::string> alias;
+    void accept(HIRVisitor *visitor) override {} // no-op for now
 };
 
 void printHIR(HIRNode *node);

@@ -66,9 +66,9 @@ class FileIO:
             for file in os.listdir(self.FilePathStr)
         ]
 
-    def EndSwitch(self) -> str:
+    def EndsWith(self) -> str:
         """
-        Get the endswitch of this file.
+        Get the EndsWith of this file.
         """
 
         return os.path.splitext(self.FilePathStr)[1]

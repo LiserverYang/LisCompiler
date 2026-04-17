@@ -4,132 +4,84 @@
  */
 
 #include "IR/HIRBuilder.hpp"
-#include "Analysiser/SymbolTable.hpp"
 
+// Helper: convert an AST TypeNode pointer into an HIRRawType.
+static HIRRawType toRaw(const TypeNode *n)
+{
+    if (!n) return {};
+    HIRRawType r;
+    r.name = n->typeName;
+    r.isRef = n->isReference;
+    r.isMutRef = n->isMutReference;
+    r.isPresent = true;
+    r.isPrimitive = (n->kind == TypeNode::TypeKind::Primitive);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(Program *node)
 {
-    if (!node)
-    {
-        return;
-    }
+    if (!node) return;
 
     context->hirProgram = std::make_unique<HIRProgram>();
     context->hirProgram->position = node->position;
     context->hirProgram->length = node->length;
 
-    // here we generite all member functions
-
-    auto &symbols = SymbolTable::getInstance().getCurrentScope()->getSymbols();
-
-    for (auto &[name, symbol] : symbols)
-    {
-        if (symbol->kind == SymbolKind::Struct)
-        {
-            std::shared_ptr<CustomType> newTy = std::static_pointer_cast<CustomType>(symbol->type);
-
-            for (auto &method : newTy->getMethods())
-            {
-                std::vector<std::shared_ptr<Type>> params;
-
-                for (CustomType::Field param : method.params)
-                {
-                    params.push_back(param.type);
-                }
-
-                auto type = context->typeContext->getFunction(std::move(params), method.returnType);
-
-                auto funcSymbol = std::make_unique<Symbol>();
-                std::string funcName = name + "::" + (method.isTraitImpl ? (method.traitName + "::") : "") + method.name;
-
-                funcSymbol->kind = SymbolKind::Function;
-                funcSymbol->name = funcName;
-                funcSymbol->position = node->position;
-                funcSymbol->type = type;
-                SymbolTable::getInstance().insertSymbol(funcName, std::move(funcSymbol));
-            }
-        }
-    }
-
     for (auto &it : node->globalStatements)
     {
         it->accept(this);
-
-        context->hirProgram->items.emplace_back((HIRExpr *)nodeStack.top().release());
-
+        context->hirProgram->items.emplace_back((HIRNode *)nodeStack.top().release());
         nodeStack.pop();
     }
 }
 
-void HIRBuilder::visit(TypeNode *node) {}
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(TypeNode *node) {} // nothing to push — callers use toRaw()
 
 void HIRBuilder::visit(MemberVarDef *node) {}
 
+void HIRBuilder::visit(Param *node) {} // handled inline by parent visitors
+
+void HIRBuilder::visit(SelfParam *node) {} // handled inline
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(StructDef *node)
 {
     auto result = std::make_unique<HIRStruct>();
-
-    for (auto &it : node->members)
-    {
-        result->members.emplace_back(it->name, it->type->semanticType, it->isPublic);
-    }
-
     result->name = node->name;
     result->position = node->position;
     result->length = node->length;
-    result->structSymbol = node->symbol;
 
-    nodeStack.push(std::move(result));
-}
-
-void HIRBuilder::visit(Param *node) {}
-
-void HIRBuilder::visit(SelfParam *node) {}
-
-void HIRBuilder::visit(MemberFunctionDef *node)
-{
-    auto result = std::make_unique<HIRFunction>();
-
-    result->position = node->position;
-    result->length = node->length;
-    result->name = node->name;
-    result->isMethod = true;
-    result->returnType = node->declaredReturnType;
-
-    if (node->body.has_value())
+    if (!node->genericParams.empty())
     {
-        node->body.value()->accept(this);
-        result->body.reset((HIRBlock *)nodeStack.top().release());
-        nodeStack.pop();
+        result->isGeneric = true;
+
+        for (auto &gParam : node->genericParams)
+        {
+            result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
+            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+        }
     }
 
-    result->associatedStruct = node->sturctName;
-    result->associatedTrait = node->traitName;
-
-    if (node->selfParam.has_value())
+    for (auto &m : node->members)
     {
-        result->params.emplace_back("self", node->selfParam.value()->semanticType);
-    }
-    else
-    {
-        result->isStatic = true;
-    }
-
-    for (auto &param : node->params)
-    {
-        param->accept(this);
-        result->params.emplace_back(param->name, param->semanticType);
+        HIRStruct::Member member;
+        member.name = m->name;
+        member.isPublic = m->isPublic;
+        member.rawType = toRaw(m->type.get());
+        result->members.push_back(std::move(member));
     }
 
     nodeStack.push(std::move(result));
 }
 
-void HIRBuilder::visit(StructImpl *node)
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(TraitDef *node)
 {
-    auto result = std::make_unique<HIRImpl>();
+    auto result = std::make_unique<HIRTrait>();
+    result->name = node->name;
     result->position = node->position;
     result->length = node->length;
-    result->structName = node->structName;
-    result->traitName = node->traitName;
 
     for (auto &method : node->methods)
     {
@@ -142,6 +94,102 @@ void HIRBuilder::visit(StructImpl *node)
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(MemberFunctionDef *node)
+{
+    auto result = std::make_unique<HIRFunction>();
+    result->position = node->position;
+    result->length = node->length;
+    result->name = node->name;
+    result->isMethod = true;
+    result->associatedStruct = node->structName;
+    result->associatedTrait = node->traitName;
+
+    // Self param
+    if (node->selfParam.has_value())
+    {
+        result->hasSelf = true;
+        result->selfIsRef = node->selfParam.value()->isRef;
+        result->selfIsMut = node->selfParam.value()->isMut;
+    }
+    else
+    {
+        result->isStatic = true;
+    }
+
+    // Return type
+    if (node->returnType.has_value())
+    {
+        result->hasReturnType = true;
+        result->rawReturnType = toRaw(node->returnType.value().get());
+    }
+
+    if (!node->genericParams.empty())
+    {
+        result->isGeneric = true;
+
+        for (auto &gParam : node->genericParams)
+        {
+            result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
+            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+        }
+    }
+
+    // Params
+    for (auto &param : node->params)
+    {
+        HIRRawType rt;
+        if (param->type.has_value())
+            rt = toRaw(param->type.value().get());
+        result->rawParams.emplace_back(param->name, rt);
+    }
+
+    // Body
+    if (node->body.has_value())
+    {
+        node->body.value()->accept(this);
+        result->body.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
+        nodeStack.pop();
+    }
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(StructImpl *node)
+{
+    auto result = std::make_unique<HIRImpl>();
+    result->position = node->position;
+    result->length = node->length;
+    result->structName = node->structName;
+    result->traitName = node->traitName;
+
+    if (!node->genericParams.empty())
+    {
+        for (auto &gParam : node->genericParams)
+        {
+            result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
+            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+        }
+    }
+
+    for (auto &arg : node->structGenericArgs)
+    {
+        result->structGenericArgs.push_back(toRaw(arg.get()));
+    }
+
+    for (auto &method : node->methods)
+    {
+        method->accept(this);
+        result->methods.emplace_back(
+            std::unique_ptr<HIRFunction>(dynamic_cast<HIRFunction *>(nodeStack.top().release())));
+        nodeStack.pop();
+    }
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(FunctionDef *node)
 {
     auto result = std::make_unique<HIRFunction>();
@@ -152,19 +200,31 @@ void HIRBuilder::visit(FunctionDef *node)
     result->isStatic = true;
     result->isTraitMethod = false;
 
-    // 处理返回类型
-    result->returnType = node->returnType.has_value()
-                             ? node->returnType.value()->semanticType
-                             : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-
-    // 处理参数
-    for (auto &param : node->params)
+    if (node->returnType.has_value())
     {
-        param->accept(this);
-        result->params.emplace_back(param->name, param->semanticType);
+        result->hasReturnType = true;
+        result->rawReturnType = toRaw(node->returnType.value().get());
     }
 
-    // 处理函数体
+    if (!node->genericParams.empty())
+    {
+        result->isGeneric = true;
+
+        for (auto &gParam : node->genericParams)
+        {
+            result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
+            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+        }
+    }
+
+    for (auto &param : node->params)
+    {
+        HIRRawType rt;
+        if (param->type.has_value())
+            rt = toRaw(param->type.value().get());
+        result->rawParams.emplace_back(param->name, rt);
+    }
+
     if (node->body)
     {
         node->body->accept(this);
@@ -172,12 +232,10 @@ void HIRBuilder::visit(FunctionDef *node)
         nodeStack.pop();
     }
 
-    result->funcSymbol = node->symbol;
-    result->type = node->type;
-
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(GlobalVarDef *node)
 {
     auto result = std::make_unique<HIRVarDecl>();
@@ -187,97 +245,54 @@ void HIRBuilder::visit(GlobalVarDef *node)
     result->isGlobal = true;
     result->isMutable = true;
 
-    // 处理变量类型
     if (node->type.has_value())
     {
-        node->type.value()->accept(this);
-        result->type = node->type.value()->semanticType;
-    }
-    else
-    {
-        result->type = node->initValue->type;
+        result->hasExplicitType = true;
+        result->rawType = toRaw(node->type.value().get());
     }
 
-    // 处理初始化值
     if (node->initValue)
     {
         node->initValue->accept(this);
-        result->init = std::move(std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release()));
-        nodeStack.pop();
-    }
-
-    // 设置变量符号
-    auto varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
-    if (varSymbol && varSymbol->kind == SymbolKind::GlobalVar)
-    {
-        result->varSymbol = varSymbol;
-    }
-
-    nodeStack.push(std::move(result));
-}
-
-void HIRBuilder::visit(TraitDef *node)
-{
-    auto result = std::make_unique<HIRTrait>();
-    result->position = node->position;
-    result->length = node->length;
-    result->name = node->name;
-    result->traitSymbol = node->symbol;
-
-    // 转换 trait 方法
-    for (auto &method : node->methods)
-    {
-        method->accept(this);
-        result->methods.emplace_back(
-            std::unique_ptr<HIRFunction>(dynamic_cast<HIRFunction *>(nodeStack.top().release())));
+        result->init = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
         nodeStack.pop();
     }
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(CompoundStmt *node)
 {
     auto result = std::make_unique<HIRBlock>();
     result->position = node->position;
     result->length = node->length;
-    result->scope = node->scope;
 
-    // 转换块内语句
     for (auto &stmt : node->statements)
     {
         stmt->accept(this);
-        result->stmts.emplace_back(
-            std::unique_ptr<HIRStmt>((HIRStmt *)nodeStack.top().release()));
+        result->stmts.emplace_back((HIRStmt *)nodeStack.top().release());
         nodeStack.pop();
     }
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(IfStmt *node)
 {
     auto result = std::make_unique<HIRIf>();
     result->position = node->position;
     result->length = node->length;
 
-    // 处理条件表达式
-    if (node->condition)
-    {
-        node->condition->accept(this);
-        result->cond.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->condition->accept(this);
+    result->cond.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
-    // 处理 then 分支
-    if (node->thenBranch)
-    {
-        node->thenBranch->accept(this);
-        result->thenBlock.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->thenBranch->accept(this);
+    result->thenBlock.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
+    nodeStack.pop();
 
-    // 处理 else 分支
     if (node->elseBranch.has_value())
     {
         node->elseBranch.value()->accept(this);
@@ -289,13 +304,13 @@ void HIRBuilder::visit(IfStmt *node)
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(ReturnStmt *node)
 {
     auto result = std::make_unique<HIRReturn>();
     result->position = node->position;
     result->length = node->length;
 
-    // 处理返回值
     if (node->returnValue.has_value())
     {
         node->returnValue.value()->accept(this);
@@ -306,6 +321,7 @@ void HIRBuilder::visit(ReturnStmt *node)
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(DeclStmt *node)
 {
     auto result = std::make_unique<HIRVarDecl>();
@@ -315,18 +331,12 @@ void HIRBuilder::visit(DeclStmt *node)
     result->isMutable = node->isMutable;
     result->isGlobal = false;
 
-    // 处理变量类型
     if (node->type.has_value())
     {
-        node->type.value()->accept(this);
-        result->type = node->type.value()->semanticType;
-    }
-    else if (node->initValue.has_value())
-    {
-        result->type = node->initValue.value()->type;
+        result->hasExplicitType = true;
+        result->rawType = toRaw(node->type.value().get());
     }
 
-    // 处理初始化值
     if (node->initValue.has_value())
     {
         node->initValue.value()->accept(this);
@@ -334,44 +344,34 @@ void HIRBuilder::visit(DeclStmt *node)
         nodeStack.pop();
     }
 
-    // 设置变量符号
-    result->varSymbol = node->symbol;
-
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(AssignStmt *node)
 {
     auto result = std::make_unique<HIRAssign>();
     result->position = node->position;
     result->length = node->length;
 
-    // 处理赋值目标（左值）
-    if (node->target)
-    {
-        node->target->accept(this);
-        result->target.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->target->accept(this);
+    result->target.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
-    // 处理赋值值
-    if (node->value)
-    {
-        node->value->accept(this);
-        result->value.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->value->accept(this);
+    result->value.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(ExprStmt *node)
 {
     auto result = std::make_unique<HIRExprStmt>();
     result->position = node->position;
     result->length = node->length;
 
-    // 处理表达式
     if (node->expression)
     {
         node->expression->accept(this);
@@ -382,31 +382,42 @@ void HIRBuilder::visit(ExprStmt *node)
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(ForStmt *node)
 {
     auto result = std::make_unique<HIRLoop>();
     result->position = node->position;
     result->length = node->length;
     result->kind = HIRLoop::Kind::For;
-
-    // TODO
-
+    // TODO: full for-loop lowering
     nodeStack.push(std::move(result));
 }
 
 void HIRBuilder::visit(WhileStmt *node)
 {
-    // TODO
+    auto result = std::make_unique<HIRLoop>();
+    result->position = node->position;
+    result->length = node->length;
+    result->kind = HIRLoop::Kind::While;
+
+    node->condition->accept(this);
+    result->cond = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
+    nodeStack.pop();
+
+    node->body->accept(this);
+    result->body.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(LiteralExpr *node)
 {
     auto result = std::make_unique<HIRLiteral>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
 
-    // 转换字面量类型和值
     switch (node->kind)
     {
     case LiteralExpr::LiteralType::Int:
@@ -434,33 +445,30 @@ void HIRBuilder::visit(LiteralExpr *node)
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(IdentifierExpr *node)
 {
     auto result = std::make_unique<HIRNameRef>();
     result->position = node->position;
     result->length = node->length;
     result->name = node->name;
-    result->type = node->type;
-
-    // 获取符号和作用域
-    result->symbol = node->symbol;
-    result->scope = node->scope;
-
+    // symbol / scope / type left null — filled by HIRSemanticAnalyzer
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(StructInitExpr *node)
 {
     auto result = std::make_unique<HIRStructInit>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
+    result->structName = node->structType->typeName;
 
-    // 获取结构体符号
-    result->structSymbol = node->structSymbol;
-    result->type = node->structSymbol->type;
+    for (auto &arg : node->genericParams)
+    {
+        result->genericArgs.push_back(toRaw(arg.get()));
+    }
 
-    // 转换成员初始化
     for (auto &member : node->memberInits)
     {
         member.second->accept(this);
@@ -473,139 +481,108 @@ void HIRBuilder::visit(StructInitExpr *node)
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(StaticMemberCall *node)
 {
     auto result = std::make_unique<HIRCall>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
+    result->callKind = HIRCall::CallKind::Static;
+    result->staticTypeName = node->classType->typeName;
+    result->methodName = node->methodName;
 
-    auto callee = std::make_unique<HIRNameRef>();
-    callee->name = node->classType->typeName + "::" + node->methodName;
-    callee->symbol = SymbolTable::getInstance().lookupSymbol(node->classType->typeName);
-    callee->type = callee->symbol->type;
-    result->callee = std::move(callee);
+    for (auto &arg : node->genericParams)
+    {
+        result->genericParams.push_back(toRaw(arg.get()));
+    }
 
-    // 转换参数
     for (auto &arg : node->arguments)
     {
         arg->accept(this);
-        result->args.emplace_back(std::unique_ptr<HIRExpr>(static_cast<HIRExpr *>(nodeStack.top().release())));
+        result->args.emplace_back((HIRExpr *)nodeStack.top().release());
         nodeStack.pop();
     }
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(MemberFunctionCall *node)
 {
     auto result = std::make_unique<HIRCall>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
+    result->callKind = HIRCall::CallKind::Method;
+    result->methodName = node->methodName;
 
-    // 处理调用对象
     node->object->accept(this);
-    auto objectExpr = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
+    result->object = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
     nodeStack.pop();
 
-    auto callee = std::make_unique<HIRNameRef>();
-    callee->name = std::static_pointer_cast<CustomType>(objectExpr->type)->getName() + "::" + (node->method->isTraitImpl ? (node->method->traitName + "::") : "") + node->methodName;
-    callee->symbol = SymbolTable::getInstance().lookupSymbol(callee->name);
-    callee->type = callee->symbol->type;
-    result->callee = std::move(callee);
-
-    auto newTy = std::static_pointer_cast<FunctionType>(result->callee->type);
-
-    if (newTy->getParams()[0]->getKind() == Type::Kind::Custom)
+    for (auto &arg : node->genericParams)
     {
-        result->args.emplace_back(std::move(objectExpr));
-    }
-    else
-    {
-        auto refExpr = std::make_unique<HIRRef>();
-        refExpr->expr = std::move(objectExpr);
-        refExpr->isMutable = std::static_pointer_cast<ReferenceType>(newTy->getParams()[0])->isMutableRef();
-        refExpr->type = newTy->getParams()[0];
-        result->args.emplace_back(std::move(refExpr));
+        result->genericParams.push_back(toRaw(arg.get()));
     }
 
-    // 转换参数
     for (auto &arg : node->arguments)
     {
         arg->accept(this);
-        result->args.emplace_back(std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release()));
+        result->args.emplace_back((HIRExpr *)nodeStack.top().release());
         nodeStack.pop();
     }
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(FunctionCall *node)
 {
     auto result = std::make_unique<HIRCall>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
+    result->callKind = HIRCall::CallKind::Regular;
 
-    // 处理被调用函数
-    if (node->function)
+    node->function->accept(this);
+    result->callee.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    for (auto &arg : node->genericParams)
     {
-        node->function->accept(this);
-        result->callee.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
+        result->genericParams.push_back(toRaw(arg.get()));
     }
 
-    // 转换参数
     for (auto &arg : node->arguments)
     {
         arg->accept(this);
-        result->args.emplace_back(std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release()));
+        result->args.emplace_back((HIRExpr *)nodeStack.top().release());
         nodeStack.pop();
     }
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(MemberAccess *node)
 {
     auto result = std::make_unique<HIRMemberAccess>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
     result->memberName = node->memberName;
 
-    // 处理访问对象
-    if (node->object)
-    {
-        node->object->accept(this);
-        result->object.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
-
-    // 获取成员符号
-    auto objType = result->object->type;
-    if (auto refType = std::dynamic_pointer_cast<ReferenceType>(objType))
-    {
-        objType = refType->getBaseType();
-    }
-    if (auto customType = std::dynamic_pointer_cast<CustomType>(objType))
-    {
-        result->memberSymbol = SymbolTable::getInstance().lookupSymbol(
-            customType->getName() + "." + node->memberName);
-    }
+    node->object->accept(this);
+    result->object.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(BinaryOp *node)
 {
     auto result = std::make_unique<HIRBinaryOp>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
 
-    // 转换操作符类型
     if (node->op == "+")
         result->opKind = HIRBinaryOp::OpKind::Add;
     else if (node->op == "-")
@@ -643,46 +620,33 @@ void HIRBuilder::visit(BinaryOp *node)
     else if (node->op == ">>")
         result->opKind = HIRBinaryOp::OpKind::ShiftRight;
 
-    // 处理左操作数
-    if (node->left)
-    {
-        node->left->accept(this);
-        result->left.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->left->accept(this);
+    result->left.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
-    // 处理右操作数
-    if (node->right)
-    {
-        node->right->accept(this);
-        result->right.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->right->accept(this);
+    result->right.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(CastExpr *node)
 {
     auto result = std::make_unique<HIRCast>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
+    result->rawTargetType = toRaw(node->targetType.get());
 
-    // 处理目标类型
-    result->targetType = node->targetType->semanticType;
-
-    // 处理被转换表达式
-    if (node->expression)
-    {
-        node->expression->accept(this);
-        result->expr.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
-        nodeStack.pop();
-    }
+    node->expression->accept(this);
+    result->expr.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
 
     nodeStack.push(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(ParenExpr *node)
 {
     if (node->expression)
@@ -691,12 +655,12 @@ void HIRBuilder::visit(ParenExpr *node)
     }
 }
 
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(BorrowExpr *node)
 {
     auto result = std::make_unique<HIRRef>();
     result->position = node->position;
     result->length = node->length;
-    result->type = node->type;
     result->isMutable = node->isMutable;
 
     node->expression->accept(this);

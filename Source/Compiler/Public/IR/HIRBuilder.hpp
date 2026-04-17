@@ -11,7 +11,7 @@
 
 #include "Core/Pass.hpp"
 #include "Parser/AST.hpp"
-#include "Parser/ASTVisitor.hpp"
+#include "IR/HIR.hpp"
 
 #include "Core/Debugging.hpp"
 
@@ -32,11 +32,6 @@ public:
     virtual void run() override
     {
         context->program.accept(this);
-
-        if (context->args->getArg("print_hir").compare("true") == 0)
-        {
-            printHIR((HIRNode *)context->hirProgram.get());
-        }
     }
 
 public:
@@ -77,4 +72,5 @@ public:
     virtual void visit(CastExpr *node) override;
     virtual void visit(ParenExpr *node) override;
     virtual void visit(BorrowExpr *node) override;
+    virtual void visit(GenericParam *node) override {}
 };

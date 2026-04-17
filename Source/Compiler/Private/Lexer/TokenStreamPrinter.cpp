@@ -1,3 +1,8 @@
+/**
+ * Copyright 2026, LiserverYang. All rights reserved.
+ * MIT License.
+ */
+
 #include "Lexer/TokenStreamPrinter.hpp"
 #include "magic_enum.hpp"
 
