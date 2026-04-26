@@ -1,4 +1,4 @@
-# Lis Language Statnderd Compiler Lis语言标准编译器
+# Lis Language Standard Compiler Lis语言标准编译器
 
 这个项目实现了 lis 语言的编译器以及运行时标准库；广义地说，实现了 lis 语言。
 

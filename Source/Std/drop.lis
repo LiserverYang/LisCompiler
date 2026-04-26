@@ -6,6 +6,6 @@
 // This is a part of standard lib of lis language.
 
 trait Drop
-{    
+{
     fn drop(self);
 }
