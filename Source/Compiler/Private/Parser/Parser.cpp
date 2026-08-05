@@ -25,7 +25,7 @@ void Parser::synchronize()
         case TokenCode::FOR: case TokenCode::RET: case TokenCode::BREAK:
         case TokenCode::CONTINUE:
         case TokenCode::FN: case TokenCode::STRUCT: case TokenCode::IMPL:
-        case TokenCode::TRAIT:
+        case TokenCode::TRAIT: case TokenCode::ENUM:
             return;
         default: advance();
         }
@@ -93,6 +93,10 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     {
         return parseTraitDefinition();
     }
+    else if (check(TokenCode::ENUM))
+    {
+        return parseEnumDefinition();
+    }
     else
     {
         logError(currentToken(), "illegal global statement");
@@ -145,6 +149,71 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
 
     knownTypes.insert(structDef->name);
     return structDef;
+}
+
+std::unique_ptr<EnumDef> Parser::parseEnumDefinition()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    match(TokenCode::ENUM);
+
+    auto enumDef = std::make_unique<EnumDef>();
+    recorder.bindNode(enumDef.get());
+
+    createSnapshot();
+    enumDef->name = consume(TokenCode::IDENTIFIER, "expect an identifier as the enum name", E_ExpectAnIdentifier).value;
+
+    if (check(TokenCode::LT))
+        enumDef->genericParams = std::move(parseGenericParams());
+
+    if (knownTypes.count(enumDef->name) > 0)
+    {
+        backToSnapshot();
+        consume(TokenCode::UNDEFINED, "mutidefined enum '" + enumDef->name + "'", E_MutidefinedStruct);
+    }
+
+    consume(TokenCode::LBRACE, "expect a '{' after enum name", E_ExpectALBRACE);
+
+    while (!match(TokenCode::RBRACE) && !finished())
+    {
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
+        auto variant = parseEnumVariant();
+        if (variant)
+            enumDef->variants.push_back(std::move(variant));
+        if (currentPos == beforePos)
+            advance(); // guarantee progress on a variant that consumed nothing
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
+        if (match(TokenCode::COMMA)) continue; // variants are comma-separated
+    }
+
+    knownTypes.insert(enumDef->name);
+    context->knownEnums.insert(enumDef->name);
+    return enumDef;
+}
+
+std::unique_ptr<EnumVariant> Parser::parseEnumVariant()
+{
+    PositionRecorder recorder(this, nullptr);
+    auto variant = std::make_unique<EnumVariant>();
+    recorder.bindNode(variant.get());
+
+    variant->name = consume(TokenCode::IDENTIFIER, "expect an identifier as the variant name", E_ExpectAnIdentifier).value;
+
+    // Optional payload: `some(T, U)` or a unit variant `none`.
+    if (match(TokenCode::LPAREN))
+    {
+        if (!match(TokenCode::RPAREN))
+        {
+            do
+            {
+                variant->payloadTypes.push_back(parseType());
+            } while (match(TokenCode::COMMA));
+            match(TokenCode::RPAREN); // consume the closing paren
+        }
+    }
+    return variant;
 }
 
 std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
@@ -538,6 +607,15 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     {
         return parseWhileLoop();
     }
+    else if (check(TokenCode::MATCH))
+    {
+        // A match is an expression; as a statement it needs no trailing ';'
+        // (like if/while). Wrap it in an ExprStmt.
+        auto expr = parseMatchExpression();
+        auto stmt = std::make_unique<ExprStmt>();
+        stmt->expression = std::move(expr);
+        return stmt;
+    }
     else if (check(TokenCode::BREAK))
     {
         return parseBreakStmt();
@@ -701,6 +779,88 @@ std::unique_ptr<WhileStmt> Parser::parseWhileLoop()
     return whileLoop;
 }
 
+std::unique_ptr<MatchExpr> Parser::parseMatchExpression()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    match(TokenCode::MATCH);
+    auto matchExpr = std::make_unique<MatchExpr>();
+    recorder.bindNode(matchExpr.get());
+
+    // Block the struct-literal `x { ... }` path: the `{` after the scrutinee is
+    // the match body's opening brace, not a struct initializer.
+    inControlFlowCondition_ = true;
+    matchExpr->scrutinee = parseExpression();
+    inControlFlowCondition_ = false;
+
+    consume(TokenCode::LBRACE, "expect '{' after match scrutinee", E_ExpectALBRACE);
+
+    while (!match(TokenCode::RBRACE) && !finished())
+    {
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
+        auto arm = parseMatchArm();
+        if (arm)
+            matchExpr->arms.push_back(std::move(arm));
+        if (currentPos == beforePos)
+            advance(); // guarantee progress
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
+        if (match(TokenCode::COMMA)) continue; // arms are comma-separated
+    }
+
+    return matchExpr;
+}
+
+std::unique_ptr<MatchArm> Parser::parseMatchArm()
+{
+    PositionRecorder recorder(this, nullptr);
+    auto arm = std::make_unique<MatchArm>();
+    recorder.bindNode(arm.get());
+
+    arm->pattern = parsePattern();
+    consume(TokenCode::DOUBLE_ARROW, "expect '=>' after pattern", E_ExpectedKeyword);
+
+    // An arm body is either a block `{ ... }` (statement match, void) or a tail
+    // expression `v + 1` (value match).
+    if (check(TokenCode::LBRACE))
+        arm->body = parseCompoundStatement();
+    else
+        arm->tailValue = parseExpression();
+    return arm;
+}
+
+std::unique_ptr<Pattern> Parser::parsePattern()
+{
+    PositionRecorder recorder(this, nullptr);
+    auto pattern = std::make_unique<Pattern>();
+    recorder.bindNode(pattern.get());
+
+    // `_` wildcard.
+    if (check(TokenCode::IDENTIFIER) && currentToken().value == "_")
+    {
+        advance();
+        pattern->isWildcard = true;
+        return pattern;
+    }
+
+    // Variant pattern: `none` (unit) or `some(v, w)` (payload bindings).
+    pattern->variantName = consume(TokenCode::IDENTIFIER, "expected a pattern", E_ExpectAnIdentifier).value;
+    if (match(TokenCode::LPAREN))
+    {
+        if (!match(TokenCode::RPAREN))
+        {
+            do
+            {
+                pattern->bindings.push_back(
+                    consume(TokenCode::IDENTIFIER, "expected a binding name", E_ExpectAnIdentifier).value);
+            } while (match(TokenCode::COMMA));
+            match(TokenCode::RPAREN);
+        }
+    }
+    return pattern;
+}
+
 // Parse expression
 std::unique_ptr<Expr> Parser::parseExpression()
 {
@@ -804,6 +964,14 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return expr;
     }
 
+    // `match ...` is an expression (`let y = match o { ... }`).
+    if (check(TokenCode::MATCH))
+    {
+        auto expr = parseMatchExpression();
+        recorder.bindNode(expr.get());
+        return expr;
+    }
+
     if (check(TokenCode::IDENTIFIER))
     {
         Token identifier = currentToken();
@@ -837,6 +1005,16 @@ std::unique_ptr<Expr> Parser::parsePrimary()
                 id->name = identifier.value;
                 return parseMemberAccessChain(std::move(id));
             }
+        }
+
+        // `Name::X[(args)]` — parsed as a variant construction; HIRBuilder
+        // dispatches to enum-variant-init or a static method call using the
+        // shared knownEnums (a stdlib enum may be parsed after its first use).
+        if (check(TokenCode::DOUBLE_COLON))
+        {
+            auto expr = parseVariantInitialization(identifier);
+            recorder.bindNode(expr.get());
+            return expr;
         }
 
         if (match(TokenCode::LPAREN) || check(TokenCode::DOUBLE_COLON))
@@ -975,6 +1153,34 @@ std::unique_ptr<StructInitExpr> Parser::parseStructInitialization(Token typeName
         } while (match(TokenCode::COMMA));
 
         consume(TokenCode::RBRACE, "expected '}' after struct initializer", E_ExpectARBRACE);
+    }
+
+    return init;
+}
+
+std::unique_ptr<VariantInitExpr> Parser::parseVariantInitialization(Token enumName)
+{
+    PositionRecorder recorder(this, nullptr);
+    auto init = std::make_unique<VariantInitExpr>();
+    recorder.bindNode(init.get());
+
+    auto type = std::make_unique<TypeNode>();
+    type->kind = TypeNode::TypeKind::Custom;
+    type->typeName = enumName.value;
+    type->position = enumName.position;
+    type->length = enumName.value.length();
+    if (check(TokenCode::LT))
+        type->genericArgs = std::move(parseCallGenericParams());
+    init->enumType = std::move(type);
+
+    match(TokenCode::DOUBLE_COLON);
+    init->variantName = consume(TokenCode::IDENTIFIER, "expected variant name after '::'", E_ExpectAnIdentifier).value;
+
+    // Optional payload: `some(5, 6)` or a unit `red`.
+    if (match(TokenCode::LPAREN))
+    {
+        init->arguments = parseArgumentList();
+        consume(TokenCode::RPAREN, "expected ')' after variant arguments", E_ExpectARPAREN);
     }
 
     return init;

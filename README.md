@@ -14,9 +14,10 @@ lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，
 
 ## lis compiler 编译器
 
-整个项目最核心的就是编译器，整个编译器差不多一万三千多行（不包含第三方库的情况下），
-从词法分析、语法分析、语义分析、中间代码生成，使用 LLVM 作为后端，我认为是编译原理
-的生动实践，同时如果你有编写编译器的志向，阅读我的代码应该是不错的，因为踩过的坑我基本都踩过了一遍，
+整个项目最核心的就是编译器，整个编译器差不多两万多行（不包含第三方库的情况下），
+从词法分析、语法分析、语义分析、中间代码生成，使用 LLVM 作为后端，
+实现了生命周期检查、借用检查、泛型等高级语言功能，我认为是编译原理的生动实践，
+同时如果你有编写编译器的志向，阅读我的代码应该是不错的，因为踩过的坑我基本都踩过了一遍，
 这些我会放在个人博客里面讲解。
 
 ### 编译运行
@@ -65,13 +66,49 @@ LLVM 版本必须大于十五，因为十五以后才开始支持不透明指针
 AST 会首先被 HIRBuilder 转化为 HIR(High level IR)， HIRSemanticAnalyzer（HIR语义分析器）会对生成的 HIR 做语义分析、脱糖以及补全语义信息（如推断返回类型、变量类型、泛型参数）
 随后 HIR 会被送到 MIRBuilder 生成 MIR，随后 MIRMonomorphization 会把代码中的所有泛型全部单态化，接着由 LLVMIRBuilder 生成 LLVMIR，送给 Emitter 生成二进制文件。
 
+### 标准库
+
+标准库位于 `./Source/Std/`（构建时复制到 `Build/Binaries/lstdlib/`，编译器启动时自动预加载，无需 import）。目前包含 5 个模块：
+
+| 文件 | 内容 |
+|------|------|
+| `drop.lis` | `Drop` trait —— RAII 析构协议（值离开作用域时调用 `drop(self)`） |
+| `option.lis` | `option<T>` 枚举（`some(T)` / `none`）+ `is_some` / `is_none` / `unwrap_or` / `and` / `or` |
+| `math.lis` | `Numeric`/`Integer` marker trait、12 个运算符重载 trait（`Add` `Sub` `Mul` `Div` `Rem` `PartialEq` `PartialOrd` `BitAnd` `BitOr` `BitXor` `Shl` `Shr`）、`min` `max` `clamp` `abs` `fabs` `gcd` `lcm` `ipow` `sign` `is_even` `is_odd` `deg_to_rad` `rad_to_deg` `lerp` |
+| `char.lis` | `is_digit` `is_alpha` `is_alphanumeric` `is_whitespace` `digit_to_int` |
+| `iterator.lis` | `Iterator<T>` trait、`Range` 迭代器、`range` `sum` `count` `first` `last` `nth` `product` |
+
+此外编译器内置一组 I/O 函数（无需声明即可直接调用）：
+
+- **输出**：`print_str` `print_int` `print_float` `print_bool` `print_char` `println` —— 降为 libc `printf`
+- **输入**：`read_line() -> &i8` `read_int() -> i32` `read_f64() -> f64` —— 内部 `fgets` + 解析，共享 256 字节缓冲（每次读取会覆盖上一次结果）
+
 ### 实现了什么、下一步干什么
 
-这一部分请查阅 `Example/example.lis`，它基本涵盖了目前语言的所有语法。
+语言层面目前已实现：
 
-总的来说，目前实现了 struct、trait、函数 这些基本的语法，完整的类型分析和语义检查，简单的生命周期检测，泛型函数和泛型类型。
+- **类型系统**：struct、enum（带载荷的 tagged union，配合 `match`）、泛型函数与泛型类型（单态化）、trait 与泛型约束（`T: Numeric` / `T: Iterator<i32>`）、引用 `&T` / `&mut T`、函数指针
+- **所有权与安全**：move 语义、borrow checker（词法借用 + NLL 非词法生命周期）、悬垂引用检测、字段级借用精度、drop glue（RAII，含枚举 tag-aware 析构）
+- **控制流**：`if` / `while` / `for`（走 `Iterator` trait）/ `match`（穷尽性检查、载荷绑定、match 表达式）
+- **运算符重载**：12 个运算符 trait，`a + b` 对实现 `Add` 的 struct 自动改写为 `a.add(b)`（泛型算子 `fn sum<T: Add>` 同时支持 struct 与原语）
+- **编译管线**：Lexer → Parser → HIR → MIR → 泛型单态化 → LLVM IR；语义分析、生命周期检查、借用检查全部在 HIR 阶段完成
 
-下一步是挑战生命周期这个 boss。
+编译器的报错提示借鉴了 gnu gcc，例如：
+
+./Examples/example.lis:73:18: info: useless cast from 'int32' to 'int32'.
+    73 |     let x: i32 = fib(4) as i32;
+       |                  ^~~~~~~~~~~~~
+
+语言的具体用法请查阅 `Examples/` 目录下的示例文件，每个示例都配有注释：
+
+- `print.lis` —— 输出内置函数 + 数学助手
+- `io.lis` —— 标准输入（`read_int` / `read_line`）
+- `match.lis` —— enum 与模式匹配
+- `operator.lis` —— 运算符重载
+- `iterator.lis` —— 迭代器与 for 循环
+- `borrow.lis` / `ownership.lis` / `method_ref.lis` / `drop.lis` / `example.lis` —— 所有权 / 借用 / 析构等
+
+**下一步方向**：`to_string` / 格式化（需先实现 String 类型与堆分配）、`panic` / never 类型（解锁 `unwrap` / `expect`）、数组 / 堆 / `Vec`、引用模式 match、模块 / import。
 
 lis 语言更多是我个人的一个编译原理实战，所以很多细节有待打磨。
 不过作为一个编译器的入门项目我觉得已经足够拿上台面，作为一个大型工程来说，

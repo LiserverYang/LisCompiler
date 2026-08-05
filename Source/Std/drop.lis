@@ -3,7 +3,19 @@
 //
 // drop.lis
 //
-// This is a part of standard lib of lis language.
+// The `Drop` trait — the destructor protocol. A struct implementing `Drop`
+// runs its `drop(self)` method when a value goes out of scope (RAII, like
+// Rust's `Drop`); the compiler synthesizes drop glue that calls it.
+//
+// Useful for releasing resources (a file handle, a heap buffer, ...) at the
+// end of a scope. Because `drop(self)` consumes the value, the value cannot be
+// used after it drops.
+//
+//     struct Resource { handle: i32 }
+//     impl Drop for Resource { fn drop(self) { /* release handle */ } }
+//
+// Primitive types and references are never dropped (they are Copy); only
+// structs/enums with a Drop impl (or a non-Copy field that has one) are.
 
 trait Drop
 {

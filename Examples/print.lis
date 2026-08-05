@@ -1,0 +1,35 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// print.lis — the print builtins + math helpers. The language can now produce
+// real output (lowered to libc printf), not just an exit code.
+
+fn main() -> i32
+{
+    print_str("hello");
+    print_char(' ');
+    print_str("world");
+    println();
+
+    print_int(42);
+    println();
+    print_float(3.14);
+    println();
+    print_bool(true);
+    println();
+
+    print_str("min(3,7)=");
+    print_int(min(3, 7));
+    println();
+    print_str("max(3,7)=");
+    print_int(max(3, 7));
+    println();
+    print_str("abs(-5)=");
+    print_int(abs(0 - 5));
+    println();
+    print_str("clamp(12,0,10)=");
+    print_int(clamp(12, 0, 10));
+    println();
+
+    ret 0;
+}

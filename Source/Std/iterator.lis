@@ -4,27 +4,32 @@
 // iterator.lis
 //
 // The Iterator protocol. A type implements Iterator<T> by providing next(),
-// which returns the next element wrapped in Option<T> (None when exhausted).
+// which returns the next element wrapped in option<T> (none when exhausted).
 //
-// The for-loop desugars to:
+// The for-loop desugars to a match on the option:
 //     let mut __it = <iterable>;
 //     while true {
 //         let __opt = __it.next();
-//         if __opt.is_some {
-//             let x = __opt.value;
-//             ...
-//         } else {
-//             break;
+//         match __opt {
+//             some(x) => { ... },
+//             _ => { break; }
 //         }
 //     }
+//
+// The free functions at the bottom (`sum`/`count`/`first`/`last`/`nth`/
+// `product`) are generic over any type implementing `Iterator<i32>` and
+// monomorphize per use site.
 
+// The iterator protocol: `next()` returns the next element, or `option::none`
+// once exhausted. Implement it to make a type usable in a `for x in it` loop.
 trait Iterator<T>
 {
-    fn next(self: &mut Self) -> Option<T>;
+    fn next(self: &mut Self) -> option<T>;
 }
 
-// A concrete half-open range [start, end). Generic Range<T> with arithmetic is
-// deferred until numeric trait bounds exist, so the impl is specialised to i32.
+// A concrete half-open integer range [start, end): `range(1, 5)` yields
+// `1, 2, 3, 4`. Generic Range<T> with arithmetic is deferred until numeric
+// trait bounds exist, so the impl is specialised to i32.
 struct Range
 {
     pub start: i32,
@@ -34,17 +39,21 @@ struct Range
 
 impl Iterator<i32> for Range
 {
-    fn next(self: &mut Self) -> Option<i32>
+    fn next(self: &mut Self) -> option<i32>
     {
         if self.current < self.end {
             let v = self.current;
             self.current = self.current + 1;
-            ret Option { is_some: true, value: v };
+            ret option::some(v);
         }
-        ret Option { is_some: false, value: 0 };
+        ret option::none;
     }
 }
 
+// Construct a half-open integer range [`start`, `end`): yields `start`,
+// `start+1`, ..., `end-1`. Empty when `start >= end`.
+//
+//     for x in range(1, 5) { ... }  // 1, 2, 3, 4
 fn range(start: i32, end: i32) -> Range
 {
     ret Range { start: start, end: end, current: start };
@@ -54,6 +63,7 @@ fn range(start: i32, end: i32) -> Range
 // Generic iterator helpers. These monomorphize per concrete iterator type.
 // ---------------------------------------------------------------------------
 
+// Sum of all elements; `0` for an empty iterator.
 fn sum<T: Iterator<i32>>(it: T) -> i32
 {
     let mut s = 0;
@@ -63,6 +73,7 @@ fn sum<T: Iterator<i32>>(it: T) -> i32
     ret s;
 }
 
+// Number of elements in the iterator.
 fn count<T: Iterator<i32>>(it: T) -> i32
 {
     let mut n = 0;
@@ -72,10 +83,58 @@ fn count<T: Iterator<i32>>(it: T) -> i32
     ret n;
 }
 
-fn first<T: Iterator<i32>>(it: T) -> Option<i32>
+// The first element, or `none` for an empty iterator.
+//
+//     first(range(1, 5))  // some(1)
+fn first<T: Iterator<i32>>(it: T) -> option<i32>
 {
     for x in it {
-        ret Option { is_some: true, value: x };
+        ret option::some(x);
     }
-    ret Option { is_some: false, value: 0 };
+    ret option::none;
+}
+
+// The last element, or `none` for an empty iterator.
+//
+//     last(range(1, 5))  // some(4)
+fn last<T: Iterator<i32>>(it: T) -> option<i32>
+{
+    let mut last_v = 0;
+    let mut found_any = false;
+    for x in it {
+        last_v = x;
+        found_any = true;
+    }
+    if found_any {
+        ret option::some(last_v);
+    }
+    ret option::none;
+}
+
+// The element at zero-based index `n`, or `none` if the iterator is shorter
+// than `n + 1`.
+//
+//     nth(range(10, 20), 3)  // some(13)
+fn nth<T: Iterator<i32>>(it: T, n: i32) -> option<i32>
+{
+    let mut i = 0;
+    for x in it {
+        if i == n {
+            ret option::some(x);
+        }
+        i = i + 1;
+    }
+    ret option::none;
+}
+
+// Product of all elements; `1` for an empty iterator (the identity).
+//
+//     product(range(1, 5))  // 24
+fn product<T: Iterator<i32>>(it: T) -> i32
+{
+    let mut p = 1;
+    for x in it {
+        p = p * x;
+    }
+    ret p;
 }

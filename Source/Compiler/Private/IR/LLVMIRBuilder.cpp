@@ -343,6 +343,22 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     for (const auto &arg : s.args)
         args.push_back(lowerOperand(fs, arg));
 
+    // Builtin print calls lower to libc printf; intercept before the normal
+    // callee resolution (there is no `print_int` symbol).
+    if (isPrintBuiltin(s.funcName))
+    {
+        emitPrintCall(fs, s, args);
+        return;
+    }
+
+    // Builtin input calls lower to libc fgets + parse (`read_line`/`read_int`/
+    // `read_f64`); intercept for the same reason.
+    if (isInputBuiltin(s.funcName))
+    {
+        emitInputCall(fs, s, args);
+        return;
+    }
+
     // Resolve the callee.
     llvm::Function *callee = nullptr;
     llvm::Value *indirectPtr = nullptr;
@@ -929,6 +945,219 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)
         context->module.get());
 }
 
+bool LLVMIRBuilder::isPrintBuiltin(const std::string &name)
+{
+    return name == "print_str" || name == "print_int" || name == "print_float"
+        || name == "print_bool" || name == "print_char" || name == "println";
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclarePrintf()
+{
+    if (auto *fn = context->module->getFunction("printf"))
+        return fn;
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(ctx_),
+        { llvm::PointerType::getUnqual(ctx_) }, // const char* fmt
+        /*isVarArg=*/true);
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage,
+        "printf",
+        context->module.get());
+}
+
+void LLVMIRBuilder::emitPrintCall(FunctionState &fs, const MIRStmtCall &s,
+    const std::vector<llvm::Value *> &args)
+{
+    llvm::Function *printf = getOrDeclarePrintf();
+    auto format = [&](const char *fmt) {
+        return builder_->CreateGlobalStringPtr(fmt, ".fmt");
+    };
+
+    std::vector<llvm::Value *> callArgs;
+    llvm::Value *fmtPtr = nullptr;
+
+    if (s.funcName == "print_str")
+    {
+        fmtPtr = format("%s");
+        callArgs = args; // the string arg is already an i8*
+    }
+    else if (s.funcName == "print_int")
+    {
+        fmtPtr = format("%d");
+        callArgs = args;
+    }
+    else if (s.funcName == "print_float")
+    {
+        fmtPtr = format("%f");
+        callArgs = args;
+    }
+    else if (s.funcName == "print_bool")
+    {
+        fmtPtr = format("%d");
+        // Bool is i1/i8 — widen to the int that variadic printf expects.
+        if (!args.empty())
+            callArgs.push_back(builder_->CreateZExt(args[0], builder_->getInt32Ty()));
+    }
+    else if (s.funcName == "print_char")
+    {
+        fmtPtr = format("%c");
+        callArgs = args; // char already lowers to i32
+    }
+    else if (s.funcName == "println")
+    {
+        fmtPtr = format("\n");
+    }
+
+    // printf(fmt, arg...)
+    std::vector<llvm::Value *> printfArgs{fmtPtr};
+    printfArgs.insert(printfArgs.end(), callArgs.begin(), callArgs.end());
+    builder_->CreateCall(printf->getFunctionType(), printf, printfArgs);
+}
+
+// ── Builtin input: read_line / read_int / read_f64 ───────────────────────────
+
+bool LLVMIRBuilder::isInputBuiltin(const std::string &name)
+{
+    return name == "read_line" || name == "read_int" || name == "read_f64";
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareFgets()
+{
+    if (auto *fn = context->module->getFunction("fgets"))
+        return fn;
+    // char* fgets(char* str, int count, FILE* stream)
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        llvm::PointerType::getUnqual(ctx_), // returns char*
+        { llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt32Ty(ctx_),
+          llvm::PointerType::getUnqual(ctx_) },
+        /*isVarArg=*/false);
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage, "fgets", context->module.get());
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareStrCspn()
+{
+    if (auto *fn = context->module->getFunction("strcspn"))
+        return fn;
+    // size_t strcspn(const char* str, const char* reject)
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        llvm::Type::getInt64Ty(ctx_),
+        { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+        /*isVarArg=*/false);
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage, "strcspn", context->module.get());
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareAtoi()
+{
+    if (auto *fn = context->module->getFunction("atoi"))
+        return fn;
+    // int atoi(const char* str)
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        llvm::Type::getInt32Ty(ctx_),
+        { llvm::PointerType::getUnqual(ctx_) },
+        /*isVarArg=*/false);
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage, "atoi", context->module.get());
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareStrtod()
+{
+    if (auto *fn = context->module->getFunction("strtod"))
+        return fn;
+    // double strtod(const char* str, char** endptr)
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        llvm::Type::getDoubleTy(ctx_),
+        { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+        /*isVarArg=*/false);
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage, "strtod", context->module.get());
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareAcrtIobFunc()
+{
+    if (auto *fn = context->module->getFunction("__acrt_iob_func"))
+        return fn;
+    // FILE* __acrt_iob_func(unsigned int fd)  [MinGW UCRT's stdin macro]
+    llvm::FunctionType *fty = llvm::FunctionType::get(
+        llvm::PointerType::getUnqual(ctx_),
+        { llvm::Type::getInt32Ty(ctx_) },
+        /*isVarArg=*/false);
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage, "__acrt_iob_func", context->module.get());
+}
+
+llvm::GlobalVariable *LLVMIRBuilder::getOrDeclareStdin()
+{
+    if (auto *g = context->module->getNamedGlobal("stdin"))
+        return g;
+    // FILE* stdin — an external global holding a FILE* (glibc & friends; NOT
+    // MinGW, where stdin is a macro → see getOrDeclareAcrtIobFunc).
+    return new llvm::GlobalVariable(*context->module,
+        llvm::PointerType::getUnqual(ctx_), /*isConstant=*/false,
+        llvm::GlobalValue::ExternalLinkage, nullptr, "stdin");
+}
+
+llvm::GlobalVariable *LLVMIRBuilder::getOrCreateInputBuf()
+{
+    if (auto *g = context->module->getNamedGlobal("__lis_input_buf"))
+        return g;
+    auto *arrTy = llvm::ArrayType::get(llvm::Type::getInt8Ty(ctx_), 256);
+    return new llvm::GlobalVariable(*context->module, arrTy, /*isConstant=*/false,
+        llvm::GlobalValue::PrivateLinkage,
+        llvm::Constant::getNullValue(arrTy), "__lis_input_buf");
+}
+
+void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s,
+    const std::vector<llvm::Value *> &args)
+{
+    llvm::GlobalVariable *buf = getOrCreateInputBuf();
+    llvm::Value *bufPtr = buf; // globals are pointer values
+
+    llvm::Function *fgets = getOrDeclareFgets();
+    // stdin FILE*: MinGW/UCRT exposes it via `__acrt_iob_func(0)` (a macro in
+    // <stdio.h> → no `stdin` data symbol); other libcs export a `stdin` global.
+    llvm::Value *stdinVal;
+#ifdef _WIN32
+    stdinVal = builder_->CreateCall(getOrDeclareAcrtIobFunc()->getFunctionType(),
+        getOrDeclareAcrtIobFunc(), { llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0) });
+#else
+    llvm::GlobalVariable *stdinGlob = getOrDeclareStdin();
+    stdinVal = builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), stdinGlob);
+#endif
+
+    // fgets(buf, 256, stdin)
+    builder_->CreateCall(fgets->getFunctionType(), fgets,
+        { bufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 256), stdinVal });
+
+    if (s.funcName == "read_line")
+    {
+        // Strip trailing \r\n: idx = strcspn(buf, "\r\n"); buf[idx] = 0.
+        llvm::Function *strcspn = getOrDeclareStrCspn();
+        llvm::Value *reject = builder_->CreateGlobalStringPtr("\r\n", ".rstr");
+        llvm::Value *idx = builder_->CreateCall(strcspn->getFunctionType(), strcspn, { bufPtr, reject });
+        llvm::Value *end = builder_->CreateInBoundsGEP(llvm::Type::getInt8Ty(ctx_), bufPtr, idx);
+        builder_->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), 0), end);
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, bufPtr);
+    }
+    else if (s.funcName == "read_int")
+    {
+        llvm::Function *atoi = getOrDeclareAtoi();
+        llvm::Value *val = builder_->CreateCall(atoi->getFunctionType(), atoi, { bufPtr });
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, val);
+    }
+    else if (s.funcName == "read_f64")
+    {
+        llvm::Function *strtod = getOrDeclareStrtod();
+        llvm::Value *endptr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_));
+        llvm::Value *val = builder_->CreateCall(strtod->getFunctionType(), strtod, { bufPtr, endptr });
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, val);
+    }
+}
+
 llvm::AllocaInst *LLVMIRBuilder::emitEntryAlloca(llvm::Function *fn,
     llvm::Type *ty,
     const std::string &name)
@@ -1060,6 +1289,70 @@ void LLVMIRBuilder::generateDropGlue()
         }
 
         // ── Case 2: no Drop impl — recursively drop owned fields ───────────
+        // For an ENUM the drop is tag-aware: only the ACTIVE variant's payload
+        // slots are valid (the others are uninitialized garbage). Branch on the
+        // discriminant and drop each variant's non-Copy payloads conditionally.
+        bool isEnum = false;
+        std::vector<CustomType::EnumVariantInfo> enumVariants;
+        if (auto custom = context->typeContext->getCustom(structName))
+        {
+            isEnum = (*custom)->isEnum();
+            enumVariants = (*custom)->getVariants();
+        }
+
+        if (isEnum)
+        {
+            llvm::Value *tagPtr = builder_->CreateStructGEP(
+                stTy, ptr, fieldIndexOf(structName, "__tag"), "__tag");
+            llvm::Value *tagVal = builder_->CreateLoad(
+                builder_->getInt32Ty(), tagPtr);
+
+            llvm::BasicBlock *done =
+                llvm::BasicBlock::Create(ctx_, "drop_done", dropFn);
+
+            for (size_t vi = 0; vi < enumVariants.size(); ++vi)
+            {
+                // Collect this variant's non-Copy payload slots.
+                std::vector<std::pair<std::string, std::shared_ptr<Type>>> slots;
+                for (size_t j = 0; j < enumVariants[vi].payloadTypes.size(); ++j)
+                {
+                    auto pt = enumVariants[vi].payloadTypes[j];
+                    if (!pt->isCopyable())
+                        slots.push_back({enumVariants[vi].name + "_" + std::to_string(j), pt});
+                }
+                if (slots.empty()) continue;
+
+                llvm::BasicBlock *thenBlk =
+                    llvm::BasicBlock::Create(ctx_, "drop_v" + std::to_string(vi), dropFn);
+                llvm::BasicBlock *nextBlk =
+                    llvm::BasicBlock::Create(ctx_, "drop_next" + std::to_string(vi), dropFn);
+
+                llvm::Value *cmp = builder_->CreateICmpEQ(
+                    tagVal, builder_->getInt32((uint32_t)vi));
+                builder_->CreateCondBr(cmp, thenBlk, nextBlk);
+
+                builder_->SetInsertPoint(thenBlk);
+                for (auto &[slotName, slotType] : slots)
+                {
+                    std::string slotStruct = getStructName(slotType);
+                    if (slotStruct.empty()) continue;
+                    llvm::Function *slotDrop = getOrDeclareDropGlue(slotStruct);
+                    llvm::Value *slotPtr = builder_->CreateStructGEP(
+                        stTy, ptr, fieldIndexOf(structName, slotName), slotName);
+                    builder_->CreateCall(slotDrop->getFunctionType(), slotDrop, {slotPtr});
+                }
+                builder_->CreateBr(nextBlk);
+
+                builder_->SetInsertPoint(nextBlk);
+            }
+
+            builder_->CreateBr(done);
+            builder_->SetInsertPoint(done);
+            builder_->CreateRetVoid();
+            continue;
+        }
+
+        // ── Case 2 (struct): recurse into every non-Copy field ─────────────
         for (const auto &[fieldName, fieldType] : fields)
         {
             // Primitives and references are Copy / borrowed — no drop needed.

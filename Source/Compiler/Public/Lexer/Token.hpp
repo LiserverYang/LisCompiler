@@ -42,6 +42,8 @@ enum class TokenCode
     TRAIT,  // "trait"
     BREAK,  // "break"
     CONTINUE, // "continue"
+    ENUM,   // "enum"
+    MATCH,  // "match"
 
     /* Type keywords */
     I8,   // "i8"
@@ -126,6 +128,8 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "trait",
     "break",
     "continue",
+    "enum",
+    "match",
     "i8",
     "i16",
     "i32",

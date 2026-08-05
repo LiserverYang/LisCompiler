@@ -252,6 +252,12 @@ void MIRMonomorphization::rewriteRValue(MIRRValue &rvalue, std::unordered_map<st
 
 void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable)
 {
+    // A generic-param operator call (`<T>::add`) whose concrete type is a
+    // primitive must become a direct binary op (primitives have no `add`
+    // method). Built here and assigned after the visit (can't reassign the
+    // variant while `arg` is a reference into it).
+    std::optional<MIRStatement> replacement;
+
     std::visit([&](auto &&arg)
         {
         using T = std::decay_t<decltype(arg)>;
@@ -277,6 +283,37 @@ void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_ma
             if (arg.dest.has_value())
             {
                 arg.dest->type = replaceGenericType(arg.dest->type, replaceTable);
+            }
+
+            // A generic-param OPERATOR call (`<T>::add` from `a + b` on
+            // `T: Add`) resolves by concrete type: a struct retargets to its
+            // method; a primitive has no method and falls back to a binary op.
+            if (!arg.funcName.empty() && arg.funcName[0] == '<' && arg.genericOpFallback.has_value())
+            {
+                size_t sep = arg.funcName.find("::");
+                if (sep != std::string::npos)
+                {
+                    std::string recv = arg.funcName.substr(1, sep - 2); // strip < >
+                    auto it = replaceTable.find(recv);
+                    if (it != replaceTable.end()
+                        && !std::dynamic_pointer_cast<CustomType>(it->second))
+                    {
+                        if (arg.dest.has_value() && arg.args.size() == 2)
+                        {
+                            MIRRValueBinaryOp binOp{
+                                .op = *arg.genericOpFallback,
+                                .left = std::move(arg.args[0]),
+                                .right = std::move(arg.args[1]),
+                                .type = arg.dest->type,
+                            };
+                            replacement = MIRStmtAssign{
+                                .lhs = std::move(*arg.dest),
+                                .rhs = std::move(binOp),
+                            };
+                        }
+                        return;
+                    }
+                }
             }
 
             // Retarget a generic-param method call (`<T>::next`) to the concrete
@@ -350,6 +387,9 @@ void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_ma
             arg.place.type = replaceGenericType(arg.place.type, replaceTable);
         } },
         stmt);
+
+    if (replacement.has_value())
+        stmt = std::move(*replacement);
 }
 
 void MIRMonomorphization::rewriteFunctionBody(MIRBody &body, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable)

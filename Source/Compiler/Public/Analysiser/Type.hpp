@@ -114,6 +114,14 @@ public:
         bool isTraitImpl;
     };
 
+    /// One variant of an ENUM (`some(T)` / unit `none`). Empty `payloadTypes`
+    /// means a unit variant. A plain struct has an empty `variants` vector.
+    struct EnumVariantInfo
+    {
+        std::string name;
+        std::vector<std::shared_ptr<Type>> payloadTypes;
+    };
+
 public:
     CustomType(std::string name, std::vector<Field> fields);
     CustomType(std::string name,
@@ -139,6 +147,14 @@ public:
     void setGenericArgs(std::vector<std::shared_ptr<Type>> args) { genericArgs = std::move(args); }
     void setFields(std::vector<Field> f) { fields = std::move(f); }
 
+    // --- enums (tagged unions) ---
+    /// An enum is a CustomType whose `variants` is non-empty and whose fields are
+    /// the synthetic `{ __tag, <variant>_<idx> ... }` fat layout. A struct has an
+    /// empty `variants`. The variant's discriminant is its index here.
+    bool isEnum() const { return !variants.empty(); }
+    const std::vector<EnumVariantInfo> &getVariants() const { return variants; }
+    void setVariants(std::vector<EnumVariantInfo> v) { variants = std::move(v); }
+
     // For instantiations: points to the generic definition.
     // Methods always live on the origin; instantiations look them up there.
     std::shared_ptr<CustomType> genericOrigin;
@@ -149,6 +165,7 @@ private:
     std::vector<Method> methods;
     std::vector<std::shared_ptr<Type>> genericParams;
     std::vector<std::shared_ptr<Type>> genericArgs;
+    std::vector<EnumVariantInfo> variants;
 };
 
 // --- 4. 函数类型 ---

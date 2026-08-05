@@ -50,6 +50,8 @@ protected:
 
     std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char", "void"};
     std::unordered_set<std::string> knownTraits = {};
+    // Enum type names live on the shared context (see Context::knownEnums) so a
+    // parser instance sees enums registered by EARLIER files in the same unit.
 
     /* Helper functions */
 
@@ -219,6 +221,8 @@ protected:
     std::unique_ptr<ASTNode> parseGlobalStatement();
     // std::unique_ptr<ImportStmt> parseImptStatement();
     std::unique_ptr<StructDef> parseStructDefinition();
+    std::unique_ptr<EnumDef> parseEnumDefinition();
+    std::unique_ptr<EnumVariant> parseEnumVariant();
     std::unique_ptr<StructImpl> parseStructImplementation();
     std::unique_ptr<FunctionDef> parseFunctionDefinition();
     std::unique_ptr<GlobalVarDef> parseGlobalVariableDefinition();
@@ -237,6 +241,9 @@ protected:
     std::unique_ptr<DeclStmt> parseDeclarationStatement();
     std::unique_ptr<ForStmt> parseForLoop();
     std::unique_ptr<WhileStmt> parseWhileLoop();
+    std::unique_ptr<MatchExpr> parseMatchExpression();
+    std::unique_ptr<MatchArm> parseMatchArm();
+    std::unique_ptr<Pattern> parsePattern();
     std::unique_ptr<Expr> parseBinaryExpression(int minPrecedence);
     std::unique_ptr<Expr> parsePrimary();
     std::vector<std::unique_ptr<Expr>> parseArgumentList();
@@ -244,6 +251,7 @@ protected:
     std::unique_ptr<LiteralExpr> parseLiteral();
     std::unique_ptr<CastExpr> parseCastExpression(std::unique_ptr<Expr> expr);
     std::unique_ptr<StructInitExpr> parseStructInitialization(Token typeName);
+    std::unique_ptr<VariantInitExpr> parseVariantInitialization(Token enumName);
     std::unique_ptr<Expr> parseFunctionCall(Token name);
     std::unique_ptr<Expr> parseMemberAccessChain(std::unique_ptr<Expr> left);
     std::unique_ptr<TraitDef> parseTraitDefinition();

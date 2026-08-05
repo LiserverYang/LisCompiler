@@ -3,11 +3,80 @@
 //
 // option.lis
 //
-// A minimal optional-value type. `value` is only meaningful when `is_some`
-// is true; None is conventionally represented with a zeroed payload.
+// A real optional-value type: a tagged union with `some(T)` carrying the value
+// and unit `none` for absence. It is the idiomatic way to represent a value
+// that may be missing (a `null`-free "maybe"), and is what `Iterator<T>::next`
+// returns to signal exhaustion.
+//
+//     let o = option::some(7);        // Some value
+//     let e = option::none;           // No value
+//     match o { some(v) => ..., none => ... }
+//
+// Constructed via the enum-variant syntax `option::some(x)` / `option::none`;
+// consumed via `match`, which must be exhaustive (both variants).
 
-struct Option<T>
+enum option<T>
 {
-    pub is_some: bool,
-    pub value: T
+    some(T),
+    none
+}
+
+// True if `o` carries a value (`some`).
+//
+//     if is_some(option::some(1)) { ... }
+fn is_some<T>(o: option<T>) -> bool
+{
+    match o {
+        some(_v) => { ret true; },
+        none => { ret false; },
+    }
+}
+
+// True if `o` is `none`.
+fn is_none<T>(o: option<T>) -> bool
+{
+    match o {
+        some(_v) => { ret false; },
+        none => { ret true; },
+    }
+}
+
+// Unwrap the `some` payload, falling back to `dflt` on `none`. The safe
+// alternative to `unwrap` (which needs a panic mechanism the language does
+// not have yet).
+//
+//     unwrap_or(option::some(7), 0)  // 7
+//     unwrap_or(option::none, 0)     // 0
+fn unwrap_or<T>(o: option<T>, dflt: T) -> T
+{
+    match o {
+        some(v) => { ret v; },
+        none => { ret dflt; },
+    }
+}
+
+// `a` if it is `some`, else `b`. Both are `option<T>` (the payload of `a` is
+// discarded when it is `some`).
+//
+//     and(option::some(1), option::some(5))  // some(5)
+//     and(option::none,    option::some(5))  // none
+fn and<T>(a: option<T>, b: option<T>) -> option<T>
+{
+    match a {
+        some(_v) => { ret b; },
+        none => { ret option::none; },
+    }
+}
+
+// `a` if it is `some`, else `b`. Unlike `and`, the payload of a `some` is
+// preserved.
+//
+//     or(option::some(1), option::some(9))  // some(1)
+//     or(option::none,    option::some(9))  // some(9)
+fn or<T>(a: option<T>, b: option<T>) -> option<T>
+{
+    match a {
+        some(v) => { ret option::some(v); },
+        none => { ret b; },
+    }
 }

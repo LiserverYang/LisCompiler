@@ -96,6 +96,43 @@ void HIRBuilder::visit(StructDef *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRBuilder::visit(EnumDef *node)
+{
+    auto result = std::make_unique<HIREnum>();
+    result->name = node->name;
+    result->position = node->position;
+    result->length = node->length;
+
+    if (!node->genericParams.empty())
+    {
+        result->isGeneric = true;
+
+        for (auto &gParam : node->genericParams)
+        {
+            result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
+            result->unsolveConstraints[gParam->name] = toHIRConstraints(gParam->constraints);
+        }
+    }
+
+    for (auto &v : node->variants)
+    {
+        HIREnum::Variant variant;
+        variant.name = v->name;
+        for (auto &pt : v->payloadTypes)
+            variant.payloadRawTypes.push_back(toRaw(pt.get()));
+        result->variants.push_back(std::move(variant));
+    }
+
+    nodeStack.push(std::move(result));
+}
+
+// Variants are built directly in visit(EnumDef); standalone visits are no-ops.
+void HIRBuilder::visit(EnumVariant *node)
+{
+    (void)node;
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(TraitDef *node)
 {
     auto result = std::make_unique<HIRTrait>();
@@ -343,6 +380,55 @@ void HIRBuilder::visit(IfStmt *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRBuilder::visit(MatchExpr *node)
+{
+    auto result = std::make_unique<HIRMatch>();
+    result->position = node->position;
+    result->length = node->length;
+
+    node->scrutinee->accept(this);
+    result->scrutinee.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    for (auto &arm : node->arms)
+    {
+        HIRMatch::Arm ha;
+        ha.variantName = arm->pattern->variantName;
+        ha.isWildcard = arm->pattern->isWildcard;
+        for (auto &binding : arm->pattern->bindings)
+            ha.bindings.emplace_back(binding, nullptr);
+
+        if (arm->body)
+        {
+            arm->body->accept(this);
+            ha.body.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
+            nodeStack.pop();
+        }
+        else if (arm->tailValue)
+        {
+            arm->tailValue->accept(this);
+            ha.tailValue.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+            nodeStack.pop();
+        }
+
+        result->arms.push_back(std::move(ha));
+    }
+
+    nodeStack.push(std::move(result));
+}
+
+// Patterns/arms are built directly in visit(MatchExpr); standalone visits are
+// no-ops.
+void HIRBuilder::visit(Pattern *node)
+{
+    (void)node;
+}
+void HIRBuilder::visit(MatchArm *node)
+{
+    (void)node;
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(BreakStmt *node)
 {
     auto result = std::make_unique<HIRBreak>();
@@ -556,40 +642,42 @@ void HIRBuilder::visit(ForStmt *node)
     optDecl->init = callNext(itName);
     loopBody->stmts.push_back(std::move(optDecl));
 
-    // if __opt.is_some { ... } else { break; }
-    auto ifStmt = std::make_unique<HIRIf>();
-    ifStmt->position = position;
-    ifStmt->length = length;
-    ifStmt->cond = memberOf(optName, "is_some");
+    // match __opt { some(<loopVar>) => { body }, _ => { break } }
+    auto matchExpr = std::make_unique<HIRMatch>();
+    matchExpr->position = position;
+    matchExpr->length = length;
+    matchExpr->scrutinee = nameRef(optName);
 
-    auto thenBlock = std::make_unique<HIRBlock>();
-    thenBlock->position = position;
-    thenBlock->length = length;
-
-    // let <loopVar> = __opt.value;
-    auto varDecl = std::make_unique<HIRVarDecl>();
-    varDecl->position = position;
-    varDecl->length = length;
-    varDecl->name = node->loopVar;
-    varDecl->isMutable = false;
-    varDecl->isGlobal = false;
-    varDecl->init = memberOf(optName, "value");
-    thenBlock->stmts.push_back(std::move(varDecl));
-
+    HIRMatch::Arm someArm;
+    someArm.variantName = "some";
+    someArm.bindings.emplace_back(node->loopVar, nullptr);
+    auto someBlock = std::make_unique<HIRBlock>();
+    someBlock->position = position;
+    someBlock->length = length;
     for (auto &s : bodyStmts)
-        thenBlock->stmts.push_back(std::move(s));
-    ifStmt->thenBlock = std::move(thenBlock);
+        someBlock->stmts.push_back(std::move(s));
+    someArm.body = std::move(someBlock);
 
-    auto elseBlock = std::make_unique<HIRBlock>();
-    elseBlock->position = position;
-    elseBlock->length = length;
+    HIRMatch::Arm wildArm;
+    wildArm.isWildcard = true;
+    auto wildBlock = std::make_unique<HIRBlock>();
+    wildBlock->position = position;
+    wildBlock->length = length;
     auto brk = std::make_unique<HIRBreak>();
     brk->position = position;
     brk->length = length;
-    elseBlock->stmts.push_back(std::move(brk));
-    ifStmt->elseBlock = std::move(elseBlock);
+    wildBlock->stmts.push_back(std::move(brk));
+    wildArm.body = std::move(wildBlock);
 
-    loopBody->stmts.push_back(std::move(ifStmt));
+    matchExpr->arms.push_back(std::move(someArm));
+    matchExpr->arms.push_back(std::move(wildArm));
+
+    auto matchStmt = std::make_unique<HIRExprStmt>();
+    matchStmt->position = position;
+    matchStmt->length = length;
+    matchStmt->expr = std::move(matchExpr);
+    loopBody->stmts.push_back(std::move(matchStmt));
+
     loop->body = std::move(loopBody);
 
     // { let mut __it; while ... }
@@ -691,8 +779,76 @@ void HIRBuilder::visit(StructInitExpr *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRBuilder::visit(VariantInitExpr *node)
+{
+    // `Name::X` is an enum-variant construction iff Name is a known enum;
+    // otherwise it is a static method call (`Box::new(10)`) parsed through the
+    // same syntax. The parser cannot tell the two apart (a stdlib enum may be
+    // parsed after its first use), so dispatch here against the shared
+    // knownEnums.
+    if (context->knownEnums.count(node->enumType->typeName) == 0)
+    {
+        auto call = std::make_unique<HIRCall>();
+        call->position = node->position;
+        call->length = node->length;
+        call->callKind = HIRCall::CallKind::Static;
+        call->staticTypeName = node->enumType->typeName;
+        call->methodName = node->variantName;
+        for (auto &ga : node->enumType->genericArgs)
+            call->genericParams.push_back(toRaw(ga.get()));
+        for (auto &arg : node->arguments)
+        {
+            arg->accept(this);
+            call->args.emplace_back((HIRExpr *)nodeStack.top().release());
+            nodeStack.pop();
+        }
+        nodeStack.push(std::move(call));
+        return;
+    }
+
+    auto result = std::make_unique<HIRVariantInit>();
+    result->position = node->position;
+    result->length = node->length;
+    result->enumName = node->enumType->typeName;
+    result->variantName = node->variantName;
+
+    for (auto &ga : node->enumType->genericArgs)
+        result->genericArgs.push_back(toRaw(ga.get()));
+
+    for (auto &arg : node->arguments)
+    {
+        arg->accept(this);
+        result->args.emplace_back((HIRExpr *)nodeStack.top().release());
+        nodeStack.pop();
+    }
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(StaticMemberCall *node)
 {
+    // `option<i32>::some(5)` — a turbofish enum-variant construction. Dispatch
+    // on knownEnums like visit(VariantInitExpr) does.
+    if (context->knownEnums.count(node->classType->typeName) > 0)
+    {
+        auto result = std::make_unique<HIRVariantInit>();
+        result->position = node->position;
+        result->length = node->length;
+        result->enumName = node->classType->typeName;
+        result->variantName = node->methodName;
+        for (auto &ga : node->genericParams)
+            result->genericArgs.push_back(toRaw(ga.get()));
+        for (auto &arg : node->arguments)
+        {
+            arg->accept(this);
+            result->args.emplace_back((HIRExpr *)nodeStack.top().release());
+            nodeStack.pop();
+        }
+        nodeStack.push(std::move(result));
+        return;
+    }
+
     auto result = std::make_unique<HIRCall>();
     result->position = node->position;
     result->length = node->length;

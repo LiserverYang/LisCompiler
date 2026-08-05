@@ -58,3 +58,11 @@ ERRORID E_CannotMoveWhileBorrowed = 4004;
 ERRORID E_CannotBorrowMovedValue = 4005;
 ERRORID E_CannotBorrowAsMutable = 4006;
 ERRORID E_BorrowDoesNotLiveLongEnough = 4007;
+
+// Enum / match errors (5000 series)
+
+ERRORID E_UnknownVariant = 5001;
+ERRORID E_VariantArgMismatch = 5002;
+ERRORID E_MatchOnNonEnum = 5003;
+ERRORID E_NonExhaustiveMatch = 5004;
+ERRORID E_VariantPatternMismatch = 5005;

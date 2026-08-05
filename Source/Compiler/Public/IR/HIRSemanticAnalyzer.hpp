@@ -193,6 +193,39 @@ private:
      *  partial (field) moves on the root symbol. */
     void handleMoveSource(HIRExpr *source, HIRNode &errNode);
 
+    /** Recognize a builtin print call (`print_str/int/float/bool/char`, `println`)
+     *  by callee name, validate its args, set the call's type to VOID, and return
+     *  true if `node` is such a builtin call (skipping normal call resolution).
+     *  These lower to libc `printf` in LLVMIRBuilder. */
+    bool handlePrintBuiltin(HIRCall *node, const std::string &name);
+
+    /** Recognize a builtin input call (`read_line` → &i8, `read_int` → i32,
+     *  `read_f64` → f64) by callee name, set the call's return type, and return
+     *  true if `node` is such a builtin (skipping normal call resolution).
+     *  These lower to libc `fgets` + parse in LLVMIRBuilder. */
+    bool handleInputBuiltin(HIRCall *node, const std::string &name);
+
+    // ── operator overloading ──────────────────────────────────────────────
+    /// Trait name for a binary op (`+`→"Add"), or nullptr for logical ops
+    /// (`&&`/`||`) which never overload.
+    static const char *operatorTraitName(HIRBinaryOp::OpKind op);
+    /// Method name for a binary op (`+`→"add"), or nullptr for logical ops.
+    static const char *operatorMethodName(HIRBinaryOp::OpKind op);
+    /// True if `name` is one of the builtin operator traits that primitives
+    /// auto-implement (Add/Sub/Mul/Div/Rem/PartialEq/PartialOrd/BitAnd/.../Shr).
+    static bool isOperatorTrait(const std::string &name);
+    /// Resolve `node` (`a op b` on a struct/enum) to the trait-method call
+    /// `a.method(b)`, filling the operator fields and node->type. Returns false
+    /// (logging) if the struct's impl signature does not match.
+    bool resolveOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<CustomType> &ct,
+        const char *opMethod, const char *opTrait);
+    /// Resolve `a op b` where both operands are a generic param `T: <opTrait>`
+    /// inside a generic function body. Emits the placeholder callee
+    /// `<T>::method`; MIRMonomorphization retargets it to the concrete struct
+    /// method (or falls back to a direct binary op for primitives).
+    bool resolveGenericOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<GenericParamType> &gp,
+        const char *opMethod, const char *opTrait);
+
     // Dispatch helpers
     void analyzeExpr(HIRExpr *expr);
     void analyzeStmt(HIRStmt *stmt);
@@ -201,6 +234,9 @@ private:
     void preRegister(HIRNode *item);
     /** Build the CustomType for a struct (used by preRegister and full analysis). */
     std::shared_ptr<Type> buildStructType(HIRStruct *node);
+    /** Build the CustomType for an enum (fat tagged union) — used by the
+     *  pre-registration pass and the full analysis. */
+    std::shared_ptr<Type> buildEnumType(HIREnum *node);
     /** Best-effort function-signature resolution for the pre-registration pass. */
     void preRegisterFunctionType(HIRFunction *f, const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns = {});
 
@@ -257,6 +293,7 @@ public:
 
     virtual void visit(HIRProgram *node) override;
     virtual void visit(HIRStruct *node) override;
+    virtual void visit(HIREnum *node) override;
     virtual void visit(HIRTrait *node) override;
     virtual void visit(HIRImpl *node) override;
     virtual void visit(HIRFunction *node) override;
@@ -264,6 +301,7 @@ public:
     virtual void visit(HIRVarDecl *node) override;
     virtual void visit(HIRAssign *node) override;
     virtual void visit(HIRIf *node) override;
+    virtual void visit(HIRMatch *node) override;
     virtual void visit(HIRLoop *node) override;
     virtual void visit(HIRReturn *node) override;
     virtual void visit(HIRBreak *node) override;
@@ -276,6 +314,7 @@ public:
     virtual void visit(HIRCall *node) override;
     virtual void visit(HIRMemberAccess *node) override;
     virtual void visit(HIRStructInit *node) override;
+    virtual void visit(HIRVariantInit *node) override;
     virtual void visit(HIRRef *node) override;
 
     std::vector<std::shared_ptr<Type>> inferGenericArguments(

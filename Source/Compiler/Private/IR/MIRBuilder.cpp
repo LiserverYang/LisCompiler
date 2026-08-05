@@ -789,6 +789,152 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// buildMatch — lower `match scrutinee { pattern => body, ... }` to a chain of
+// discriminant checks. The scrutinee is moved into an owned temp; each arm
+// binds its Copy payloads by projecting into the temp; a wildcard arm over a
+// non-Copy enum drops the whole temp via the tag-aware glue. After the match
+// the temp is marked fully moved (its payloads are now owned by the bindings or
+// were dropped), so the scope-end drop is skipped.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
+{
+    // 1. Evaluate the scrutinee into an owned temp (an owned enum is moved).
+    MIRPlace mval = makeTempPlace(match->scrutinee->type);
+    emitAssign(mval, MIRRValueUse{exprToOperand(match->scrutinee.get())});
+
+    auto enumTy = std::dynamic_pointer_cast<CustomType>(match->scrutinee->type);
+    const auto &variants = enumTy->getVariants();
+
+    // A value match (`let y = match ...`) writes each arm's tail value into a
+    // shared result slot (the no-phi write-then-read pattern); a statement match
+    // has a VOID slot that no arm writes.
+    MIRPlace resultSlot = makeTempPlace(match->type);
+
+    auto fellThrough = [&]()
+    {
+        return std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator)
+            && currentBlock().label != "dead";
+    };
+
+    // Does any variant carry a non-Copy payload? (→ wildcard arms must release
+    // the active payload via the whole-enum tag-aware drop glue.)
+    bool enumHasNonCopy = false;
+    for (const auto &v : variants)
+        for (const auto &pt : v.payloadTypes)
+            if (!pt->isCopyable()) { enumHasNonCopy = true; break; }
+
+    BasicBlockId doneId = newBlock("match_done");
+
+    for (size_t armIdx = 0; armIdx < match->arms.size(); ++armIdx)
+    {
+        auto &arm = match->arms[armIdx];
+        bool isLast = (armIdx + 1 == match->arms.size());
+        BasicBlockId nextId = doneId;
+
+        if (!arm.isWildcard)
+        {
+            // Discriminant check: `if __m.__tag == variantIndex`.
+            int64_t vi = -1;
+            for (size_t i = 0; i < variants.size(); ++i)
+                if (variants[i].name == arm.variantName) { vi = (int64_t)i; break; }
+            if (vi < 0) { switchTo(doneId); continue; } // sema already errored
+
+            BasicBlockId bodyId = newBlock("match_arm" + std::to_string(armIdx));
+            nextId = isLast ? doneId : newBlock("match_check" + std::to_string(armIdx + 1));
+
+            MIRPlace tagPlace = mval;
+            tagPlace.projections.push_back(Projection{ProjectionKind::Field, "__tag", 0});
+            tagPlace.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+            MIRConst tagConst;
+            tagConst.kind = MIRConst::Kind::Int;
+            tagConst.value = vi;
+            tagConst.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+            MIRPlace cond = makeTempPlace(context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL));
+            emitAssign(cond, MIRRValueBinaryOp{
+                .op = MIRRValueBinaryOp::Op::Eq,
+                .left = MIROperand(MIRCopy{tagPlace}),
+                .right = MIROperand(tagConst),
+                .type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL),
+            });
+
+            sealBlock(curBB_, MIRTermBranch{
+                .cond = MIROperand(MIRCopy{cond}),
+                .thenBlock = bodyId,
+                .elseBlock = nextId,
+            });
+            switchTo(bodyId);
+        }
+        // A wildcard arm has no check — the current block flows into its body.
+
+        // Bind payloads. Copy payloads are copied; non-Copy payloads are MOVED
+        // out of the scrutinee temp and owned by a per-arm frame so each binding
+        // is dropped exactly on its own arm's path (the match consumes the whole
+        // scrutinee, so its drop is skipped).
+        size_t armFrameBase = ownedLocalsStack_.size();
+        ownedLocalsStack_.emplace_back();
+        for (size_t i = 0; i < arm.bindings.size(); ++i)
+        {
+            const std::string &name = arm.bindings[i].first;
+            auto ty = arm.bindings[i].second;
+            if (!ty) continue;
+            size_t idx = newLocal(name, ty, /*isMutable=*/false, /*isTemp=*/false, /*isArg=*/false);
+            varMap_[name] = idx;
+            MIRPlace bindPlace = localPlace(idx);
+            MIRPlace payload = mval;
+            payload.projections.push_back(Projection{ProjectionKind::Field, arm.variantName + "_" + std::to_string(i), 0});
+            payload.type = ty;
+            if (isCopyType(ty))
+                emitAssign(bindPlace, MIRRValueUse{MIROperand(MIRCopy{payload})});
+            else
+            {
+                ownedLocalsStack_.back().push_back(localPlace(idx));
+                emitAssign(bindPlace, MIRRValueUse{MIROperand(MIRMove{payload})});
+            }
+        }
+
+        // A wildcard arm over a possibly non-Copy enum releases the active
+        // payload via the whole-enum tag-aware drop glue.
+        if (arm.isWildcard && enumHasNonCopy)
+        {
+            emit(MIRStmtDrop{.place = mval});
+            movedLocals_.insert(mval.index);
+            partiallyMovedFields_.erase(mval.index);
+        }
+
+        if (arm.body)
+            buildBlock(arm.body.get());
+        else if (arm.tailValue)
+            emitAssign(resultSlot, MIRRValueUse{exprToOperand(arm.tailValue.get())});
+
+        // Drop this arm's non-Copy bindings on the fall-through path (a return
+        // already dropped them via buildReturn's dropOwnedLocalsFrom). The
+        // per-arm frame keeps each arm's bindings scoped to its own path, so a
+        // binding that another arm (or a wildcard) didn't assign is never dropped.
+        if (fellThrough())
+        {
+            dropOwnedLocalsFrom(armFrameBase);
+            sealBlock(curBB_, MIRTermGoto{.target = doneId});
+        }
+        ownedLocalsStack_.pop_back();
+
+        if (isLast || arm.isWildcard)
+            switchTo(doneId);
+        else
+            switchTo(nextId); // the next arm's check block
+    }
+
+    // The match consumed the scrutinee: mark the temp fully moved so its
+    // scope-end drop is skipped (payloads are owned by the bindings or were
+    // dropped by the wildcard arm's glue).
+    switchTo(doneId);
+    movedLocals_.insert(mval.index);
+    partiallyMovedFields_.erase(mval.index);
+
+    return resultSlot;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // emitPathDrops — drop outer locals owned on this path but dead on the sibling
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1029,6 +1175,12 @@ MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
     if (auto *si = dynamic_cast<HIRStructInit *>(expr))
         return buildStructInit(si);
 
+    if (auto *vi = dynamic_cast<HIRVariantInit *>(expr))
+        return buildVariantInit(vi);
+
+    if (auto *match = dynamic_cast<HIRMatch *>(expr))
+        return buildMatch(match);
+
     if (auto *ref = dynamic_cast<HIRRef *>(expr))
         return buildRef(ref);
 
@@ -1099,6 +1251,37 @@ MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
     // Evaluate operands before making the temp (important for aliased places).
     MIROperand lhs = exprToOperand(bin->left.get());
     MIROperand rhs = exprToOperand(bin->right.get());
+
+    // Operator overloading: sema resolved `a + b` to `a.add(b)` on a struct
+    // implementing the operator trait. Lower to a call of the trait method.
+    if (!bin->operatorMethodName.empty())
+    {
+        MIRPlace dest = makeTempPlace(bin->type);
+
+        // Callee name operand (mirrors buildCall's direct-call path: the place
+        // holds the fully-qualified name as a string const; lowerCall resolves
+        // funcName against the module, falling back to a declared external).
+        MIRPlace calleePlace = makeTempPlace(bin->operatorMethodType);
+        MIRConst nameConst{
+            .kind = MIRConst::Kind::String,
+            .value = bin->operatorMethodName,
+            .type = bin->operatorMethodType,
+        };
+        emitAssign(calleePlace, MIRRValueUse{.operand = std::move(nameConst)});
+
+        emit(MIRStmtCall{
+            .dest = dest,
+            .callee = placeToOperand(calleePlace),
+            .funcName = bin->operatorMethodName,
+            .args = {std::move(lhs), std::move(rhs)},
+            .genericParams = bin->operatorStructArgs,
+            // A generic-param operator (`<T>::add`) needs the original op so
+            // monomorphization can fall back to a direct binary op for primitive
+            // instantiations (which have no `add` method).
+            .genericOpFallback = convertBinOp(bin->opKind),
+        });
+        return dest;
+    }
 
     MIRPlace tmp = makeTempPlace(bin->type);
     emitAssign(tmp, MIRRValueBinaryOp{
@@ -1224,6 +1407,45 @@ MIRPlace MIRBuilder::buildStructInit(HIRStructInit *si)
                         .structName = structName,
                         .fields = std::move(fields),
                         .type = si->type,
+                    });
+    return tmp;
+}
+
+MIRPlace MIRBuilder::buildVariantInit(HIRVariantInit *vi)
+{
+    // The fat tagged-union layout: write `__tag` (the variant's discriminant =
+    // its index in the enum's variants) plus the variant's payload slots.
+    std::string structName;
+    int64_t tag = 0;
+    if (auto ct = std::dynamic_pointer_cast<CustomType>(vi->type))
+    {
+        structName = ct->getName();
+        const auto &variants = ct->getVariants();
+        for (size_t i = 0; i < variants.size(); ++i)
+        {
+            if (variants[i].name == vi->variantName)
+            {
+                tag = (int64_t)i;
+                break;
+            }
+        }
+    }
+
+    std::vector<std::pair<std::string, MIROperand>> fields;
+    MIRConst tagConst;
+    tagConst.kind = MIRConst::Kind::Int;
+    tagConst.value = tag;
+    tagConst.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    fields.push_back({"__tag", MIROperand(tagConst)});
+
+    for (size_t i = 0; i < vi->args.size(); ++i)
+        fields.push_back({vi->variantName + "_" + std::to_string(i), exprToOperand(vi->args[i].get())});
+
+    MIRPlace tmp = makeTempPlace(vi->type);
+    emitAssign(tmp, MIRRValueStructInit{
+                        .structName = structName,
+                        .fields = std::move(fields),
+                        .type = vi->type,
                     });
     return tmp;
 }

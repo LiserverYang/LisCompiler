@@ -1,0 +1,54 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// operator.lis — operator overloading via the builtin operator traits.
+//
+// A struct implements `Add` (etc.) and its `+` becomes a call to the trait
+// method. The operator traits are declared in the stdlib (math.lis); primitives
+// auto-implement them. `fn sum<T: Add>` is generic over any type that supports
+// `+` — a struct (method call) or a primitive (direct add).
+
+struct Vec2
+{
+    pub x: i32,
+    pub y: i32
+}
+
+impl Add for Vec2
+{
+    fn add(self, other: Self) -> Vec2
+    {
+        ret Vec2 { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+
+impl PartialEq for Vec2
+{
+    fn eq(self, other: Self) -> bool
+    {
+        ret (self.x == other.x) && (self.y == other.y);
+    }
+    fn ne(self, other: Self) -> bool
+    {
+        ret (self.x != other.x) || (self.y != other.y);
+    }
+}
+
+fn sum<T: Add>(a: T, b: T) -> T
+{
+    ret a + b;
+}
+
+fn main() -> i32
+{
+    let a = Vec2 { x: 1, y: 2 };
+    let b = Vec2 { x: 3, y: 4 };
+
+    let c = a + b;                       // Vec2 { 4, 6 }
+    let same = (Vec2{x: 1, y: 2} == Vec2{x: 1, y: 2});  // PartialEq::eq
+
+    let total = sum(10, 20);             // generic over i32 → 30
+    let mut eq_flag = 0;
+    if same { eq_flag = 1; }             // PartialEq::eq result is usable in if
+    ret c.x + c.y + total + eq_flag;     // 4+6+30+1 = 41
+}

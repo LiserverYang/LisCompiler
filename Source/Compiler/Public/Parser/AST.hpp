@@ -144,6 +144,34 @@ public:
     }
 };
 
+/// One variant of an enum: `some(T, U)` or a unit variant `none`.
+class EnumVariant : public ASTNode
+{
+public:
+    std::string name;
+    std::vector<std::unique_ptr<TypeNode>> payloadTypes;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+/// `enum option<T> { some(T), none }` — a tagged-union declaration.
+class EnumDef : public ASTNode
+{
+public:
+    std::string name;
+    std::vector<std::unique_ptr<EnumVariant>> variants;
+    std::vector<std::unique_ptr<GenericParam>> genericParams;
+    Symbol *symbol;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
 class TraitDef : public ASTNode
 {
 public:
@@ -369,6 +397,49 @@ public:
     }
 };
 
+/// A match pattern: a unit variant `none`, a payload variant `some(v)`, or the
+/// `_` wildcard. First version: bindings are plain names (no nested patterns).
+class Pattern : public ASTNode
+{
+public:
+    std::string variantName;
+    bool isWildcard = false;
+    std::vector<std::string> bindings;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+class MatchArm : public ASTNode
+{
+public:
+    std::unique_ptr<Pattern> pattern;
+    std::unique_ptr<CompoundStmt> body;  // block arm (statement match, void)
+    std::unique_ptr<Expr> tailValue;     // expression arm (value match)
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+/// `match <scrutinee> { <pattern> => <arm>, ... }` — an EXPRESSION. An arm body
+/// is either a block (statement match, void value) or a tail expression (value
+/// match). Used as a statement it is wrapped in an ExprStmt.
+class MatchExpr : public Expr
+{
+public:
+    std::unique_ptr<Expr> scrutinee;
+    std::vector<std::unique_ptr<MatchArm>> arms;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
 class LiteralExpr : public Expr
 {
 public:
@@ -436,6 +507,21 @@ public:
     std::string methodName;
     std::vector<std::unique_ptr<Expr>> arguments;
     std::vector<std::unique_ptr<TypeNode>> genericParams;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+/// Construct an enum variant: `option::some(5)` or a unit `color::red`.
+class VariantInitExpr : public Expr
+{
+public:
+    std::unique_ptr<TypeNode> enumType;
+    std::string variantName;
+    std::vector<std::unique_ptr<Expr>> arguments;
+    Symbol *enumSymbol = nullptr;
 
     void accept(ASTVisitor *visitor) override
     {

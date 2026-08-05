@@ -14,6 +14,8 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 
+#include <unordered_set>
+
 /**
  * Context stored all informations of compiler, these will be shared in different passes
  */
@@ -23,6 +25,12 @@ struct Context
     std::string fileValue;
 
     std::shared_ptr<Args> args = std::make_shared<Args>();
+
+    /// Enum type names seen so far, shared across ALL parser instances in this
+    /// compilation unit (the stdlib files and the main file are each parsed by
+    /// a fresh Parser, so `EnumName::Variant(...)` must know enums from earlier
+    /// files).
+    std::unordered_set<std::string> knownEnums;
 
     /**
      * When a source code be passed by Lexer，we will get TokenStream

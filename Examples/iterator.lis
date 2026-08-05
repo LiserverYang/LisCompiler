@@ -18,18 +18,19 @@ impl Countdown
     }
 }
 
-// Implement the Iterator<i32> protocol: next() returns Option<i32>, None when
-// exhausted. A for-loop desugars to repeatedly calling next().
+// Implement the Iterator<i32> protocol: next() returns option<i32> (none when
+// exhausted). A for-loop desugars to repeatedly calling next() and matching on
+// the returned option.
 impl Iterator<i32> for Countdown
 {
-    fn next(self: &mut Self) -> Option<i32>
+    fn next(self: &mut Self) -> option<i32>
     {
         if self.current > 0 {
             let v = self.current;
             self.current = self.current - 1;
-            ret Option { is_some: true, value: v };
+            ret option::some(v);
         }
-        ret Option { is_some: false, value: 0 };
+        ret option::none;
     }
 }
 
@@ -44,7 +45,13 @@ fn main() -> i32
     // The stdlib helpers work on any Iterator<i32>.
     let s = sum(Countdown::new(4)); // 4 + 3 + 2 + 1
     let c = count(Countdown::new(2)); // 2
-    let f = first(Countdown::new(5)); // Option{is_some:true, value:5}
+    let f = first(Countdown::new(5)); // option::some(5)
 
-    ret total + s + c + f.value;
+    // Match on the option returned by first().
+    let got = match f {
+        some(x) => x,
+        none => 0,
+    };
+
+    ret total + s + c + got;
 }

@@ -72,38 +72,60 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
     }
     else
     {
-        // Look up generic param scopes in priority order: function, trait method, struct, then customs.
-        std::shared_ptr<GenericParamType> gp;
-        if (functionInfo.isInFunction)
+        // `Self` in a trait method signature resolves to the trait's SelfType
+        // (substituted by conformance checks); inside a struct/impl body it
+        // resolves to the struct being implemented (by-value). This lets
+        // operator traits be written `fn add(self, other: Self) -> Self`.
+        if (raw.name == "Self")
         {
-            auto it = functionInfo.gParams.find(raw.name);
-            if (it != functionInfo.gParams.end()) gp = it->second;
-        }
-        if (!gp && isInTraitMethod)
-        {
-            auto it = traitGParams.find(raw.name);
-            if (it != traitGParams.end()) gp = it->second;
-        }
-        if (!gp)
-        {
-            auto it = structGParams.find(raw.name);
-            if (it != structGParams.end()) gp = it->second;
-        }
-
-        if (gp)
-        {
-            base = gp;
+            if (isInTraitMethod)
+                base = context->typeContext->createSelf(traitName, raw.isMutRef, raw.isRef);
+            else if (currentStructType)
+                base = currentStructType;
+            else
+            {
+                if (!suppressTypeErrors_)
+                    log(errorNode, "the type 'Self' can only be used inside a trait or impl.");
+                return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+            }
+            if (raw.isRef)
+                base = context->typeContext->getReference(base, raw.isMutRef);
         }
         else
         {
-            auto custom = context->typeContext->getCustom(raw.name);
-            if (!custom.has_value())
+            // Look up generic param scopes in priority order: function, trait method, struct, then customs.
+            std::shared_ptr<GenericParamType> gp;
+            if (functionInfo.isInFunction)
             {
-                if (!suppressTypeErrors_)
-                    log(errorNode, "the type '" + raw.name + "' cannot be found.");
-                return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+                auto it = functionInfo.gParams.find(raw.name);
+                if (it != functionInfo.gParams.end()) gp = it->second;
             }
-            base = custom.value();
+            if (!gp && isInTraitMethod)
+            {
+                auto it = traitGParams.find(raw.name);
+                if (it != traitGParams.end()) gp = it->second;
+            }
+            if (!gp)
+            {
+                auto it = structGParams.find(raw.name);
+                if (it != structGParams.end()) gp = it->second;
+            }
+
+            if (gp)
+            {
+                base = gp;
+            }
+            else
+            {
+                auto custom = context->typeContext->getCustom(raw.name);
+                if (!custom.has_value())
+                {
+                    if (!suppressTypeErrors_)
+                        log(errorNode, "the type '" + raw.name + "' cannot be found.");
+                    return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+                }
+                base = custom.value();
+            }
         }
     }
 
@@ -294,6 +316,17 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
         sym->name = t->name;
         sym->type = nullptr;
         SymbolTable::getInstance().insertSymbol(t->name, std::move(sym));
+    }
+    else if (auto *e = dynamic_cast<HIREnum *>(item))
+    {
+        // An enum is structurally a CustomType (fat tagged union) — reuse the
+        // Struct symbol kind.
+        if (SymbolTable::getInstance().lookupSymbol(e->name)) return;
+        auto sym = std::make_unique<Symbol>();
+        sym->kind = SymbolKind::Struct;
+        sym->name = e->name;
+        sym->type = nullptr;
+        SymbolTable::getInstance().insertSymbol(e->name, std::move(sym));
     }
     else if (auto *f = dynamic_cast<HIRFunction *>(item))
     {
@@ -667,6 +700,25 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
                 }
             }
         }
+        else if (auto *e = dynamic_cast<HIREnum *>(item.get()))
+        {
+            // Enums are CustomTypes too — register an empty shell so forward
+            // variant-construction / type references resolve before fill.
+            if (auto *sym = SymbolTable::getInstance().lookupSymbol(e->name))
+            {
+                if (e->isGeneric)
+                {
+                    std::vector<std::shared_ptr<Type>> gParamTypes;
+                    for (auto &gp : e->gParams)
+                        gParamTypes.push_back(gp);
+                    sym->type = context->typeContext->createGenericCustomShell(e->name, std::move(gParamTypes));
+                }
+                else
+                {
+                    sym->type = context->typeContext->createCustomShell(e->name);
+                }
+            }
+        }
     }
 
     // Pass 1b': build trait types so struct/function trait bounds resolve
@@ -686,6 +738,8 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     {
         if (auto *s = dynamic_cast<HIRStruct *>(item.get()))
             buildStructType(s);
+        else if (auto *e = dynamic_cast<HIREnum *>(item.get()))
+            buildEnumType(e);
     }
 
     // Pass 1b''': register every impl's trait conformance on its struct BEFORE
@@ -826,6 +880,78 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
     return ty;
 }
 
+std::shared_ptr<Type> HIRSemanticAnalyzer::buildEnumType(HIREnum *node)
+{
+    // Bring the enum's generic params into scope and resolve their constraints
+    // (mirrors buildStructType).
+    isInStruct = true;
+    structGParams.clear();
+
+    if (node->isGeneric)
+    {
+        for (auto &gp : node->gParams)
+        {
+            std::vector<std::shared_ptr<TraitType>> traits;
+            auto cIt = node->unsolveConstraints.find(gp->getParamName());
+            if (cIt != node->unsolveConstraints.end())
+            {
+                for (auto &con : cIt->second)
+                {
+                    if (auto trait = resolveTraitConstraint(con, *node, /*silent=*/suppressTypeErrors_))
+                        traits.push_back(trait);
+                }
+            }
+            gp->updateContraints(std::move(traits));
+            structGParams[gp->getParamName()] = gp;
+        }
+    }
+
+    // Fat tagged-union layout: a `__tag` discriminant (i32) followed by one slot
+    // per variant payload (`<variant>_<idx>`), all at their own offsets. Reading
+    // an inactive slot is never done (only the active variant's slots are read),
+    // and drop glue is tag-aware (only drops the active variant's payloads).
+    std::vector<CustomType::Field> fields;
+    fields.emplace_back("__tag", context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32));
+
+    std::vector<CustomType::EnumVariantInfo> variants;
+    for (auto &variant : node->variants)
+    {
+        CustomType::EnumVariantInfo vi;
+        vi.name = variant.name;
+        for (size_t j = 0; j < variant.payloadRawTypes.size(); ++j)
+        {
+            auto pt = resolveType(variant.payloadRawTypes[j], *node);
+            variant.payloadTypes.push_back(pt);
+            vi.payloadTypes.push_back(pt);
+            fields.emplace_back(variant.name + "_" + std::to_string(j), pt);
+        }
+        variants.push_back(std::move(vi));
+    }
+
+    std::shared_ptr<Type> ty;
+    if (node->isGeneric)
+    {
+        std::vector<std::shared_ptr<Type>> gParamTypes(node->gParams.begin(), node->gParams.end());
+        ty = context->typeContext->createGenericCustom(node->name, std::move(gParamTypes), fields);
+    }
+    else
+    {
+        ty = context->typeContext->createCustom(node->name, fields);
+    }
+
+    // The type may be a pass-1b shell returned by the name-keyed create* — set
+    // the resolved fields + variant metadata now.
+    if (auto ct = std::dynamic_pointer_cast<CustomType>(ty))
+    {
+        ct->setFields(std::move(fields));
+        ct->setVariants(std::move(variants));
+    }
+
+    structGParams.clear();
+    isInStruct = false;
+    return ty;
+}
+
 // ---------------------------------------------------------------------------
 
 void HIRSemanticAnalyzer::visit(HIRStruct *node)
@@ -839,6 +965,20 @@ void HIRSemanticAnalyzer::visit(HIRStruct *node)
 
     sym->type = buildStructType(node);
     node->structSymbol = sym;
+}
+
+// ---------------------------------------------------------------------------
+void HIRSemanticAnalyzer::visit(HIREnum *node)
+{
+    auto sym = SymbolTable::getInstance().lookupSymbol(node->name);
+    if (!sym)
+    {
+        log(*node, "internal: enum symbol '" + node->name + "' was not pre-registered.");
+        return;
+    }
+
+    sym->type = buildEnumType(node);
+    node->enumSymbol = sym;
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +1059,54 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
         sym->type = context->typeContext->createTrait(node->name, std::move(traitMethods));
     node->traitSymbol = sym;
 
+    // Builtin operator traits: PRIMITIVES auto-implement them, so a generic
+    // `fn max<T: Numeric>(...)` accepts i32/f64 and rejects structs/enums at the
+    // call site (no LLVM crash on invalid ICmp). Declared in the stdlib like any
+    // trait; the only difference is this seeding. bool is intentionally excluded
+    // from Numeric (`true + false` would codegen an i1 add), but does implement
+    // the equality/ordering traits (PartialEq/PartialOrd).
+    //
+    // Seeding rules per trait family:
+    //   Numeric / Integer : ints + floats (+ char for Numeric)  [marker traits]
+    //   Add Sub Mul Div Rem : ints + floats (returns Self)
+    //   PartialEq PartialOrd : ints + floats + char + bool (returns bool)
+    //   BitAnd ... Shr : ints only
+    if (node->name == "Numeric" || node->name == "Integer" || isOperatorTrait(node->name))
+    {
+        auto traitTy = std::static_pointer_cast<TraitType>(sym->type);
+        auto seed = [&](PrimitiveType::PrimKind k)
+        {
+            auto p = context->typeContext->getPrimitive(k);
+            if (!p->implementsTrait(node->name))
+                p->implTrait.push_back(traitTy);
+        };
+        const std::string &n = node->name;
+        bool isNumeric = (n == "Numeric");
+        bool isInteger = (n == "Integer");
+        bool isCmp = (n == "PartialEq" || n == "PartialOrd");
+        bool isArith = (n == "Add" || n == "Sub" || n == "Mul" || n == "Div" || n == "Rem");
+        bool isBitwise = (n == "BitAnd" || n == "BitOr" || n == "BitXor" || n == "Shl" || n == "Shr");
+
+        // ints get every family (Numeric/Integer markers + all operator traits).
+        if (isNumeric || isInteger || isCmp || isArith || isBitwise)
+        {
+            seed(PrimitiveType::PrimKind::I8);
+            seed(PrimitiveType::PrimKind::I16);
+            seed(PrimitiveType::PrimKind::I32);
+            seed(PrimitiveType::PrimKind::I64);
+        }
+        // floats get Numeric + arithmetic + comparison, NOT Integer / bitwise.
+        if (isNumeric || isCmp || isArith)
+        {
+            seed(PrimitiveType::PrimKind::F32);
+            seed(PrimitiveType::PrimKind::F64);
+        }
+        if (isNumeric || isCmp)
+            seed(PrimitiveType::PrimKind::CHAR); // char compares via i32
+        if (isCmp)
+            seed(PrimitiveType::PrimKind::BOOL); // == / < work on bool
+    }
+
     isInTraitMethod = false;
     traitName = "";
     traitGParams.clear();
@@ -976,6 +1164,18 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
     if (node->traitName.has_value())
     {
         const std::string &tn = node->traitName.value();
+        // Numeric/Integer are PRIMITIVES-ONLY marker traits (the compiler seeds
+        // them on i32/f64/...). A struct impl would make `max<box>` pass the
+        // bound, but the generic body's `>` still monomorphizes to an ICmp on
+        // the struct → LLVM crash. Operator overloading must go through the
+        // per-operator traits (Add/Sub/PartialOrd/...), which ARE implementable.
+        if (tn == "Numeric" || tn == "Integer")
+        {
+            log(*node, "builtin marker trait '" + tn + "' is primitives-only and cannot be implemented by a struct; implement the operator traits (Add, Sub, ...) instead (operator overloading).");
+            currentStructType = nullptr;
+            structGParams.clear();
+            return;
+        }
         auto *traitSym = SymbolTable::getInstance().lookupSymbol(tn);
         if (!traitSym || traitSym->kind != SymbolKind::Trait)
         {
@@ -1029,10 +1229,11 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
         methodMap[method->name] = cm;
 
         std::string funcName = node->structName + "::" + method->name;
-        std::vector<std::shared_ptr<Type>> paramTypes;
-        for (auto &[n, t] : method->params)
-            paramTypes.push_back(t);
-        auto funcType = context->typeContext->getFunction(paramTypes, method->returnType);
+        // Register the symbol with the type visit(HIRFunction) built — that is
+        // generic-aware for methods of generic structs (their genericParams
+        // include the struct's gParams). Rebuilding via getFunction here would
+        // strip that genericity and break monomorphization.
+        auto funcType = method->type;
 
         auto funcSym = std::make_unique<Symbol>();
         funcSym->kind = SymbolKind::Function;
@@ -1061,7 +1262,17 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
 
             // Substitute the trait's generic params (e.g. T -> i32 in
             // Iterator<i32>) into the expected signature before comparing.
+            // A `Self` return (operator traits write `-> Self`) maps to the
+            // struct being implemented.
             std::shared_ptr<Type> expectedRet = substituteType(tm.returnType, traitSubst);
+            if (expectedRet->getKind() == Type::Kind::Self)
+            {
+                auto selfTy = std::static_pointer_cast<SelfType>(expectedRet);
+                std::shared_ptr<Type> base = selfTypeForMethods;
+                if (selfTy->isReference())
+                    base = context->typeContext->getReference(base, selfTy->isMutable());
+                expectedRet = base;
+            }
             if (!sm.returnType->equals(expectedRet))
                 log(*node, "method '" + tm.name + "' return type mismatch: expected '" + expectedRet->toString() + "', got '" + sm.returnType->toString() + "'.");
 
@@ -1225,9 +1436,30 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
 
     // Build the FunctionType. node->returnType is valid regardless of whether
     // it was explicitly declared (resolved above) or inferred from `ret` stmts.
-    if (node->isGeneric)
+    // Methods of a GENERIC struct are generic in the struct's gParams too —
+    // MIRBuilder prepends them to the mono signature (MIRBuilder.cpp:548-569),
+    // so mirror that order here (struct params first, deduped by name) to keep
+    // the symbol's isGeneric() true and mono's positional substitution aligned.
+    std::vector<std::shared_ptr<GenericParamType>> genericParams = node->gParams;
+    auto structTy = std::dynamic_pointer_cast<CustomType>(currentStructType);
+    bool methodOfGenericStruct = node->isMethod && structTy && structTy->isGeneric();
+    if (methodOfGenericStruct)
     {
-        node->type = context->typeContext->getGenericFunction(node->gParams, allParamTypes, node->returnType);
+        std::vector<std::shared_ptr<GenericParamType>> structParams;
+        for (auto &gp : structTy->getGenericParams())
+        {
+            auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
+            bool present = false;
+            for (const auto &existing : genericParams)
+                if (existing->getParamName() == gpTy->getParamName()) { present = true; break; }
+            if (!present) structParams.push_back(gpTy);
+        }
+        genericParams.insert(genericParams.begin(), structParams.begin(), structParams.end());
+    }
+
+    if (node->isGeneric || methodOfGenericStruct)
+    {
+        node->type = context->typeContext->getGenericFunction(genericParams, allParamTypes, node->returnType);
     }
     else
     {
@@ -2036,6 +2268,141 @@ void HIRSemanticAnalyzer::visit(HIRIf *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRSemanticAnalyzer::visit(HIRMatch *node)
+{
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    analyzeExpr(node->scrutinee.get());
+    if (!node->scrutinee->type)
+        return;
+
+    // The scrutinee must be an owned ENUM (reference matching is a later stage).
+    auto enumTy = std::dynamic_pointer_cast<CustomType>(node->scrutinee->type);
+    if (!enumTy || !enumTy->isEnum())
+    {
+        log(*node, "match scrutinee must be an enum (got '" + node->scrutinee->type->toString() + "')", E_MatchOnNonEnum);
+        return;
+    }
+
+    // Matching an owned enum consumes it (a whole-value move) — Rust semantics.
+    handleMoveSource(node->scrutinee.get(), *node);
+
+    const auto &variants = enumTy->getVariants();
+
+    // The match's bindings die with the match; put them in a dedicated scope.
+    auto matchScope = SymbolTable::getInstance().getCurrentScope()->createChild();
+    SymbolTable::getInstance().enterScope(matchScope);
+
+    std::unordered_set<std::string> covered;
+    bool hasWildcard = false;
+    bool hasBlockArm = false;
+    bool hasValueArm = false;
+    std::shared_ptr<Type> matchResultType = nullptr;
+
+    for (auto &arm : node->arms)
+    {
+        auto armScope = SymbolTable::getInstance().getCurrentScope()->createChild();
+        SymbolTable::getInstance().enterScope(armScope);
+
+        if (arm.isWildcard)
+        {
+            hasWildcard = true;
+            if (!arm.bindings.empty())
+                log(*node, "a wildcard '_' pattern cannot bind values.");
+            // A wildcard matches everything — arms after it are unreachable.
+            if (&arm != &node->arms.back())
+                log(*node, "a '_' wildcard must be the last match arm.");
+        }
+        else
+        {
+            const CustomType::EnumVariantInfo *variant = nullptr;
+            for (size_t i = 0; i < variants.size(); ++i)
+            {
+                if (variants[i].name == arm.variantName)
+                {
+                    variant = &variants[i];
+                    break;
+                }
+            }
+            if (!variant)
+            {
+                log(*node, "enum '" + enumTy->getName() + "' has no variant '" + arm.variantName + "'", E_UnknownVariant);
+            }
+            else
+            {
+                covered.insert(arm.variantName);
+                if (arm.bindings.size() != variant->payloadTypes.size())
+                {
+                    log(*node, "variant '" + arm.variantName + "' pattern expects " + std::to_string(variant->payloadTypes.size())
+                        + " binding(s), got " + std::to_string(arm.bindings.size()), E_VariantPatternMismatch);
+                }
+                else
+                {
+                    // Bind each pattern variable to its (instantiated) payload type.
+                    // Non-Copy payloads are MOVED out of the scrutinee temp by
+                    // buildMatch; the per-arm owned frame drops them exactly once.
+                    for (size_t i = 0; i < arm.bindings.size(); ++i)
+                    {
+                        auto payloadTy = variant->payloadTypes[i];
+                        arm.bindings[i].second = payloadTy; // fill the resolved type
+                        auto sym = std::make_unique<Symbol>();
+                        sym->kind = SymbolKind::LocalVar;
+                        sym->name = arm.bindings[i].first;
+                        sym->type = payloadTy;
+                        SymbolTable::getInstance().insertSymbol(arm.bindings[i].first, std::move(sym));
+                    }
+                }
+            }
+        }
+
+        // Analyze the arm body (statement match) or its tail value (value match).
+        if (arm.body)
+        {
+            hasBlockArm = true;
+            visit(arm.body.get());
+        }
+        else if (arm.tailValue)
+        {
+            hasValueArm = true;
+            analyzeExpr(arm.tailValue.get());
+            handleMoveSource(arm.tailValue.get(), *node);
+            auto tailTy = arm.tailValue->type;
+            if (matchResultType && !matchResultType->equals(tailTy))
+                log(*node, "match arms have inconsistent types: '" + matchResultType->toString() + "' vs '" + tailTy->toString() + "'.");
+            else
+                matchResultType = tailTy;
+        }
+        else
+        {
+            log(*node, "match arm has neither a block body nor a value.");
+        }
+        SymbolTable::getInstance().exitScope(); // armScope
+    }
+
+    // Mixed block arms (void) and value arms are inconsistent.
+    if (hasValueArm && hasBlockArm)
+        log(*node, "match cannot mix block arms with value arms.");
+
+    // Exhaustiveness: every variant covered, or a `_` wildcard present.
+    if (!hasWildcard)
+    {
+        for (const auto &v : variants)
+        {
+            if (!covered.count(v.name))
+            {
+                log(*node, "match is not exhaustive: variant '" + v.name + "' is not covered (add an arm or a '_' wildcard)",
+                    E_NonExhaustiveMatch);
+                break;
+            }
+        }
+    }
+
+    node->type = matchResultType ? matchResultType : voidTy; // VOID for statement match
+
+    SymbolTable::getInstance().exitScope(); // matchScope
+}
+
+// ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRLoop *node)
 {
     if (node->cond.has_value())
@@ -2113,6 +2480,20 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
         {
             functionInfo.hasReturnValue = true;
             functionInfo.declaredReturnType = retTy;
+        }
+        // Expected-type inference: a value whose generic enum/struct type could
+        // not be resolved locally (`ret option::none;` has no payload args to
+        // infer T from) is re-instantiated against the declared return type.
+        if (functionInfo.hasReturnValue && functionInfo.declaredReturnType)
+        {
+            auto declaredCt = std::dynamic_pointer_cast<CustomType>(functionInfo.declaredReturnType);
+            auto valueCt = std::dynamic_pointer_cast<CustomType>(retTy);
+            if (declaredCt && valueCt && valueCt->isGeneric() && declaredCt->isInstantiated()
+                && valueCt->getOriginName() == declaredCt->getOriginName())
+            {
+                retTy = context->typeContext->instantiateCustom(valueCt, declaredCt->getGenericArgs());
+                node->value.value()->type = retTy;
+            }
         }
         // A by-value non-Copy return consumes the source (`ret p` moves p).
         handleMoveSource(node->value.value().get(), *node);
@@ -2216,6 +2597,199 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
 }
 
 // ---------------------------------------------------------------------------
+// ── operator overloading: OpKind → operator-trait helpers ─────────────────────
+
+const char *HIRSemanticAnalyzer::operatorTraitName(HIRBinaryOp::OpKind op)
+{
+    using K = HIRBinaryOp::OpKind;
+    switch (op)
+    {
+    case K::Add: return "Add";
+    case K::Sub: return "Sub";
+    case K::Mul: return "Mul";
+    case K::Div: return "Div";
+    case K::Mod: return "Rem";
+    case K::Eq: return "PartialEq";
+    case K::Ne: return "PartialEq";
+    case K::Lt: return "PartialOrd";
+    case K::Gt: return "PartialOrd";
+    case K::Le: return "PartialOrd";
+    case K::Ge: return "PartialOrd";
+    case K::BitAnd: return "BitAnd";
+    case K::BitOr: return "BitOr";
+    case K::BitXor: return "BitXor";
+    case K::ShiftLeft: return "Shl";
+    case K::ShiftRight: return "Shr";
+    case K::And:
+    case K::Or: return nullptr; // logical ops never overload
+    }
+    return nullptr;
+}
+
+const char *HIRSemanticAnalyzer::operatorMethodName(HIRBinaryOp::OpKind op)
+{
+    using K = HIRBinaryOp::OpKind;
+    switch (op)
+    {
+    case K::Add: return "add";
+    case K::Sub: return "sub";
+    case K::Mul: return "mul";
+    case K::Div: return "div";
+    case K::Mod: return "rem";
+    case K::Eq: return "eq";
+    case K::Ne: return "ne";
+    case K::Lt: return "lt";
+    case K::Gt: return "gt";
+    case K::Le: return "le";
+    case K::Ge: return "ge";
+    case K::BitAnd: return "bitand";
+    case K::BitOr: return "bitor";
+    case K::BitXor: return "bitxor";
+    case K::ShiftLeft: return "shl";
+    case K::ShiftRight: return "shr";
+    case K::And:
+    case K::Or: return nullptr;
+    }
+    return nullptr;
+}
+
+bool HIRSemanticAnalyzer::isOperatorTrait(const std::string &name)
+{
+    static const std::unordered_set<std::string> ops = {
+        "Add", "Sub", "Mul", "Div", "Rem",
+        "PartialEq", "PartialOrd",
+        "BitAnd", "BitOr", "BitXor", "Shl", "Shr"};
+    return ops.count(name) != 0;
+}
+
+bool HIRSemanticAnalyzer::resolveOperatorMethod(HIRBinaryOp *node,
+    const std::shared_ptr<CustomType> &ct, const char *opMethod, const char *opTrait)
+{
+    std::string baseName = ct->getOriginName();
+    std::string symName = baseName + "::" + opMethod;
+    Symbol *symbol = SymbolTable::getInstance().lookupSymbol(symName);
+    if (!symbol)
+    {
+        log(*node, "operator '" + std::string(node->opToString()) + "' resolves to method '" + opMethod
+            + "' but no such method is registered on '" + baseName + "'.");
+        return false;
+    }
+
+    auto newTy = std::static_pointer_cast<FunctionType>(symbol->type);
+
+    // A generic struct instantiation (MyStruct$i32) needs its gParams →
+    // concrete args substituted into the method signature before the arg-type
+    // and result checks below (mirrors the Method/Static branches of visit(HIRCall)).
+    std::unordered_map<std::string, std::shared_ptr<Type>> structSubst;
+    if (!ct->getGenericArgs().empty() && ct->genericOrigin)
+    {
+        const auto &gps = ct->genericOrigin->getGenericParams();
+        const auto &gas = ct->getGenericArgs();
+        for (size_t i = 0; i < gps.size() && i < gas.size(); ++i)
+        {
+            auto gp = std::static_pointer_cast<GenericParamType>(gps[i]);
+            structSubst[gp->getParamName()] = gas[i];
+        }
+        newTy = std::static_pointer_cast<FunctionType>(substituteType(newTy, structSubst));
+    }
+
+    // Binary operator methods take exactly (self, other).
+    if (newTy->getParams().size() != 2)
+    {
+        log(*node, std::string("operator method '") + opMethod + "' must take 2 parameters (self, other), got "
+            + std::to_string(newTy->getParams().size()) + ".");
+        return false;
+    }
+    if (!node->left->type->equals(newTy->getParams()[0])
+        || !node->right->type->equals(newTy->getParams()[1]))
+    {
+        log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '"
+            + opTrait + "' method signature.");
+        return false;
+    }
+
+    node->operatorMethod = symbol;
+    node->operatorMethodType = newTy;
+    node->operatorMethodName = symName;
+    node->operatorStructArgs = ct->getGenericArgs();
+    node->type = newTy->getReturnType();
+    return true;
+}
+
+bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
+    const std::shared_ptr<GenericParamType> &gp, const char *opMethod, const char *opTrait)
+{
+    // Find the operator trait among the generic param's bounds.
+    std::shared_ptr<TraitType> matchedTrait = nullptr;
+    for (const auto &traitTy : gp->getConstraints())
+        if (traitTy->getName() == opTrait)
+        {
+            matchedTrait = traitTy;
+            break;
+        }
+    if (!matchedTrait)
+    {
+        log(*node, "generic parameter '" + gp->getParamName() + "' has no '" + opTrait + "' bound; cannot resolve operator '"
+            + node->opToString() + "'.");
+        return false;
+    }
+
+    auto method = matchedTrait->findMethod(opMethod);
+    if (!method.has_value())
+    {
+        log(*node, "trait '" + std::string(opTrait) + "' has no method '" + opMethod + "'.");
+        return false;
+    }
+
+    // Substitute the trait's generic args (operator traits are non-generic, so
+    // this is a no-op today) and map Self → the generic param (substituteType
+    // does not handle SelfType).
+    std::unordered_map<std::string, std::shared_ptr<Type>> subst;
+    const auto &traitParams = matchedTrait->getGenericParams();
+    const auto &traitArgs = matchedTrait->getGenericArgs();
+    for (size_t i = 0; i < traitParams.size() && i < traitArgs.size(); ++i)
+    {
+        auto p = std::static_pointer_cast<GenericParamType>(traitParams[i]);
+        subst[p->getParamName()] = traitArgs[i];
+    }
+
+    std::vector<std::shared_ptr<Type>> paramTypes;
+    for (size_t i = 0; i < method->params.size(); ++i)
+    {
+        auto t = substituteType(method->params[i].type, subst);
+        if (auto selfTy = std::dynamic_pointer_cast<SelfType>(t))
+            t = selfTy->isReference()
+                ? std::shared_ptr<Type>(context->typeContext->getReference(gp, selfTy->isMutable()))
+                : std::shared_ptr<Type>(gp);
+        paramTypes.push_back(t);
+    }
+    auto retTy = substituteType(method->returnType, subst);
+    if (auto selfTy = std::dynamic_pointer_cast<SelfType>(retTy))
+        retTy = selfTy->isReference()
+            ? std::shared_ptr<Type>(context->typeContext->getReference(gp, selfTy->isMutable()))
+            : std::shared_ptr<Type>(gp);
+
+    if (paramTypes.size() != 2)
+    {
+        log(*node, "operator method '" + std::string(opMethod) + "' must take 2 parameters (self, other), got "
+            + std::to_string(paramTypes.size()) + ".");
+        return false;
+    }
+    if (!node->left->type->equals(paramTypes[0]) || !node->right->type->equals(paramTypes[1]))
+    {
+        log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '"
+            + opTrait + "' method signature.");
+        return false;
+    }
+
+    node->operatorMethodType = context->typeContext->getFunction(paramTypes, retTy);
+    node->operatorMethodName = "<" + gp->getParamName() + ">::" + opMethod;
+    node->operatorStructArgs = {}; // monomorphization fills from the concrete struct
+    node->type = retTy;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
 {
     analyzeExpr(node->left.get());
@@ -2223,6 +2797,131 @@ void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
 
     if (node->left->type && node->right->type && !node->left->type->equals(node->right->type))
         log(*node, "operands of binary operator must have the same type.");
+
+    // Operator type check: every binary op requires its operand types to support
+    // it (the codegen would otherwise crash — e.g. ICmp on a struct). Concrete
+    // primitives are classified by op family; a generic param must carry a
+    // `Numeric`/`Integer` marker bound (or the specific operator trait, e.g.
+    // `Add`); a struct/enum must implement the corresponding operator trait
+    // (operator overloading), otherwise it is rejected here.
+    using K = HIRBinaryOp::OpKind;
+    bool isCmp    = node->opKind == K::Eq || node->opKind == K::Ne || node->opKind == K::Lt
+                 || node->opKind == K::Gt || node->opKind == K::Le || node->opKind == K::Ge;
+    bool isLogical = node->opKind == K::And || node->opKind == K::Or;
+    bool isBitwise = node->opKind == K::BitAnd || node->opKind == K::BitOr || node->opKind == K::BitXor
+                  || node->opKind == K::ShiftLeft || node->opKind == K::ShiftRight;
+
+    const char *opTrait = operatorTraitName(node->opKind);
+    const char *opMethod = operatorMethodName(node->opKind);
+
+    auto checkOperand = [&](const std::shared_ptr<Type> &ty) -> bool
+    {
+        if (!ty) return true;
+        if (auto p = std::dynamic_pointer_cast<PrimitiveType>(ty))
+        {
+            if (isLogical) return p->getPrimKind() == PrimitiveType::PrimKind::BOOL;
+            if (isBitwise) return p->isInteger();
+            // arithmetic + comparison: ints/floats; char (i32); bool only for ==/!=
+            if (p->isInteger() || p->isFloat()) return true;
+            if (isCmp)
+            {
+                auto pk = p->getPrimKind();
+                if (pk == PrimitiveType::PrimKind::CHAR) return true;
+                if (pk == PrimitiveType::PrimKind::BOOL
+                    && (node->opKind == K::Eq || node->opKind == K::Ne)) return true;
+            }
+            return false;
+        }
+        if (auto gp = std::dynamic_pointer_cast<GenericParamType>(ty))
+        {
+            if (isLogical) return false; // no Bool trait — require a concrete bool
+            // Either the broad Numeric/Integer marker or the specific operator
+            // trait bound (`T: Add`) qualifies the generic param.
+            if (gp->implementsTrait(isBitwise ? "Integer" : "Numeric")) return true;
+            if (opTrait && gp->implementsTrait(opTrait)) return true;
+            return false;
+        }
+        if (auto ct = std::dynamic_pointer_cast<CustomType>(ty))
+        {
+            // Operator overloading: a struct/enum implementing the operator
+            // trait (`impl Add for Vec2`) may use `+`. Logical ops never apply.
+            if (isLogical || !opTrait) return false;
+            return ct->implementsTrait(opTrait);
+        }
+        return false; // reference / function / other
+    };
+
+    std::string op = std::string("'") + node->opToString() + "'";
+    for (auto *operand : {node->left.get(), node->right.get()})
+    {
+        if (!checkOperand(operand->type))
+        {
+            if (auto p = std::dynamic_pointer_cast<PrimitiveType>(operand->type))
+            {
+                if (isLogical)
+                    log(*node, "operator " + op + " requires bool operands.");
+                else if (isBitwise)
+                    log(*node, "operator " + op + " requires integer operands.");
+                else
+                    log(*node, "operator " + op + " cannot be applied to type '" + operand->type->toString() + "'.");
+                (void)p;
+            }
+            else if (std::dynamic_pointer_cast<GenericParamType>(operand->type))
+            {
+                if (isLogical)
+                    log(*node, "operator " + op + " requires a concrete bool operand.");
+                else
+                {
+                    std::string need = isBitwise ? "Integer" : "Numeric";
+                    if (opTrait) need += std::string("' or '") + opTrait;
+                    log(*node, "operator " + op + " requires the generic parameter to have a '" + need + "' constraint.");
+                }
+            }
+            else
+            {
+                if (isLogical)
+                    log(*node, "operator " + op + " requires bool operands.");
+                else
+                {
+                    std::string msg = "operator " + op + " cannot be applied to type '" + operand->type->toString() + "'.";
+                    if (opTrait && std::dynamic_pointer_cast<CustomType>(operand->type))
+                        msg += " it does not implement the '" + std::string(opTrait) + "' trait.";
+                    log(*node, msg);
+                }
+            }
+        }
+    }
+
+    // ── Operator overloading ─────────────────────────────────────────────────
+    // `a + b` becomes `a.add(b)`. Both operands must be the same type and
+    // implement the operator trait; the resolved method's return type wins.
+    //   * CustomType operands  → direct `<Struct>::method` call.
+    //   * GenericParam operands (`fn f<T: Add> { a + b }`) → placeholder
+    //     `<T>::method` that monomorphization retargets to the concrete struct,
+    //     or falls back to a direct binary op for primitive instantiations.
+    bool operatorResolved = false;
+    if (opTrait && opMethod && !isLogical
+        && node->left->type && node->right->type
+        && node->left->type->equals(node->right->type))
+    {
+        if (auto ct = std::dynamic_pointer_cast<CustomType>(node->left->type))
+        {
+            if (ct->implementsTrait(opTrait))
+                operatorResolved = resolveOperatorMethod(node, ct, opMethod, opTrait);
+        }
+        else if (auto gp = std::dynamic_pointer_cast<GenericParamType>(node->left->type))
+        {
+            if (gp->implementsTrait(opTrait))
+                operatorResolved = resolveGenericOperatorMethod(node, gp, opMethod, opTrait);
+        }
+    }
+    if (operatorResolved)
+    {
+        // By-value `self`/`other` consume both operands (mirrors call args).
+        handleMoveSource(node->left.get(), *node);
+        handleMoveSource(node->right.get(), *node);
+        return;
+    }
 
     switch (node->opKind)
     {
@@ -2462,6 +3161,70 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handlePrintBuiltin(HIRCall *node, const std::string &name)
+{
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto f64Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+    auto charTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::CHAR);
+    auto i8PtrTy = context->typeContext->getReference(
+        context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+
+    std::shared_ptr<Type> argTy = nullptr;
+    size_t argCount = 1;
+    if (name == "print_str")      argTy = i8PtrTy;
+    else if (name == "print_int") argTy = i32Ty;
+    else if (name == "print_float") argTy = f64Ty;
+    else if (name == "print_bool") argTy = boolTy;
+    else if (name == "print_char") argTy = charTy;
+    else if (name == "println")   { argTy = nullptr; argCount = 0; }
+    else return false; // not a builtin print
+
+    if (node->args.size() != argCount)
+    {
+        log(*node, "builtin '" + name + "' expects " + std::to_string(argCount)
+            + " argument(s), got " + std::to_string(node->args.size()) + ".");
+    }
+
+    for (auto &arg : node->args)
+    {
+        analyzeExpr(arg.get());
+        if (argTy && arg->type && !arg->type->equals(argTy))
+            log(*arg, "builtin '" + name + "' expects an argument of type '"
+                + argTy->toString() + "', got '" + arg->type->toString() + "'.");
+    }
+
+    node->type = voidTy;
+    // A non-null (Copy) type so MIR's buildNameRef/makeTempPlace is safe.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = voidTy;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handleInputBuiltin(HIRCall *node, const std::string &name)
+{
+    std::shared_ptr<Type> retTy;
+    if (name == "read_line")
+        retTy = context->typeContext->getReference(
+            context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+    else if (name == "read_int")
+        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    else if (name == "read_f64")
+        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
+    else return false; // not an input builtin
+
+    if (!node->args.empty())
+        log(*node, "builtin '" + name + "' takes no arguments.");
+    node->type = retTy;
+    // A non-null type so MIR's buildNameRef/makeTempPlace is safe.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = retTy;
+    return true;
+}
+
 void HIRSemanticAnalyzer::visit(HIRCall *node)
 {
     switch (node->callKind)
@@ -2469,6 +3232,16 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
     // ---- Regular function call -------------------------------------------
     case HIRCall::CallKind::Regular:
     {
+        // Builtin print/input functions — recognized by name before the normal
+        // callee resolution (a NameRef to `print_int` has no symbol, so it would
+        // log "undefined identifier").
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        {
+            if (handlePrintBuiltin(node, nr->name))
+                return;
+            if (handleInputBuiltin(node, nr->name))
+                return;
+        }
         analyzeExpr(node->callee.get());
         auto funcType = std::dynamic_pointer_cast<FunctionType>(node->callee->type);
         if (!funcType)
@@ -2851,6 +3624,11 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         auto funcType = std::static_pointer_cast<FunctionType>(symbol->type);
 
         // ===================== 泛型参数推断与填充 =====================
+        // Mirror the Method branch: always carry the struct's concrete generic
+        // args (empty for a bare-name static call on a generic definition),
+        // appending the method's own args when the method is generic. Without
+        // this, a static call on a generic struct never reaches monomorphization.
+        std::vector<std::shared_ptr<Type>> structArgs = customTy->getGenericArgs();
         std::shared_ptr<FunctionType> instantiatedFuncType;
         if (funcType->isGeneric())
         {
@@ -2885,11 +3663,14 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 }
             }
 
-            node->typedGenericParams = genericArgs;
+            node->typedGenericParams = structArgs;
+            node->typedGenericParams.insert(node->typedGenericParams.end(),
+                                            genericArgs.begin(), genericArgs.end());
             instantiatedFuncType = instantiateGenericFunction(funcType, genericArgs);
         }
         else
         {
+            node->typedGenericParams = structArgs;
             instantiatedFuncType = funcType;
         }
 
@@ -3053,6 +3834,124 @@ void HIRSemanticAnalyzer::visit(HIRStructInit *node)
         if (mval->type && !mval->type->equals(fIt->type))
             log(*node, "type mismatch for field '" + mname + "': expected '" + fIt->type->toString() + "', got '" + mval->type->toString() + "'.");
     }
+}
+
+// ---------------------------------------------------------------------------
+void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
+{
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    auto *sym = SymbolTable::getInstance().lookupSymbol(node->enumName);
+    if (!sym || sym->kind != SymbolKind::Struct)
+    {
+        log(*node, "unknown enum '" + node->enumName + "'", E_UnknownVariant);
+        node->type = voidTy;
+        return;
+    }
+    auto enumTy = std::dynamic_pointer_cast<CustomType>(sym->type);
+    if (!enumTy || !enumTy->isEnum())
+    {
+        log(*node, "'" + node->enumName + "' is not an enum", E_UnknownVariant);
+        node->type = voidTy;
+        return;
+    }
+    node->enumSymbol = sym;
+
+    // Analyse all payload args up front so their types are available for inference.
+    for (auto &arg : node->args)
+        analyzeExpr(arg.get());
+
+    auto findVariant = [](const std::shared_ptr<CustomType> &ct, const std::string &name)
+        -> const CustomType::EnumVariantInfo *
+    {
+        for (const auto &v : ct->getVariants())
+            if (v.name == name) return &v;
+        return nullptr;
+    };
+
+    // The variant on the GENERIC enum (payload types still contain T) — used for
+    // generic-arg inference and to report unknown variants before instantiating.
+    const auto *genVariant = findVariant(enumTy, node->variantName);
+    if (!genVariant)
+    {
+        log(*node, "enum '" + node->enumName + "' has no variant '" + node->variantName + "'", E_UnknownVariant);
+        node->type = voidTy;
+        return;
+    }
+
+    std::shared_ptr<CustomType> finalEnumTy = enumTy;
+
+    if (enumTy->isGeneric())
+    {
+        std::vector<std::shared_ptr<Type>> typeArgs;
+
+        if (!node->genericArgs.empty())
+        {
+            for (auto &raw : node->genericArgs)
+                typeArgs.push_back(resolveType(raw, *node));
+        }
+        else
+        {
+            // Infer from the payload args: `option::some(5)` → T = i32.
+            std::unordered_map<std::string, std::shared_ptr<Type>> genericMap;
+            for (size_t i = 0; i < genVariant->payloadTypes.size() && i < node->args.size(); ++i)
+                if (node->args[i]->type)
+                    matchGenericType(genVariant->payloadTypes[i], node->args[i]->type, genericMap);
+            for (auto &gp : enumTy->getGenericParams())
+            {
+                auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
+                auto it = genericMap.find(gpTy->getParamName());
+                if (it == genericMap.end())
+                {
+                    // No payload args to infer T from (e.g. `option::none`). Leave
+                    // the value's type as the GENERIC enum so an enclosing context
+                    // (a `ret` with a declared instantiated type) can re-instantiate
+                    // it via expected-type inference.
+                    node->type = enumTy;
+                    return;
+                }
+                typeArgs.push_back(it->second);
+            }
+        }
+
+        if (typeArgs.size() != enumTy->getGenericParams().size())
+        {
+            log(*node, "generic argument count mismatch for enum '" + node->enumName + "'.");
+            node->type = voidTy;
+            return;
+        }
+
+        finalEnumTy = context->typeContext->instantiateCustom(enumTy, std::move(typeArgs));
+        node->typedGenericParams = finalEnumTy->getGenericArgs();
+    }
+
+    // Validate the payload against the INSTANTIATED variant types.
+    const auto *variant = findVariant(finalEnumTy, node->variantName);
+    if (!variant)
+    {
+        log(*node, "enum '" + node->enumName + "' has no variant '" + node->variantName + "'", E_UnknownVariant);
+        node->type = voidTy;
+        return;
+    }
+    if (variant->payloadTypes.size() != node->args.size())
+    {
+        log(*node, "variant '" + node->variantName + "' expects " + std::to_string(variant->payloadTypes.size())
+            + " payload argument(s), got " + std::to_string(node->args.size()), E_VariantArgMismatch);
+        node->type = voidTy;
+        return;
+    }
+    for (size_t i = 0; i < node->args.size(); ++i)
+    {
+        if (node->args[i]->type && !node->args[i]->type->equals(variant->payloadTypes[i]))
+            log(*node->args[i], "payload type mismatch for variant '" + node->variantName + "': expected '"
+                + variant->payloadTypes[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
+    }
+
+    // Non-Copy payload args are moved into the enum value.
+    for (auto &arg : node->args)
+        handleMoveSource(arg.get(), *node);
+
+    node->type = finalEnumTy;
 }
 
 // ---------------------------------------------------------------------------

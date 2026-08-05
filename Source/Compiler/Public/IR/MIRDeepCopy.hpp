@@ -163,7 +163,8 @@ inline MIRStmtCall copy(const MIRStmtCall &call)
         .callee = copy(call.callee),
         .funcName = copy(call.funcName),
         .args = copy(call.args),
-        .genericParams = copy(call.genericParams)};
+        .genericParams = copy(call.genericParams),
+        .genericOpFallback = copy(call.genericOpFallback)};
 }
 
 inline MIRStmtDrop copy(const MIRStmtDrop &d)

@@ -50,6 +50,8 @@ public:
     virtual void visit(ImportStmt *node) {}
     virtual void visit(MemberVarDef *node) override;
     virtual void visit(StructDef *node) override;
+    virtual void visit(EnumVariant *node) override;
+    virtual void visit(EnumDef *node) override;
     virtual void visit(Param *node) override;
     virtual void visit(SelfParam *node) override;
     virtual void visit(MemberFunctionDef *node) override;
@@ -68,12 +70,16 @@ public:
     virtual void visit(ExprStmt *node) override;
     virtual void visit(ForStmt *node) override;
     virtual void visit(WhileStmt *node) override;
+    virtual void visit(Pattern *node) override;
+    virtual void visit(MatchArm *node) override;
+    virtual void visit(MatchExpr *node) override;
 
     virtual void visit(LiteralExpr *node) override;
     virtual void visit(IdentifierExpr *node) override;
     virtual void visit(ModuleIdentifierExpr *node) {}
     virtual void visit(StructInitExpr *node) override;
     virtual void visit(StaticMemberCall *node);
+    virtual void visit(VariantInitExpr *node);
     virtual void visit(MemberFunctionCall *node);
     virtual void visit(FunctionCall *node) override;
     virtual void visit(MemberAccess *node) override;

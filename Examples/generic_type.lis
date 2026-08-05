@@ -31,7 +31,7 @@ fn value<T>(v: T)
     ret v;
 }
 
-fn max<T>(u: T, v: T)
+fn max<T: Numeric>(u: T, v: T)
 {
     if (u < v) {
         ret v;

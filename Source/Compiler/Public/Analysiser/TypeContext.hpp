@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,7 +35,7 @@ struct RefHash
 
 struct FuncHash
 {
-    std::size_t operator()(const std::pair<std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>> &p) const;
+    std::size_t operator()(const std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>> &p) const;
 };
 
 class TypeContext
@@ -124,7 +125,11 @@ public:
 private:
     std::unordered_map<PrimitiveType::PrimKind, std::shared_ptr<PrimitiveType>> primitives;
     std::unordered_map<std::string, std::shared_ptr<CustomType>> customs;
-    std::unordered_map<std::pair<std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>>, std::shared_ptr<FunctionType>, FuncHash> functions;
+    // Key = (genericParams, params, returnType). getFunction uses an empty
+    // genericParams vector, so a generic and a non-generic function with the
+    // same signature never collide (and two generic functions with different
+    // generic-param lists don't alias either).
+    std::unordered_map<std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>>, std::shared_ptr<FunctionType>, FuncHash> functions;
     std::unordered_map<std::pair<void *, bool>, std::shared_ptr<ReferenceType>, RefHash> refCache;
     std::unordered_map<std::string, std::shared_ptr<TraitType>> traits;
     std::unordered_map<std::string, std::shared_ptr<SelfType>> selfs;

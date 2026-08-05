@@ -211,6 +211,17 @@ public:
         }
     }
 
+    void visit(HIRVariantInit *node)
+    {
+        printCommon(node);
+        os << " variant_init: \033[38;5;2m" << node->variantName << "\033[0m"
+           << " args_count: " << node->args.size();
+        if (node->enumSymbol)
+        {
+            os << " enum_symbol: " << detail::formatAddress(node->enumSymbol);
+        }
+    }
+
     void visit(HIRStmt *node)
     {
         printCommon(node);
@@ -247,6 +258,12 @@ public:
     {
         printCommon(node);
         os << " [IfStmt]";
+    }
+
+    void visit(HIRMatch *node)
+    {
+        printCommon(node);
+        os << " [MatchStmt] arms_count: " << node->arms.size();
     }
 
     void visit(HIRLoop *node)
@@ -302,6 +319,17 @@ public:
         if (node->structSymbol)
         {
             os << " symbol: " << detail::formatAddress(node->structSymbol);
+        }
+    }
+
+    void visit(HIREnum *node)
+    {
+        printCommon(node);
+        os << " enum: \033[38;5;2m'" << node->name << "'\033[0m"
+           << " variants_count: " << node->variants.size();
+        if (node->enumSymbol)
+        {
+            os << " symbol: " << detail::formatAddress(node->enumSymbol);
         }
     }
 
@@ -372,6 +400,8 @@ public:
             visit(e);
         else if (auto e = dynamic_cast<HIRStructInit *>(node))
             visit(e);
+        else if (auto e = dynamic_cast<HIRVariantInit *>(node))
+            visit(e);
         else if (auto s = dynamic_cast<HIRBlock *>(node))
             visit(s);
         else if (auto s = dynamic_cast<HIRVarDecl *>(node))
@@ -379,6 +409,8 @@ public:
         else if (auto s = dynamic_cast<HIRAssign *>(node))
             visit(s);
         else if (auto s = dynamic_cast<HIRIf *>(node))
+            visit(s);
+        else if (auto s = dynamic_cast<HIRMatch *>(node))
             visit(s);
         else if (auto s = dynamic_cast<HIRLoop *>(node))
             visit(s);
@@ -394,6 +426,8 @@ public:
             visit(f);
         else if (auto s = dynamic_cast<HIRStruct *>(node))
             visit(s);
+        else if (auto e = dynamic_cast<HIREnum *>(node))
+            visit(e);
         else if (auto t = dynamic_cast<HIRTrait *>(node))
             visit(t);
         else if (auto i = dynamic_cast<HIRImpl *>(node))
@@ -451,6 +485,18 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
             children.push_back(expr.get());
         }
     }
+    else if (auto e = dynamic_cast<HIRVariantInit *>(node))
+    {
+        for (auto &arg : e->args)
+        {
+            children.push_back(arg.get());
+        }
+    }
+    else if (auto e = dynamic_cast<HIREnum *>(node))
+    {
+        // Variants carry no child nodes worth printing (raw payload types only).
+        (void)e;
+    }
     else if (auto s = dynamic_cast<HIRBlock *>(node))
     {
         for (auto &stmt : s->stmts)
@@ -472,6 +518,12 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
         if (s->cond) children.push_back(s->cond.get());
         if (s->thenBlock) children.push_back(s->thenBlock.get());
         if (s->elseBlock) children.push_back((*s->elseBlock).get());
+    }
+    else if (auto s = dynamic_cast<HIRMatch *>(node))
+    {
+        if (s->scrutinee) children.push_back(s->scrutinee.get());
+        for (auto &arm : s->arms)
+            if (arm.body) children.push_back(arm.body.get());
     }
     else if (auto s = dynamic_cast<HIRLoop *>(node))
     {

@@ -171,6 +171,34 @@ private:
     llvm::Function *getOrDeclareFn(const std::string &name);
     std::string mangleName(const MIRFunction &fn) const;
 
+    /// Builtin print: declare `printf(i32(ptr, ...))` once.
+    llvm::Function *getOrDeclarePrintf();
+    /// Lower a builtin print call (`print_str/int/float/bool/char`, `println`) to
+    /// a libc printf call.
+    void emitPrintCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    /// True if `name` is a builtin print function.
+    bool isPrintBuiltin(const std::string &name);
+
+    /// Builtin input: declare the libc functions used by the read builtins
+    /// (`fgets`/`strcspn`/`atoi`/`strtod`) and the stdin FILE* source once.
+    llvm::Function *getOrDeclareFgets();
+    llvm::Function *getOrDeclareStrCspn();
+    llvm::Function *getOrDeclareAtoi();
+    llvm::Function *getOrDeclareStrtod();
+    /// MinGW/UCRT defines `stdin` as `__acrt_iob_func(0)` (a function, not a
+    /// global) — get the FILE* through it there; fall back to the `@stdin`
+    /// external global on other libcs.
+    llvm::Function *getOrDeclareAcrtIobFunc();
+    llvm::GlobalVariable *getOrDeclareStdin();
+    /// The shared 256-byte input buffer (`read_line`/`read_int`/`read_f64`
+    /// read here; each call overwrites the previous line).
+    llvm::GlobalVariable *getOrCreateInputBuf();
+    /// Lower a builtin input call (`read_line` → &i8, `read_int` → i32,
+    /// `read_f64` → f64) to libc fgets + parse.
+    void emitInputCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    /// True if `name` is a builtin input function.
+    bool isInputBuiltin(const std::string &name);
+
     /// Emit a single alloca at the entry block for a given local.
     llvm::AllocaInst *emitEntryAlloca(llvm::Function *fn,
         llvm::Type *ty,

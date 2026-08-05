@@ -117,6 +117,7 @@ private:
     void buildVarDecl(HIRVarDecl *decl);
     void buildAssign(HIRAssign *assign);
     void buildIf(HIRIf *ifStmt);
+    MIRPlace buildMatch(HIRMatch *match);
     void buildLoop(HIRLoop *loop);
     void buildReturn(HIRReturn *ret);
     void buildBreak(HIRBreak *brk);
@@ -157,6 +158,7 @@ private:
     MIRPlace buildCall(HIRCall *call);
     MIRPlace buildMemberAccess(HIRMemberAccess *ma);
     MIRPlace buildStructInit(HIRStructInit *si);
+    MIRPlace buildVariantInit(HIRVariantInit *vi);
     MIRPlace buildRef(HIRRef *ref);
 
     // ── operand helpers ───────────────────────────────────────────────────────

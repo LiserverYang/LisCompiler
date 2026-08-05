@@ -136,6 +136,41 @@ public:
     std::unique_ptr<HIRExpr> left;
     std::unique_ptr<HIRExpr> right;
     OpKind opKind;
+
+    // ── operator overloading ──────────────────────────────────────────────
+    /// Filled by sema when both operands are a struct/enum implementing the
+    /// operator trait (`a + b` → `a.add(b)`). When non-null, MIRBuilder emits a
+    /// call instead of an LLVM binary op.
+    Symbol *operatorMethod = nullptr;                  // resolved method symbol
+    std::shared_ptr<FunctionType> operatorMethodType;  // instantiated signature
+    std::string operatorMethodName;                    // "<Struct>::add" (mono-ready)
+    std::vector<std::shared_ptr<Type>> operatorStructArgs; // struct generic args
+    /// The operator's source symbol (for diagnostics), e.g. "<".
+    const char *opToString() const
+    {
+        switch (opKind)
+        {
+        case OpKind::Add: return "+";
+        case OpKind::Sub: return "-";
+        case OpKind::Mul: return "*";
+        case OpKind::Div: return "/";
+        case OpKind::Mod: return "%";
+        case OpKind::Eq: return "==";
+        case OpKind::Ne: return "!=";
+        case OpKind::Lt: return "<";
+        case OpKind::Gt: return ">";
+        case OpKind::Le: return "<=";
+        case OpKind::Ge: return ">=";
+        case OpKind::And: return "&&";
+        case OpKind::Or: return "||";
+        case OpKind::BitAnd: return "&";
+        case OpKind::BitOr: return "|";
+        case OpKind::BitXor: return "^";
+        case OpKind::ShiftLeft: return "<<";
+        case OpKind::ShiftRight: return ">>";
+        }
+        return "?";
+    }
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
@@ -219,6 +254,23 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+/// Construction of an enum variant: `option::some(5)` / unit `color::red`.
+class HIRVariantInit : public HIRExpr
+{
+public:
+    std::string enumName;           // raw enum name — set by HIRBuilder
+    std::string variantName;
+    Symbol *enumSymbol = nullptr;   // filled by HIRSemanticAnalyzer
+    std::vector<std::unique_ptr<HIRExpr>> args;
+    std::vector<HIRRawType> genericArgs;
+    std::vector<std::shared_ptr<Type>> typedGenericParams;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
 class HIRRef : public HIRExpr
 {
 public:
@@ -279,6 +331,27 @@ public:
     std::unique_ptr<HIRExpr> cond;
     std::unique_ptr<HIRBlock> thenBlock;
     std::optional<std::unique_ptr<HIRBlock>> elseBlock;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
+class HIRMatch : public HIRExpr
+{
+public:
+    struct Arm
+    {
+        std::string variantName;                     // "" for a wildcard arm
+        bool isWildcard = false;
+        std::vector<std::pair<std::string, std::shared_ptr<Type>>> bindings; // name + payload type (filled by sema)
+        std::unique_ptr<HIRBlock> body;              // block arm (void)
+        std::unique_ptr<HIRExpr> tailValue;          // expression arm (value)
+    };
+
+    std::unique_ptr<HIRExpr> scrutinee;
+    std::vector<Arm> arms;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
@@ -405,6 +478,30 @@ public:
     std::vector<std::shared_ptr<GenericParamType>> gParams;
     std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
     Symbol *structSymbol = nullptr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
+class HIREnum : public HIRNode
+{
+public:
+    struct Variant
+    {
+        std::string name;
+        std::vector<HIRRawType> payloadRawTypes;   // set by HIRBuilder
+        std::vector<std::shared_ptr<Type>> payloadTypes; // filled by sema
+    };
+
+    std::string name;
+    std::vector<Variant> variants;
+    bool isGeneric = false;
+
+    std::vector<std::shared_ptr<GenericParamType>> gParams;
+    std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
+    Symbol *enumSymbol = nullptr;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);

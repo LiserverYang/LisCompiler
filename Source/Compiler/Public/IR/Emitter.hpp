@@ -35,6 +35,9 @@ public:
 
         // Run mem2reg + a basic optimisation pipeline before emitting.
         bool runOptimiser = true;
+
+        // Where to write the object file. Defaults to the current directory.
+        std::string outPath = "./a.o";
     };
 
     /// Emit an object file from the given module.

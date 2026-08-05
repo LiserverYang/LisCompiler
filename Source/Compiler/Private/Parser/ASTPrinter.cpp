@@ -146,6 +146,18 @@ void ASTPrinter::visit(StructDef *node)
     os << " struct \033[38;5;2m" << node->name << "\033[0m";
 }
 
+void ASTPrinter::visit(EnumVariant *node)
+{
+    printCommon(node);
+    os << " variant \033[38;5;2m" << node->name << "\033[0m";
+}
+
+void ASTPrinter::visit(EnumDef *node)
+{
+    printCommon(node);
+    os << " enum \033[38;5;2m" << node->name << "\033[0m";
+}
+
 void ASTPrinter::visit(Param *node)
 {
     printCommon(node);
@@ -308,6 +320,24 @@ void ASTPrinter::visit(WhileStmt *node)
     os << " [WhileStmt]";
 }
 
+void ASTPrinter::visit(Pattern *node)
+{
+    printCommon(node);
+    os << " pattern: " << (node->isWildcard ? "_" : node->variantName);
+}
+
+void ASTPrinter::visit(MatchArm *node)
+{
+    printCommon(node);
+    os << " [MatchArm]";
+}
+
+void ASTPrinter::visit(MatchExpr *node)
+{
+    printCommon(node);
+    os << " [MatchExpr]";
+}
+
 void ASTPrinter::visit(LiteralExpr *node)
 {
     printCommon(node);
@@ -357,6 +387,12 @@ void ASTPrinter::visit(StaticMemberCall *node)
 {
     printCommon(node);
     os << " static_call: " << node->methodName;
+}
+
+void ASTPrinter::visit(VariantInitExpr *node)
+{
+    printCommon(node);
+    os << " variant_init: " << node->variantName;
 }
 
 void ASTPrinter::visit(MemberFunctionCall *node)
@@ -444,6 +480,13 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
         for (auto &member : sd->members)
         {
             children.push_back(member.get());
+        }
+    }
+    else if (auto ed = dynamic_cast<EnumDef *>(node))
+    {
+        for (auto &variant : ed->variants)
+        {
+            children.push_back(variant.get());
         }
     }
     else if (auto mf = dynamic_cast<MemberFunctionDef *>(node))
@@ -555,12 +598,36 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
         if (ws->body)
             children.push_back(ws->body.get());
     }
+    else if (auto ms = dynamic_cast<MatchExpr *>(node))
+    {
+        if (ms->scrutinee)
+            children.push_back(ms->scrutinee.get());
+        for (auto &arm : ms->arms)
+            children.push_back(arm.get());
+    }
+    else if (auto ma = dynamic_cast<MatchArm *>(node))
+    {
+        if (ma->pattern)
+            children.push_back(ma->pattern.get());
+        if (ma->body)
+            children.push_back(ma->body.get());
+        if (ma->tailValue)
+            children.push_back(ma->tailValue.get());
+    }
     else if (auto si = dynamic_cast<StructInitExpr *>(node))
     {
         children.push_back(si->structType.get());
         for (auto &[name, expr] : si->memberInits)
         {
             children.push_back(expr.get());
+        }
+    }
+    else if (auto vie = dynamic_cast<VariantInitExpr *>(node))
+    {
+        children.push_back(vie->enumType.get());
+        for (auto &arg : vie->arguments)
+        {
+            children.push_back(arg.get());
         }
     }
     else if (auto smc = dynamic_cast<StaticMemberCall *>(node))

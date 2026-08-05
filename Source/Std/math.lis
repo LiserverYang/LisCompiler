@@ -1,0 +1,239 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// math.lis — numeric helpers + the operator-overload traits.
+//
+// The trait section defines the builtin operator traits. Primitives
+// auto-implement them (the compiler seeds them when the trait is declared), so
+// a generic `fn min<T: Numeric>` accepts i32/f64 and rejects structs; a struct
+// opts in by implementing the specific operator trait (`impl Add for Vec2`).
+//
+//     - Numeric / Integer : marker traits for generic numeric bounds.
+//     - Add ... Rem        : arithmetic,  `a + b` → `a.add(b)`.
+//     - PartialEq/PartialOrd : `==` / `<`, return bool.
+//     - BitAnd ... Shr     : bitwise / shifts.
+//
+// The function section provides generic min/max/clamp (monomorphized per use
+// site) plus integer helpers (gcd/lcm/ipow/...). abs/fabs are specialised to
+// i32/f64 because the language has no unary negation — `0 - x` needs a concrete
+// literal type.
+
+// Marker trait: a numeric type (ints + floats + char). Primitives implement it
+// automatically; structs cannot (it is primitives-only). Use as a generic
+// bound for "any number": `fn clamp<T: Numeric>(...)`.
+trait Numeric
+{
+}
+
+// Marker trait: an integer type (i8/i16/i32/i64). Primitives implement it
+// automatically; floats and structs do not. Use for bitwise/shift generics.
+trait Integer
+{
+}
+
+// Arithmetic: `+ - * / %`. A struct implementing `Add` gets `a + b` lowered to
+// `a.add(b)`. Primitives auto-implement all of these.
+trait Add
+{
+    fn add(self, other: Self) -> Self;
+}
+
+trait Sub
+{
+    fn sub(self, other: Self) -> Self;
+}
+
+trait Mul
+{
+    fn mul(self, other: Self) -> Self;
+}
+
+trait Div
+{
+    fn div(self, other: Self) -> Self;
+}
+
+trait Rem
+{
+    fn rem(self, other: Self) -> Self;
+}
+
+// Equality: `==` (`eq`) and `!=` (`ne`), returning bool.
+trait PartialEq
+{
+    fn eq(self, other: Self) -> bool;
+    fn ne(self, other: Self) -> bool;
+}
+
+// Ordering: `< > <= >=`, returning bool.
+trait PartialOrd
+{
+    fn lt(self, other: Self) -> bool;
+    fn gt(self, other: Self) -> bool;
+    fn le(self, other: Self) -> bool;
+    fn ge(self, other: Self) -> bool;
+}
+
+// Bitwise: `& | ^`. Primitives (ints) auto-implement these.
+trait BitAnd
+{
+    fn bitand(self, other: Self) -> Self;
+}
+
+trait BitOr
+{
+    fn bitor(self, other: Self) -> Self;
+}
+
+trait BitXor
+{
+    fn bitxor(self, other: Self) -> Self;
+}
+
+// Shifts: `<<` and `>>` (arithmetic shift for signed ints).
+trait Shl
+{
+    fn shl(self, other: Self) -> Self;
+}
+
+trait Shr
+{
+    fn shr(self, other: Self) -> Self;
+}
+
+// The smaller of `a` and `b`. Generic over any numeric type (`T: Numeric`).
+fn min<T: Numeric>(a: T, b: T) -> T
+{
+    if a < b {
+        ret a;
+    }
+    ret b;
+}
+
+// The larger of `a` and `b`. Generic over any numeric type.
+fn max<T: Numeric>(a: T, b: T) -> T
+{
+    if a > b {
+        ret a;
+    }
+    ret b;
+}
+
+// Clamp `x` into the inclusive range [`lo`, `hi`]: `lo` if `x < lo`, `hi` if
+// `x > hi`, else `x`. Generic over any numeric type.
+fn clamp<T: Numeric>(x: T, lo: T, hi: T) -> T
+{
+    if x < lo {
+        ret lo;
+    }
+    if x > hi {
+        ret hi;
+    }
+    ret x;
+}
+
+// Absolute value of an i32 (`0 - x`, since the language has no unary minus).
+fn abs(x: i32) -> i32
+{
+    if x < 0 {
+        ret 0 - x;
+    }
+    ret x;
+}
+
+// Absolute value of an f64.
+fn fabs(x: f64) -> f64
+{
+    if x < 0.0 {
+        ret 0.0 - x;
+    }
+    ret x;
+}
+
+// Greatest common divisor of two i32s (Euclidean algorithm); always
+// non-negative. `gcd(0, b) == b`.
+//
+//     gcd(12, 18)  // 6
+fn gcd(a: i32, b: i32) -> i32
+{
+    let mut x = a;
+    let mut y = b;
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    if x < 0 {
+        ret 0 - x;
+    }
+    ret x;
+}
+
+// Least common multiple of two i32s; `0` if either is `0`. May overflow for
+// large inputs (`(a / gcd) * b`).
+//
+//     lcm(4, 6)  // 12
+fn lcm(a: i32, b: i32) -> i32
+{
+    if (a == 0) || (b == 0) {
+        ret 0;
+    }
+    ret (a / gcd(a, b)) * b;
+}
+
+// Integer power `base ^ exp` (repeated multiplication). `exp` must be
+// non-negative; `ipow(b, 0) == 1`. May overflow for large values.
+//
+//     ipow(2, 10)  // 1024
+fn ipow(base: i32, exp: i32) -> i32
+{
+    let mut acc = 1;
+    let mut k = 0;
+    while k < exp {
+        acc = acc * base;
+        k = k + 1;
+    }
+    ret acc;
+}
+
+// True if `x` is divisible by 2. Correct for negative `x` too.
+fn is_even(x: i32) -> bool
+{
+    ret (x % 2) == 0;
+}
+
+// True if `x` is not divisible by 2 (uses `!= 0`, so negatives count as odd).
+fn is_odd(x: i32) -> bool
+{
+    ret (x % 2) != 0;
+}
+
+// Sign of `x`: `-1` for negative, `1` for positive, `0` for zero.
+fn sign(x: i32) -> i32
+{
+    if x < 0 {
+        ret 0 - 1;
+    }
+    if x > 0 {
+        ret 1;
+    }
+    ret 0;
+}
+
+// Degrees → radians (`x * π/180`). For use with f64 trig later.
+fn deg_to_rad(x: f64) -> f64
+{
+    ret x * 0.017453292519943295;
+}
+
+// Radians → degrees (`x * 180/π`).
+fn rad_to_deg(x: f64) -> f64
+{
+    ret x * 57.29577951308232;
+}
+
+// Linear interpolation between `a` and `b` by factor `t` (0.0 → `a`, 1.0 → `b`).
+fn lerp(a: f64, b: f64, t: f64) -> f64
+{
+    ret a + (b - a) * t;
+}

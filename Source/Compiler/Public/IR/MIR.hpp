@@ -172,6 +172,12 @@ struct MIRStmtCall
     std::string funcName;         // for debug / direct calls
     std::vector<MIROperand> args;
     std::vector<std::shared_ptr<Type>> genericParams;
+
+    // Operator overloading on a generic param (`fn f<T: Add> { a + b }`): the
+    // callee is the placeholder `<T>::method`. Monomorphization retargets it to
+    // the concrete struct method; if the concrete type is a PRIMITIVE (no
+    // method), it converts this call back into a direct binary op using `op`.
+    std::optional<MIRRValueBinaryOp::Op> genericOpFallback;
 };
 
 struct MIRStmtDrop

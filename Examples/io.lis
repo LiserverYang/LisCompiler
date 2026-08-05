@@ -1,0 +1,35 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// io.lis — standard input (compiler builtins) + stdlib breadth helpers.
+//
+// read_line() reads a line (stripped of its trailing newline) into a shared
+// input buffer and returns &i8; read_int() / read_f64() parse a line into
+// i32 / f64. Each read overwrites the shared buffer, so a read_line() result
+// is only valid until the next read. Run with piped input:
+//     echo "7
+// hello" | lisc io.lis
+
+fn main() -> i32
+{
+    print_str("enter a number: ");
+    let n = read_int();
+    print_str("double it: ");
+    print_int(n * 2);
+    println();
+
+    print_str("say something: ");
+    let line = read_line();
+    print_str("echo: ");
+    print_str(line);
+    println();
+
+    print_str("is_digit('5')=");
+    print_bool(is_digit('5'));
+    println();
+    print_str("gcd(12,18)=");
+    print_int(gcd(12, 18));
+    println();
+
+    ret 0;
+}

@@ -236,9 +236,7 @@ void Emitter::run()
     initLLVMTargets();
     initTargetMachine();
 
-    std::string targetPath = "./a.o";
-
     runOptPipeline(*context->module.get());
 
-    emitObjectFile(*context->module.get(), targetPath);
+    emitObjectFile(*context->module.get(), opts_.outPath);
 }

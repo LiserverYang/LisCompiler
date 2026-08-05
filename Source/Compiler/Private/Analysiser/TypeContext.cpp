@@ -33,11 +33,12 @@ std::size_t RefHash::operator()(const std::pair<void *, bool> &p) const
     return h1 ^ (h2 << 1);
 }
 
-std::size_t FuncHash::operator()(const std::pair<std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>> &p) const
+std::size_t FuncHash::operator()(const std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>> &p) const
 {
-    auto h1 = std::hash<std::vector<std::shared_ptr<Type>>>{}(p.first);
-    auto h2 = std::hash<std::shared_ptr<Type>>{}(p.second);
-    return h1 ^ (h2 << 1);
+    auto h1 = std::hash<std::vector<std::shared_ptr<Type>>>{}(std::get<0>(p));
+    auto h2 = std::hash<std::vector<std::shared_ptr<Type>>>{}(std::get<1>(p));
+    auto h3 = std::hash<std::shared_ptr<Type>>{}(std::get<2>(p));
+    return h1 ^ (h2 << 1) ^ (h3 << 2);
 }
 
 TypeContext::TypeContext()
@@ -125,7 +126,9 @@ std::optional<std::shared_ptr<CustomType>> TypeContext::getCustom(std::string na
 
 std::shared_ptr<FunctionType> TypeContext::getFunction(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType)
 {
-    auto key = std::make_pair(params, returnType);
+    // Non-generic key: empty genericParams, so it never aliases a generic
+    // function with the same signature.
+    auto key = std::make_tuple(std::vector<std::shared_ptr<Type>>{}, params, returnType);
     auto it = functions.find(key);
     if (it != functions.end())
     {
@@ -218,7 +221,10 @@ std::shared_ptr<FunctionType> TypeContext::getGenericFunction(
     std::vector<std::shared_ptr<Type>> params,
     std::shared_ptr<Type> returnType)
 {
-    auto key = std::make_pair(params, returnType);
+    auto key = std::make_tuple(
+        std::vector<std::shared_ptr<Type>>(genericParams.begin(), genericParams.end()),
+        params,
+        returnType);
     auto it = functions.find(key);
 
     if (it != functions.end())
@@ -306,8 +312,8 @@ void TypeContext::printTypeTable() const
         for (const auto &[key, type] : functions)
         {
             std::cout << "  " << std::setw(40) << std::left << type->toString()
-                      << " | Param Count: " << key.first.size()
-                      << " | Return Type: " << key.second->toString() << std::endl;
+                      << " | Param Count: " << std::get<1>(key).size()
+                      << " | Return Type: " << std::get<2>(key)->toString() << std::endl;
         }
     }
 
@@ -512,12 +518,24 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
     for (auto &f : generic->getFields())
         newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst)});
 
+    // Substitute enum variant payload types too (empty for plain structs).
+    std::vector<CustomType::EnumVariantInfo> newVariants;
+    for (auto &v : generic->getVariants())
+    {
+        CustomType::EnumVariantInfo nv;
+        nv.name = v.name;
+        for (auto &pt : v.payloadTypes)
+            nv.payloadTypes.push_back(substitute(pt, subst));
+        newVariants.push_back(std::move(nv));
+    }
+
     auto inst = std::make_shared<CustomType>(mangled,
         std::vector<std::shared_ptr<Type>>{},
         std::move(newFields));
 
     inst->setGenericArgs(std::move(args));
     inst->genericOrigin = generic;
+    inst->setVariants(std::move(newVariants));
     reSyncImplTrait(inst.get(), generic, subst);
 
     if (concrete)
@@ -537,6 +555,19 @@ void TypeContext::reSyncFields(CustomType *inst, const std::shared_ptr<CustomTyp
     for (auto &f : generic->getFields())
         newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst)});
     inst->setFields(std::move(newFields));
+
+    // Re-sync enum variant payload types too (a cached instance created while
+    // the origin was an empty shell needs its variants re-derived).
+    std::vector<CustomType::EnumVariantInfo> newVariants;
+    for (auto &v : generic->getVariants())
+    {
+        CustomType::EnumVariantInfo nv;
+        nv.name = v.name;
+        for (auto &pt : v.payloadTypes)
+            nv.payloadTypes.push_back(substitute(pt, subst));
+        newVariants.push_back(std::move(nv));
+    }
+    inst->setVariants(std::move(newVariants));
 }
 
 void TypeContext::reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic,
