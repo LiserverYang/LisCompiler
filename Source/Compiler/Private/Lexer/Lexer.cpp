@@ -11,6 +11,10 @@
 
 void Lexer::run()
 {
+    // Count lexing errors from THIS file (the Parser's error-count gate then
+    // sees both lexer and parser errors — a lexer error must not compile).
+    Logger::ResetErrorCount();
+
     TokenStream &tokens = context->tokenStream;
     std::string &source = context->fileValue;
 
@@ -153,7 +157,10 @@ void Lexer::skipBlockComment()
 
         index++; // move to next character
     }
-    // note: Unclosed block comments handled by reaching EOF
+
+    // Reached EOF without a closing "*/" — report it instead of failing silently.
+    Logger::Log(Logger::LogLevel::ERROR,
+        {&source, context->filePath, "Unclosed block comment", line, column - 1, 1, lineStart, E_UnclosedBlockComment});
 }
 
 // tokenizes string literals ("...")
@@ -491,6 +498,7 @@ single_char:
     case '-': token.code = TokenCode::MINUS; break;
     case '*': token.code = TokenCode::STAR; break;
     case '/': token.code = TokenCode::SLASH; break;
+    case '%': token.code = TokenCode::MOD; break;
     case '<': token.code = TokenCode::LT; break;
     case '>': token.code = TokenCode::GT; break;
     case '=': token.code = TokenCode::ASSIGN; break;

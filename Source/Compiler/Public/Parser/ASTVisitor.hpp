@@ -21,6 +21,8 @@ class GlobalVarDef;
 class CompoundStmt;
 class IfStmt;
 class ReturnStmt;
+class BreakStmt;
+class ContinueStmt;
 class DeclStmt;
 class AssignStmt;
 class ExprStmt;
@@ -66,6 +68,8 @@ public:
     virtual void visit(CompoundStmt *node) = 0;
     virtual void visit(IfStmt *node) = 0;
     virtual void visit(ReturnStmt *node) = 0;
+    virtual void visit(BreakStmt *node) = 0;
+    virtual void visit(ContinueStmt *node) = 0;
     virtual void visit(DeclStmt *node) = 0;
     virtual void visit(AssignStmt *node) = 0;
     virtual void visit(ExprStmt *node) = 0;

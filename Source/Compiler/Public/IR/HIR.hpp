@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,6 +33,13 @@ struct HIRRawType
     bool isPrimitive = true; // false = custom / struct type
 
     std::vector<HIRRawType> genericArgs;
+};
+
+/** A trait bound on a generic param, with optional concrete args. */
+struct HIRGenericConstraint
+{
+    std::string traitName;
+    std::vector<HIRRawType> args;
 };
 
 // ---------------------------------------------------------------------------
@@ -318,6 +326,26 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+class HIRBreak : public HIRStmt
+{
+public:
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
+class HIRContinue : public HIRStmt
+{
+public:
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
 class HIRFunction : public HIRNode
 {
 public:
@@ -337,7 +365,7 @@ public:
     // Resolved — filled by HIRSemanticAnalyzer
     std::vector<std::pair<std::string, std::shared_ptr<Type>>> params;
     std::vector<std::shared_ptr<GenericParamType>> gParams;
-    std::unordered_map<std::string, std::vector<std::string>> unsolveConstraints;
+    std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
     std::shared_ptr<Type> returnType;
     std::shared_ptr<Type> type;
 
@@ -375,7 +403,7 @@ public:
     bool isGeneric;
 
     std::vector<std::shared_ptr<GenericParamType>> gParams;
-    std::unordered_map<std::string, std::vector<std::string>> unsolveConstraints;
+    std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
     Symbol *structSymbol = nullptr;
     void accept(HIRVisitor *visitor) override
     {
@@ -388,6 +416,9 @@ class HIRTrait : public HIRNode
 {
 public:
     std::string name;
+    bool isGeneric = false;
+    std::vector<std::shared_ptr<GenericParamType>> gParams;
+    std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
     std::vector<std::unique_ptr<HIRFunction>> methods;
     Symbol *traitSymbol = nullptr;
     void accept(HIRVisitor *visitor) override
@@ -404,7 +435,8 @@ public:
     std::optional<std::string> traitName;
     std::vector<std::unique_ptr<HIRFunction>> methods;
     std::vector<std::shared_ptr<GenericParamType>> gParams;
-    std::unordered_map<std::string, std::vector<std::string>> unsolveConstraints;
+    std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
+    std::vector<HIRRawType> traitGenericArgs;
     std::vector<HIRRawType> structGenericArgs;
     void accept(HIRVisitor *visitor) override
     {

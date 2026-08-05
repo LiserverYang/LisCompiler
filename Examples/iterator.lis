@@ -1,0 +1,50 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// iterator.lis — demonstrates the Iterator protocol and for-loops with a custom
+// iterator type. Everything here COMPILES.
+
+struct Countdown
+{
+    pub start: i32,
+    pub current: i32
+}
+
+impl Countdown
+{
+    fn new(n: i32) -> Countdown
+    {
+        ret Countdown { start: n, current: n };
+    }
+}
+
+// Implement the Iterator<i32> protocol: next() returns Option<i32>, None when
+// exhausted. A for-loop desugars to repeatedly calling next().
+impl Iterator<i32> for Countdown
+{
+    fn next(self: &mut Self) -> Option<i32>
+    {
+        if self.current > 0 {
+            let v = self.current;
+            self.current = self.current - 1;
+            ret Option { is_some: true, value: v };
+        }
+        ret Option { is_some: false, value: 0 };
+    }
+}
+
+fn main() -> i32
+{
+    // for-loop over our custom iterator (3, 2, 1).
+    let mut total = 0;
+    for x in Countdown::new(3) {
+        total = total + x;
+    }
+
+    // The stdlib helpers work on any Iterator<i32>.
+    let s = sum(Countdown::new(4)); // 4 + 3 + 2 + 1
+    let c = count(Countdown::new(2)); // 2
+    let f = first(Countdown::new(5)); // Option{is_some:true, value:5}
+
+    ret total + s + c + f.value;
+}

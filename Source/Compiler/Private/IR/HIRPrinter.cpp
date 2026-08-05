@@ -261,6 +261,18 @@ public:
         os << " [ReturnStmt]" << (node->value ? "" : " (void)");
     }
 
+    void visit(HIRBreak *node)
+    {
+        printCommon(node);
+        os << " [BreakStmt]";
+    }
+
+    void visit(HIRContinue *node)
+    {
+        printCommon(node);
+        os << " [ContinueStmt]";
+    }
+
     void visit(HIRExprStmt *node)
     {
         printCommon(node);
@@ -371,6 +383,10 @@ public:
         else if (auto s = dynamic_cast<HIRLoop *>(node))
             visit(s);
         else if (auto s = dynamic_cast<HIRReturn *>(node))
+            visit(s);
+        else if (auto s = dynamic_cast<HIRBreak *>(node))
+            visit(s);
+        else if (auto s = dynamic_cast<HIRContinue *>(node))
             visit(s);
         else if (auto s = dynamic_cast<HIRExprStmt *>(node))
             visit(s);

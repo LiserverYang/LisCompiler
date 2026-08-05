@@ -42,7 +42,13 @@ public:
     void buildFunctionMap();
     void collection(MIRFunction *func);
 
-    std::string makeMonoFuncName(const std::string &baseName, const std::vector<std::shared_ptr<Type>> &args);
+    /// Queue monomorphization of the `drop` method for every generic struct
+    /// instantiation that implements the Drop trait. The drop glue is generated
+    /// at the LLVM level (after mono), so nothing at a call site ever triggers
+    /// it — this is the only place the drop method gets monomorphized.
+    void seedDropMethods();
+
+    static std::string makeMonoFuncName(const std::string &baseName, const std::vector<std::shared_ptr<Type>> &args);
     void rewriteFunctionBody(MIRBody &body, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable);
     void rewriteStatement(MIRStatement &stmt, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable);
     void rewriteRValue(MIRRValue &rvalue, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable);

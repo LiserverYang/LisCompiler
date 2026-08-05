@@ -536,4 +536,5 @@ def BuildModule(ModuleName: str):
             f"{ModuleAddedArguments} {TargetAddedArguments} "
             f"-I{IncludePaths} -L ./Build/Binaries/ {LinkDependsStr} "
             f"-l{LibPrefix}{ModuleName}",
+            ModuleConfiguration.CxxStanderd,
         )

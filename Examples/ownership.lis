@@ -1,8 +1,3 @@
-trait Drop
-{
-    fn drop(self);
-}
-
 struct Box
 {
     pub value: i32
@@ -39,7 +34,7 @@ fn borrow_box(b: &Box) -> i32
 fn main() -> i32
 {
     let x: Box = Box::new(10);
-    let y = borrow_box(x);
+    let y = borrow_box(&x);
     let z = x;
     ret 0;
 }

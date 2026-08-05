@@ -45,10 +45,6 @@
 llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
     llvm::LLVMContext &ctx);
 
-/// True if values of this type are trivially copyable (i.e. use MIRCopy freely).
-/// Primitives + raw pointers = true.  Structs with drop glue = false.
-bool isCopyType(const std::shared_ptr<Type> &ty);
-
 /// True if this type is a pointer or reference at the semantic level.
 bool isPointerLike(const std::shared_ptr<Type> &ty);
 
@@ -131,6 +127,11 @@ private:
 
     /// Fourth pass: lower function bodies.
     void lowerFunctionBody(const MIRFunction &mirFn);
+
+    /// Generate __drop_<T> glue function bodies for every struct type,
+    /// recursively dropping non-Copy fields. Must run before function bodies
+    /// are lowered — lowerDrop() skips any glue that is still a declaration.
+    void generateDropGlue();
 
     // ── Body lowering ────────────────────────────────────────────────────────
 

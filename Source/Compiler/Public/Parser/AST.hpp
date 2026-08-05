@@ -55,11 +55,18 @@ public:
     }
 };
 
+/** A trait bound on a generic param, optionally with concrete args: `Iterator<i32>`. */
+struct GenericConstraint
+{
+    std::string name;
+    std::vector<std::unique_ptr<TypeNode>> args;
+};
+
 class GenericParam : public ASTNode
 {
 public:
     std::string name;
-    std::vector<std::string> constraints;
+    std::vector<GenericConstraint> constraints;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -142,6 +149,7 @@ class TraitDef : public ASTNode
 public:
     std::string name;
     std::vector<std::unique_ptr<MemberFunctionDef>> methods;
+    std::vector<std::unique_ptr<GenericParam>> genericParams;
     Symbol *symbol;
 
     void accept(ASTVisitor *visitor) override
@@ -203,6 +211,7 @@ public:
     std::string structName;
     std::vector<std::unique_ptr<MemberFunctionDef>> methods;
     std::optional<std::string> traitName;
+    std::vector<std::unique_ptr<TypeNode>> traitGenericArgs;
     std::vector<std::unique_ptr<GenericParam>> genericParams;
     std::vector<std::unique_ptr<TypeNode>> structGenericArgs;
 
@@ -273,6 +282,24 @@ class ReturnStmt : public Stmt
 public:
     std::optional<std::unique_ptr<Expr>> returnValue;
 
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+class BreakStmt : public Stmt
+{
+public:
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+class ContinueStmt : public Stmt
+{
+public:
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);

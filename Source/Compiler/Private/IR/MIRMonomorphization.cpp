@@ -9,76 +9,25 @@
 
 std::shared_ptr<Type> MIRMonomorphization::replaceGenericType(std::shared_ptr<Type> origin, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable)
 {
-    if (!origin)
-        return nullptr;
-
-    switch (origin->getKind())
-    {
-    case Type::Kind::GenericParam:
-    {
-        auto genericTy = std::static_pointer_cast<GenericParamType>(origin);
-        const std::string &name = genericTy->getParamName();
-        auto it = replaceTable.find(name);
-
-        if (it == replaceTable.end())
-        {
-            throw std::runtime_error("Generic parameter '" + name + "' not found in replace table");
-        }
-        return it->second;
-    }
-    case Type::Kind::Custom:
-    {
-        auto ct = std::static_pointer_cast<CustomType>(origin);
-        if (ct->getGenericArgs().empty())
-        {
-            // Non-generic or already-resolved nominal type — nothing to do.
-            return origin;
-        }
-        // Substitute each arg, then re-instantiate via the type context (cached).
-        std::vector<std::shared_ptr<Type>> newArgs;
-        for (auto &a : ct->getGenericArgs())
-            newArgs.push_back(replaceGenericType(a, replaceTable));
-
-        auto orig = ct->genericOrigin ? ct->genericOrigin : ct;
-        return context->typeContext->instantiateCustom(orig, std::move(newArgs));
-
-        // TODO: when methods on generic structs are lowered to MIR-generic functions
-        // (with the struct's gParams copied into MIRFunction::genericParams), the
-        // existing function-monomorphization path will pick them up automatically;
-        // no extra work needed here.
-    }
-    case Type::Kind::Trait:
-        return origin;
-    case Type::Kind::Primitive:
-        return origin;
-    case Type::Kind::Reference:
-    {
-        auto refTy = std::static_pointer_cast<ReferenceType>(origin);
-        // replace base type
-        auto newBase = replaceGenericType(refTy->getBaseType(), replaceTable);
-        return context->typeContext->getReference(newBase, refTy->isMutableRef());
-    }
-    case Type::Kind::Function:
-    {
-        auto funcTy = std::static_pointer_cast<FunctionType>(origin);
-        std::vector<std::shared_ptr<Type>> params;
-
-        for (const auto &param : funcTy->getParams())
-        {
-            params.push_back(replaceGenericType(param, replaceTable));
-        }
-
-        auto newRet = replaceGenericType(funcTy->getReturnType(), replaceTable);
-
-        return context->typeContext->getFunction(std::move(params), newRet);
-    }
-    default:
-        throw std::runtime_error("unhandled type '" + origin->toString() + "'");
-    }
+    // Delegates to the single TypeContext::substitute. Mono passes strict=true:
+    // after substitution every type must be concrete, and a leaked GenericParam
+    // would produce a degenerate toString() that collides two instantiations in
+    // makeMonoFuncName — so a missing param fails loudly.
+    return context->typeContext->substitute(std::move(origin), replaceTable, /*strict=*/true);
 }
 
 std::string MIRMonomorphization::makeMonoFuncName(const std::string &baseName, const std::vector<std::shared_ptr<Type>> &args)
 {
+    // Guard: a raw generic param (toString() is degenerate, e.g. "T") would
+    // collide two different instantiations into one mono name. This should be
+    // unreachable today (args are substituted before naming), but fail loudly
+    // rather than silently reusing the wrong instantiation.
+    for (auto &arg : args)
+    {
+        if (arg && arg->getKind() == Type::Kind::GenericParam)
+            throw std::runtime_error("makeMonoFuncName: generic param not substituted: " + arg->toString());
+    }
+
     std::stringstream ss;
     ss << baseName << "_Mono_";
     for (size_t i = 0; i < args.size(); ++i)
@@ -93,6 +42,9 @@ void MIRMonomorphization::run()
 {
     buildFunctionMap();
     collection();
+    // The drop glue (LLVM level) has no call site to trigger mono of a generic
+    // Drop method, so seed it here for every Drop-implementing instantiation.
+    seedDropMethods();
     process();
 
     if (context->args->getArg("print_mir").compare("true") == 0)
@@ -115,8 +67,6 @@ void MIRMonomorphization::collection()
 void MIRMonomorphization::collection(MIRFunction *func)
 {
     if (!func) return;
-
-    std::unordered_map<std::string, std::shared_ptr<Type>> funcReplaceTable;
 
     for (auto &block : func->body.blocks)
     {
@@ -145,36 +95,53 @@ void MIRMonomorphization::collection(MIRFunction *func)
                         generatedMonoFuncs.insert(info.monoFuncName);
                     }
 
+                    // Rewrite THIS call's carriers with its OWN table. A whole-body
+                    // rewrite with one aggregate table would corrupt an earlier
+                    // call when two generic callees share a generic-param name but
+                    // map it to different concrete args (Item A).
                     std::unordered_map<std::string, std::shared_ptr<Type>> localReplaceTable;
                     for (size_t i = 0; i < genericFunc->genericParams.size(); ++i)
-                    {
                         localReplaceTable[genericFunc->genericParams[i]] = callStmt->genericParams[i];
-                        funcReplaceTable[genericFunc->genericParams[i]] = callStmt->genericParams[i];
-                    }
 
-                    // Rewrite the callee operand and destination *before* clearing genericParams
+                    // The call's own operands / dest.
                     rewriteOperand(callStmt->callee, localReplaceTable);
-
+                    for (auto &arg : callStmt->args)
+                        rewriteOperand(arg, localReplaceTable);
                     if (callStmt->dest.has_value())
-                    {
                         callStmt->dest->type = replaceGenericType(callStmt->dest->type, localReplaceTable);
-                    }
+
+                    // The carrier locals that back those operands (callee name-ref
+                    // temp, self-ref arg temps, struct-typed dests) and the assigns
+                    // that define them.
+                    std::unordered_set<size_t> carriers;
+                    auto collectRoot = [&carriers](const MIROperand &op)
+                    {
+                        if (auto *c = std::get_if<MIRCopy>(&op))
+                            carriers.insert(c->place.index);
+                        else if (auto *m = std::get_if<MIRMove>(&op))
+                            carriers.insert(m->place.index);
+                    };
+                    collectRoot(callStmt->callee);
+                    for (const auto &arg : callStmt->args)
+                        collectRoot(arg);
+                    if (callStmt->dest.has_value())
+                        carriers.insert(callStmt->dest->index);
+
+                    for (size_t idx : carriers)
+                        if (idx < func->body.locals.size())
+                            func->body.locals[idx].type = replaceGenericType(func->body.locals[idx].type, localReplaceTable);
+
+                    for (auto &blk : func->body.blocks)
+                        for (auto &s : blk.stmts)
+                            if (auto *as = std::get_if<MIRStmtAssign>(&s))
+                                if (carriers.count(as->lhs.index))
+                                    rewriteRValue(as->rhs, localReplaceTable);
 
                     callStmt->funcName = info.monoFuncName;
                     callStmt->genericParams.clear();
                 }
             }
         }
-    }
-
-    if (!funcReplaceTable.empty())
-    {
-        for (auto &local : func->body.locals)
-            local.type = replaceGenericType(local.type, funcReplaceTable);
-
-        for (auto &block : func->body.blocks)
-            for (auto &stmt : block.stmts)
-                rewriteStatement(stmt, funcReplaceTable);
     }
 }
 
@@ -212,6 +179,39 @@ void MIRMonomorphization::process()
         }
 
         collection(insertedFunc);
+    }
+}
+
+void MIRMonomorphization::seedDropMethods()
+{
+    for (const auto &[name, inst] : context->typeContext->getInstantiatedCustoms())
+    {
+        if (!inst->genericOrigin) continue; // only generic instantiations
+        if (!inst->implementsTrait("Drop")) continue;
+
+        // The drop method lives on the origin under "Struct::drop"; it was made
+        // generic (carries the struct's gParams) by MIRBuilder so mono can
+        // substitute this instance's args into it.
+        std::string dropBase = inst->getOriginName() + "::drop";
+        auto funcIt = functionMap.find(dropBase);
+        if (funcIt == functionMap.end()) continue; // no drop impl lowered
+        MIRFunction *dropFn = funcIt->second;
+
+        const auto &args = inst->getGenericArgs();
+        // Arity must match the method's (struct) generic params; a Drop impl
+        // with extra generics falls back to field-recursion glue.
+        if (dropFn->genericParams.size() != args.size()) continue;
+
+        std::string monoName = makeMonoFuncName(dropBase, args);
+        if (generatedMonoFuncs.count(monoName)) continue;
+
+        MonoInfo info;
+        info.genericFuncName = dropBase;
+        info.genericArgs = args;
+        info.monoFuncName = monoName;
+        info.genericFunc = dropFn;
+        monoInfos.push(std::make_unique<MonoInfo>(info));
+        generatedMonoFuncs.insert(monoName);
     }
 }
 
@@ -279,9 +279,66 @@ void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_ma
                 arg.dest->type = replaceGenericType(arg.dest->type, replaceTable);
             }
 
+            // Retarget a generic-param method call (`<T>::next`) to the concrete
+            // struct method once T is substituted (`Range::next`). Sema emits the
+            // placeholder for `it.next()` where `it: T: Iterator<i32>`. Test the
+            // '<' prefix first (O(1)) before scanning the string.
+            if (!arg.funcName.empty() && arg.funcName[0] == '<')
+            {
+                size_t sep = arg.funcName.find("::");
+                if (sep != std::string::npos)
+                {
+                    std::string recv = arg.funcName.substr(1, sep - 2); // strip < >
+                    auto it = replaceTable.find(recv);
+                    if (it != replaceTable.end())
+                    {
+                        if (auto ct = std::dynamic_pointer_cast<CustomType>(it->second))
+                        {
+                            std::string base = ct->getOriginName();
+                            arg.funcName = base + arg.funcName.substr(sep);
+
+                            // If the concrete struct is a GENERIC instantiation
+                            // (e.g. Range$i32 of struct Range<T>), the retargeted
+                            // method `Range::next` carries the struct's params —
+                            // set its args here so the mono-queue block below
+                            // materializes `Range::next_Mono_i32`. A non-generic
+                            // struct has empty args → no change (direct call).
+                            if (!ct->getGenericArgs().empty())
+                            {
+                                auto mIt = functionMap.find(arg.funcName);
+                                if (mIt != functionMap.end()
+                                    && mIt->second->genericParams.size() == ct->getGenericArgs().size())
+                                    arg.genericParams = ct->getGenericArgs();
+                            }
+                        }
+                    }
+                }
+            }
+
             if (!arg.genericParams.empty())
             {
                 std::string monoName = makeMonoFuncName(arg.funcName, arg.genericParams);
+
+                // A monomorphized body calling ANOTHER generic function: after
+                // the rename below, genericParams is cleared, so collection()
+                // (which re-scans inserted mono functions) can never see this
+                // call again. Queue the nested callee here, with the already
+                // substituted args, or its mono function is never created.
+                auto funcIt = functionMap.find(arg.funcName);
+                if (funcIt != functionMap.end()
+                    && !funcIt->second->genericParams.empty()
+                    && funcIt->second->genericParams.size() == arg.genericParams.size()
+                    && generatedMonoFuncs.find(monoName) == generatedMonoFuncs.end())
+                {
+                    MonoInfo info;
+                    info.genericFuncName = arg.funcName;
+                    info.genericArgs = arg.genericParams;
+                    info.monoFuncName = monoName;
+                    info.genericFunc = funcIt->second;
+                    monoInfos.push(std::make_unique<MonoInfo>(info));
+                    generatedMonoFuncs.insert(monoName);
+                }
+
                 arg.funcName = monoName;
                 rewriteOperand(arg.callee, replaceTable);
                 arg.genericParams.clear();

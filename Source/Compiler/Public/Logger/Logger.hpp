@@ -41,4 +41,9 @@ public:
 public:
     static void Log(LogLevel level, LogInfo info);
     static void Log(LogLevel level, const std::vector<LogInfo> &info);
+
+    /** Number of ERROR-level diagnostics logged so far (per process). */
+    static int GetErrorCount();
+    /** Reset the error counter (start of a fresh compilation unit). */
+    static void ResetErrorCount();
 };

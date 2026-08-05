@@ -40,6 +40,8 @@ enum class TokenCode
     SELF,   // "self"
     MOVE,   // "move"
     TRAIT,  // "trait"
+    BREAK,  // "break"
+    CONTINUE, // "continue"
 
     /* Type keywords */
     I8,   // "i8"
@@ -68,6 +70,7 @@ enum class TokenCode
     MINUS,  // "-"
     STAR,   // "*"
     SLASH,  // "/"
+    MOD,    // "%"
     EQ_EQ,  // "=="
     NOT_EQ, // "!="
     LT,     // "<"
@@ -121,6 +124,8 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "self",
     "move",
     "trait",
+    "break",
+    "continue",
     "i8",
     "i16",
     "i32",

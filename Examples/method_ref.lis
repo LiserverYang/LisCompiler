@@ -1,0 +1,43 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// method_ref.lis — method calls through reference-typed receivers.
+//
+// Regression lock: `let m = &mut c; m.add(4)` used to NOT mutate c (the receiver
+// was wrapped as `&m` — a pointer to the reference SLOT — so the method wrote to
+// a garbage address). Now a reference-typed receiver is passed by VALUE (the
+// pointer to the referent), so mutation goes through.
+
+struct counter
+{
+    pub value: i32
+}
+
+impl counter
+{
+    fn new(v: i32) -> counter
+    {
+        ret counter { value: v };
+    }
+
+    fn add(self: &mut counter, d: i32)
+    {
+        self.value = self.value + d;
+    }
+
+    fn get(self: &counter) -> i32
+    {
+        ret self.value;
+    }
+}
+
+fn main() -> i32
+{
+    let mut c = counter::new(1);
+
+    let m = &mut c;
+    m.add(4);        // mutates c through the &mut receiver → c.value = 5
+    let g = m.get(); // reads through the same reference (as &self) → 5
+
+    ret c.value + g; // 10
+}

@@ -80,12 +80,7 @@ fn main() -> i32
     // but you can use #[i_know = "high-to-low type translating can cause data overflow and other undefined behaviors"] before the statement
     // to avoid compiler error(still have warning)
 
-    let m = value(y);
-
-    let u = value(box::new(box::new(10))); // auto type and generic arg determind
-
-    // y; // error: variable m has been moved
-
+    // y is used (borrowed by &mut self) BEFORE it is moved below.
     {
         let z: number = number::new(1, 2);
 
@@ -94,5 +89,24 @@ fn main() -> i32
         // compiler will add a z.drop() here
     }
 
-    ret 0; // compiler will add a y.drop() here
+    let m = value(y);
+
+    let u = value(box::new(box::new(10))); // auto type and generic arg determind
+
+    // y; // error: variable m has been moved
+
+    // --- borrow checker: shared vs mutable borrows (NLL) ---
+    let mut bc = number::new(1, 2);
+    let br = &bc;       // shared borrow of bc
+    let bv = br.a;      // read through the shared borrow
+    // let bw = &mut bc; // ERROR if uncommented: br is used again below (bv2),
+    //                   //   so br's borrow is still live here
+    let bv2 = br.a;     // br used again — its borrow stays live through here
+    let bw = &mut bc;   // OK: br's borrow ended at bv2 (non-lexical lifetime)
+    bw.a = 9;           // mutate through the mutable borrow
+    // bc.b = 3;        // ERROR if uncommented: bw is used again below (bwv),
+    //                   //   so bw's borrow is still live here
+    let bwv = bw.a;     // bw used again — keeps its borrow live to the block end
+
+    ret 0; // compiler will add a y.drop(), m.drop(), u.drop() here
 }

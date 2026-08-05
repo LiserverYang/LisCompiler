@@ -4,6 +4,7 @@
  */
 
 #include "IR/HIRBuilder.hpp"
+#include "Logger/Logger.hpp"
 
 // Helper: convert an AST TypeNode pointer into an HIRRawType.
 static HIRRawType toRaw(const TypeNode *n)
@@ -15,7 +16,26 @@ static HIRRawType toRaw(const TypeNode *n)
     r.isMutRef = n->isMutReference;
     r.isPresent = true;
     r.isPrimitive = (n->kind == TypeNode::TypeKind::Primitive);
+    // Recursively preserve generic args (e.g. Option<i32>), otherwise a typed
+    // reference like `Option<i32>` silently degrades to the un-instantiated `Option`.
+    for (auto &ga : n->genericArgs)
+        r.genericArgs.push_back(toRaw(ga.get()));
     return r;
+}
+
+// Convert AST GenericConstraints (with TypeNode args) to HIRGenericConstraints.
+static std::vector<HIRGenericConstraint> toHIRConstraints(const std::vector<GenericConstraint> &cs)
+{
+    std::vector<HIRGenericConstraint> out;
+    for (const auto &c : cs)
+    {
+        HIRGenericConstraint hc;
+        hc.traitName = c.name;
+        for (const auto &arg : c.args)
+            hc.args.push_back(toRaw(arg.get()));
+        out.push_back(std::move(hc));
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +79,7 @@ void HIRBuilder::visit(StructDef *node)
         for (auto &gParam : node->genericParams)
         {
             result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
-            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+            result->unsolveConstraints[gParam->name] = toHIRConstraints(gParam->constraints);
         }
     }
 
@@ -82,6 +102,17 @@ void HIRBuilder::visit(TraitDef *node)
     result->name = node->name;
     result->position = node->position;
     result->length = node->length;
+
+    if (!node->genericParams.empty())
+    {
+        result->isGeneric = true;
+
+        for (auto &gParam : node->genericParams)
+        {
+            result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
+            result->unsolveConstraints[gParam->name] = toHIRConstraints(gParam->constraints);
+        }
+    }
 
     for (auto &method : node->methods)
     {
@@ -131,7 +162,7 @@ void HIRBuilder::visit(MemberFunctionDef *node)
         for (auto &gParam : node->genericParams)
         {
             result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
-            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+            result->unsolveConstraints[gParam->name] = toHIRConstraints(gParam->constraints);
         }
     }
 
@@ -169,8 +200,13 @@ void HIRBuilder::visit(StructImpl *node)
         for (auto &gParam : node->genericParams)
         {
             result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
-            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+            result->unsolveConstraints[gParam->name] = toHIRConstraints(gParam->constraints);
         }
+    }
+
+    for (auto &arg : node->traitGenericArgs)
+    {
+        result->traitGenericArgs.push_back(toRaw(arg.get()));
     }
 
     for (auto &arg : node->structGenericArgs)
@@ -213,7 +249,7 @@ void HIRBuilder::visit(FunctionDef *node)
         for (auto &gParam : node->genericParams)
         {
             result->gParams.push_back(std::make_shared<GenericParamType>(gParam->name));
-            result->unsolveConstraints[gParam->name] = std::move(gParam->constraints);
+            result->unsolveConstraints[gParam->name] = toHIRConstraints(gParam->constraints);
         }
     }
 
@@ -243,6 +279,8 @@ void HIRBuilder::visit(GlobalVarDef *node)
     result->length = node->length;
     result->name = node->name;
     result->isGlobal = true;
+    // Globals are mutable (the grammar has no `mut` keyword for them, but
+    // assignment to a global is the only shared-mutable-state mechanism).
     result->isMutable = true;
 
     if (node->type.has_value())
@@ -301,6 +339,24 @@ void HIRBuilder::visit(IfStmt *node)
         nodeStack.pop();
     }
 
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(BreakStmt *node)
+{
+    auto result = std::make_unique<HIRBreak>();
+    result->position = node->position;
+    result->length = node->length;
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(ContinueStmt *node)
+{
+    auto result = std::make_unique<HIRContinue>();
+    result->position = node->position;
+    result->length = node->length;
     nodeStack.push(std::move(result));
 }
 
@@ -383,14 +439,167 @@ void HIRBuilder::visit(ExprStmt *node)
 }
 
 // ---------------------------------------------------------------------------
+// Desugar `for x in iterable { body }` into existing HIR constructs. The fetch
+// happens at the TOP of the loop so that `continue` (which jumps to the loop
+// header) re-fetches the next element instead of looping on a stale value:
+//     {
+//         let mut __it = iterable;
+//         while true {
+//             let __opt = __it.next();
+//             if __opt.is_some {
+//                 let x = __opt.value;
+//                 <body>
+//             } else {
+//                 break;
+//             }
+//         }
+//     }
+// The iterator protocol (next() -> Option<T>) lives in the stdlib. The internal
+// `break` is the same HIRBreak node user code produces.
+// ---------------------------------------------------------------------------
+
 void HIRBuilder::visit(ForStmt *node)
 {
-    auto result = std::make_unique<HIRLoop>();
-    result->position = node->position;
-    result->length = node->length;
-    result->kind = HIRLoop::Kind::For;
-    // TODO: full for-loop lowering
-    nodeStack.push(std::move(result));
+    auto position = node->position;
+    auto length = node->length;
+
+    // Unique per-loop temporaries so nested for-loops don't collide through
+    // the MIRBuilder's flat varMap_ (which is not scope-aware on block exit).
+    std::string itName = "__it_" + std::to_string(forLoopCtr_);
+    std::string optName = "__opt_" + std::to_string(forLoopCtr_);
+    forLoopCtr_++;
+
+    auto nameRef = [&](const std::string &name) {
+        auto n = std::make_unique<HIRNameRef>();
+        n->position = position;
+        n->length = length;
+        n->name = name;
+        return n;
+    };
+
+    auto callNext = [&](const std::string &receiverName) {
+        auto c = std::make_unique<HIRCall>();
+        c->position = position;
+        c->length = length;
+        c->callKind = HIRCall::CallKind::Method;
+        c->object = nameRef(receiverName);
+        c->methodName = "next";
+        return c;
+    };
+
+    auto memberOf = [&](const std::string &objName, const std::string &field) {
+        auto m = std::make_unique<HIRMemberAccess>();
+        m->position = position;
+        m->length = length;
+        m->object = nameRef(objName);
+        m->memberName = field;
+        return m;
+    };
+
+    // The iterable expression, evaluated once into the iterator local.
+    node->iterable->accept(this);
+    auto iterExpr = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
+    nodeStack.pop();
+
+    // User body as a flat list of statements.
+    node->body->accept(this);
+    auto bodyStmt = std::unique_ptr<HIRStmt>((HIRStmt *)nodeStack.top().release());
+    nodeStack.pop();
+
+    std::vector<std::unique_ptr<HIRStmt>> bodyStmts;
+    if (auto *blk = dynamic_cast<HIRBlock *>(bodyStmt.get()))
+        bodyStmts = std::move(blk->stmts);
+    else
+        bodyStmts.push_back(std::move(bodyStmt));
+
+    // let mut __it = <iterable>;
+    auto itDecl = std::make_unique<HIRVarDecl>();
+    itDecl->position = position;
+    itDecl->length = length;
+    itDecl->name = itName;
+    itDecl->isMutable = true;
+    itDecl->isGlobal = false;
+    itDecl->init = std::move(iterExpr);
+
+    // while true {
+    //     let __opt = __it.next();            // fetch at the TOP — continue lands here
+    //     if __opt.is_some {
+    //         let <loopVar> = __opt.value;
+    //         <user body>                     // user break → exit, continue → refetch
+    //     } else {
+    //         break;                          // internal break on exhaustion
+    //     }
+    // }
+    auto loop = std::make_unique<HIRLoop>();
+    loop->position = position;
+    loop->length = length;
+    loop->kind = HIRLoop::Kind::While;
+
+    auto trueLit = std::make_unique<HIRLiteral>();
+    trueLit->position = position;
+    trueLit->length = length;
+    trueLit->kind = HIRLiteral::Kind::Bool;
+    trueLit->value = true;
+    loop->cond = std::move(trueLit);
+
+    auto loopBody = std::make_unique<HIRBlock>();
+    loopBody->position = position;
+    loopBody->length = length;
+
+    // let __opt = __it.next();
+    auto optDecl = std::make_unique<HIRVarDecl>();
+    optDecl->position = position;
+    optDecl->length = length;
+    optDecl->name = optName;
+    optDecl->isMutable = false;
+    optDecl->isGlobal = false;
+    optDecl->init = callNext(itName);
+    loopBody->stmts.push_back(std::move(optDecl));
+
+    // if __opt.is_some { ... } else { break; }
+    auto ifStmt = std::make_unique<HIRIf>();
+    ifStmt->position = position;
+    ifStmt->length = length;
+    ifStmt->cond = memberOf(optName, "is_some");
+
+    auto thenBlock = std::make_unique<HIRBlock>();
+    thenBlock->position = position;
+    thenBlock->length = length;
+
+    // let <loopVar> = __opt.value;
+    auto varDecl = std::make_unique<HIRVarDecl>();
+    varDecl->position = position;
+    varDecl->length = length;
+    varDecl->name = node->loopVar;
+    varDecl->isMutable = false;
+    varDecl->isGlobal = false;
+    varDecl->init = memberOf(optName, "value");
+    thenBlock->stmts.push_back(std::move(varDecl));
+
+    for (auto &s : bodyStmts)
+        thenBlock->stmts.push_back(std::move(s));
+    ifStmt->thenBlock = std::move(thenBlock);
+
+    auto elseBlock = std::make_unique<HIRBlock>();
+    elseBlock->position = position;
+    elseBlock->length = length;
+    auto brk = std::make_unique<HIRBreak>();
+    brk->position = position;
+    brk->length = length;
+    elseBlock->stmts.push_back(std::move(brk));
+    ifStmt->elseBlock = std::move(elseBlock);
+
+    loopBody->stmts.push_back(std::move(ifStmt));
+    loop->body = std::move(loopBody);
+
+    // { let mut __it; while ... }
+    auto outer = std::make_unique<HIRBlock>();
+    outer->position = position;
+    outer->length = length;
+    outer->stmts.push_back(std::move(itDecl));
+    outer->stmts.push_back(std::move(loop));
+
+    nodeStack.push(std::move(outer));
 }
 
 void HIRBuilder::visit(WhileStmt *node)
@@ -619,6 +828,22 @@ void HIRBuilder::visit(BinaryOp *node)
         result->opKind = HIRBinaryOp::OpKind::ShiftLeft;
     else if (node->op == ">>")
         result->opKind = HIRBinaryOp::OpKind::ShiftRight;
+    else
+    {
+        // Unreachable through the normal parser path, but don't silently
+        // produce Add for an unknown operator.
+        Logger::LogInfo logInfo;
+        logInfo.code = &context->fileValue;
+        logInfo.codePath = context->filePath;
+        logInfo.line = node->position.line;
+        logInfo.col = node->position.col;
+        logInfo.length = node->length;
+        logInfo.beginPosition = node->position.lineStart;
+        logInfo.msg = "unknown binary operator '" + node->op + "'";
+        Logger::Log(Logger::LogLevel::ERROR, logInfo);
+
+        result->opKind = HIRBinaryOp::OpKind::Add;
+    }
 
     node->left->accept(this);
     result->left.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));

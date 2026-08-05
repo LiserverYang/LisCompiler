@@ -1,0 +1,112 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+
+// This example shows the drop-glue semantics of lis.
+//
+// The `Drop` trait (from the stdlib, Source/Std/drop.lis) is
+//     trait Drop { fn drop(self); }
+// A type that `impl Drop` for gets its drop(self) method called automatically
+// when an owned value goes out of scope. The method takes `self` BY VALUE, so
+// it owns the whole teardown — the compiler does not also drop its fields.
+//
+// A type WITHOUT a Drop impl still runs drop glue: the compiler recursively
+// drops its non-Copy, non-reference fields (so a struct holding an owned value
+// whose type implements Drop will call that inner drop for you).
+//
+// When exactly a value is dropped:
+//   - at the end of the block that owns it (LIFO, reverse declaration order);
+//   - on the return edge of the function that owns it;
+//   - on a break/continue edge, for locals owned by the loop body.
+// A value that was `move`d is dropped by its new owner, exactly once.
+
+struct Inner
+{
+    pub a: i32
+}
+
+impl Drop for Inner
+{
+    fn drop(self)
+    {
+        // user destructor — called by the __drop_Inner glue
+    }
+}
+
+// No Drop impl: __drop_Outer recursively drops the `inner` field
+// (and skips `b`, a Copy primitive).
+struct Outer
+{
+    pub inner: Inner,
+    pub b: i32
+}
+
+// Drop at block end (fall-through).
+fn block_end() -> i32
+{
+    {
+        let x: Inner = Inner { a: 1 };
+    }
+    ret 0;
+}
+
+// Drop on the return edge.
+fn return_edge() -> i32
+{
+    let y: Inner = Inner { a: 2 };
+    ret 0;
+}
+
+// Drop on the break edge.
+fn break_edge() -> i32
+{
+    while true {
+        let z: Inner = Inner { a: 3 };
+        break;
+    }
+    ret 0;
+}
+
+// Drop on the continue edge (loop-body locals are dropped each iteration).
+fn continue_edge() -> i32
+{
+    let mut i = 0;
+    while true {
+        i = i + 1;
+        let w: Inner = Inner { a: 4 };
+        if i < 3 {
+            continue;
+        }
+        break;
+    }
+    ret 0;
+}
+
+// Nested field recursion: dropping `o` drops its owned `inner` field.
+fn nested() -> i32
+{
+    {
+        let o: Outer = Outer { inner: Inner { a: 5 }, b: 6 };
+    }
+    ret 0;
+}
+
+// Move semantics: x moves into y, so only y is dropped (x is not).
+fn move_semantics() -> i32
+{
+    {
+        let x: Inner = Inner { a: 7 };
+        let y = x;
+    }
+    ret 0;
+}
+
+fn main() -> i32
+{
+    block_end();
+    return_edge();
+    break_edge();
+    continue_edge();
+    nested();
+    move_semantics();
+    ret 0;
+}

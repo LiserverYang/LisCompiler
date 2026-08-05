@@ -107,23 +107,6 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// isCopyType
-//
-// Primitives and raw pointers are Copy.  Structs are Copy only if explicitly
-// marked (e.g. derive(Copy) in Rust).  For now, treat structs as non-Copy
-// unless your Type carries a `isCopy` flag.
-// ─────────────────────────────────────────────────────────────────────────────
-
-bool isCopyType(const std::shared_ptr<Type> &ty)
-{
-    if (!ty) return true;
-    // Primitives are Copy; structs / trait objects / references are Move.
-    // Adjust this predicate as your Type system grows.
-
-    return ty->getKind() == Type::Kind::Primitive;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // isPointerLike
 // ─────────────────────────────────────────────────────────────────────────────
 

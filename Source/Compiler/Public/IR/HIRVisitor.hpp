@@ -20,6 +20,8 @@ class HIRAssign;
 class HIRIf;
 class HIRLoop;
 class HIRReturn;
+class HIRBreak;
+class HIRContinue;
 class HIRExprStmt;
 class HIRFunction;
 class HIRStruct;
@@ -45,6 +47,8 @@ public:
     virtual void visit(HIRIf *node) = 0;
     virtual void visit(HIRLoop *node) = 0;
     virtual void visit(HIRReturn *node) = 0;
+    virtual void visit(HIRBreak *node) = 0;
+    virtual void visit(HIRContinue *node) = 0;
     virtual void visit(HIRExprStmt *node) = 0;
     virtual void visit(HIRFunction *node) = 0;
     virtual void visit(HIRStruct *node) = 0;

@@ -38,6 +38,17 @@ public:
     virtual bool equals(const std::shared_ptr<Type> &other) const = 0;
     virtual std::string toString() const = 0;
 
+    /// Copy semantics: primitives and references are Copy (non-owning); structs
+    /// and trait objects are Move. Single source of truth for the three former
+    /// isCopyType copies (sema / MIRBuilder / codegen).
+    bool isCopyable() const
+    {
+        return kind == Kind::Primitive || kind == Kind::Reference;
+    }
+
+    /// True if this type's implTrait contains a trait named `name` (e.g. "Drop").
+    bool implementsTrait(const std::string &name) const;
+
     std::vector<std::shared_ptr<TraitType>> implTrait;
 
 private:
@@ -110,6 +121,10 @@ public:
                std::vector<Field> fields);
 
     const std::string &getName() const;
+    /** For an instantiation, the origin definition's name (e.g. "Range" for
+     *  "Range$i32"); for a definition, its own name. Method symbols are
+     *  registered under the origin's name. */
+    const std::string &getOriginName() const;
     const std::vector<Field> &getFields() const;
     const std::vector<Method> &getMethods() const;
     void addMethods(std::vector<Method> methods);
@@ -165,7 +180,11 @@ class TraitType : public Type
 public:
     using Method = CustomType::Method;
     TraitType(std::string name, std::vector<Method> methods);
+    TraitType(std::string name, std::vector<std::shared_ptr<Type>> genericParams, std::vector<Method> methods);
     const std::string &getName() const;
+    const std::vector<std::shared_ptr<Type>> &getGenericParams() const;
+    void setGenericArgs(std::vector<std::shared_ptr<Type>> args);
+    const std::vector<std::shared_ptr<Type>> &getGenericArgs() const;
     const std::vector<Method> &getMethods() const;
     std::optional<Method> findMethod(const std::string &methodName) const;
     bool equals(const std::shared_ptr<Type> &other) const override;
@@ -173,6 +192,8 @@ public:
 
 private:
     std::string name;
+    std::vector<std::shared_ptr<Type>> genericParams; // declaration params (Iterator<T> -> [T])
+    std::vector<std::shared_ptr<Type>> genericArgs;   // use-site args (Iterator<i32> -> [i32])
     std::vector<Method> methods;
 };
 

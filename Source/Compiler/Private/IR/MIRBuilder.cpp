@@ -31,11 +31,8 @@ std::string mangleName(const MIRFunction &fn)
 
 bool MIRBuilder::isCopyType(const std::shared_ptr<Type> &type)
 {
-    if (!type) return true;
-    // Primitives are Copy; structs / trait objects / references are Move.
-    // Adjust this predicate as your Type system grows.
-
-    return type->getKind() == Type::Kind::Primitive;
+    // Single source of truth is Type::isCopyable() (primitives + references).
+    return !type || type->isCopyable();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,13 +63,23 @@ MIRPlace MIRBuilder::makeTempPlace(std::shared_ptr<Type> type)
     size_t idx = newLocal(name, type, /*isMutable=*/true,
         /*isTemp=*/true,
         /*isArg=*/false);
-    return MIRPlace{
+    MIRPlace place{
         .base = PlaceBase::Local,
         .index = idx,
         .name = name,
         .projections = {},
         .type = std::move(type),
     };
+
+    // Non-Copy temporaries are owned by the current scope and get dropped at
+    // block end. placeToOperand() marks a temp's root moved when its value is
+    // transferred (so a moved-out temp is skipped by emitDrop), and
+    // buildExprStmt() explicitly drops discarded expression results — the
+    // suppression machinery already exists; this just makes temps visible to it.
+    if (!ownedLocalsStack_.empty() && !isCopyType(place.type))
+        ownedLocalsStack_.back().push_back(place);
+
+    return place;
 }
 
 MIRPlace MIRBuilder::localPlace(size_t index)
@@ -136,13 +143,129 @@ void MIRBuilder::emit(MIRStatement stmt)
 
 void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
 {
+    // A write to a whole root local re-arms ownership: the local now owns a
+    // fresh value, so a later drop is valid again. This covers both explicit
+    // reassignment (x = ...) and loop-body re-initialization of a let that was
+    // dropped at the previous iteration's continue/block-end edge — without it
+    // the re-initialized local would be leaked (never dropped again).
+    if (lhs.base == PlaceBase::Local && lhs.projections.empty())
+    {
+        movedLocals_.erase(lhs.index);
+        // A fresh whole value re-owns every field — clear any stale partial
+        // move record so a later drop decomposes nothing.
+        partiallyMovedFields_.erase(lhs.index);
+    }
+    else if (lhs.base == PlaceBase::Local)
+    {
+        // A field write (e.g. `p.a = x`) re-owns that field and everything
+        // under it: drop any partial-move path that starts with this field path,
+        // or the re-assigned field's value would be skipped (leaked) at drop.
+        std::vector<std::string> lhsPath;
+        for (const auto &proj : lhs.projections)
+            if (proj.kind == ProjectionKind::Field)
+                lhsPath.push_back(proj.field);
+        if (!lhsPath.empty())
+        {
+            auto pmIt = partiallyMovedFields_.find(lhs.index);
+            if (pmIt != partiallyMovedFields_.end())
+            {
+                pmIt->second.erase(
+                    std::remove_if(pmIt->second.begin(), pmIt->second.end(),
+                        [&](const std::vector<std::string> &existing)
+                        {
+                            if (existing.size() < lhsPath.size()) return false;
+                            return std::equal(lhsPath.begin(), lhsPath.end(), existing.begin());
+                        }),
+                    pmIt->second.end());
+                if (pmIt->second.empty())
+                    partiallyMovedFields_.erase(pmIt);
+            }
+        }
+    }
+
     emit(MIRStmtAssign{.lhs = std::move(lhs), .rhs = std::move(rhs)});
 }
 
 void MIRBuilder::emitDrop(MIRPlace place)
 {
+    // A moved-out local no longer owns its value — dropping it would double-free.
+    if (place.base == PlaceBase::Local && movedLocals_.count(place.index))
+        return;
+
+    // Partial-move decomposition: if one or more fields (possibly nested) were
+    // moved out of this root, dropping the whole struct would double-free the
+    // moved value. Decompose recursively via emitDropPartial() so only the
+    // still-owned fields are dropped.
+    if (place.base == PlaceBase::Local && place.projections.empty())
+    {
+        auto pmIt = partiallyMovedFields_.find(place.index);
+        if (pmIt != partiallyMovedFields_.end())
+        {
+            emitDropPartial(place, pmIt->second);
+            // The root is now fully consumed — no further drop on any path.
+            movedLocals_.insert(place.index);
+            partiallyMovedFields_.erase(pmIt);
+            return;
+        }
+    }
+
     if (!isCopyType(place.type))
         emit(MIRStmtDrop{.place = std::move(place)});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// emitDropPartial — drop `place` while skipping moved-out sub-paths
+// ─────────────────────────────────────────────────────────────────────────────
+// movedPaths is a list of Field-name paths (relative to `place`) whose values
+// were moved out. Everything else that is owned is dropped, recursing through
+// nested structs. Leaves are emitted as projected MIRStmtDrop, which the LLVM
+// backend lowers to GEP + per-field glue.
+
+void MIRBuilder::emitDropPartial(MIRPlace place,
+    const std::vector<std::vector<std::string>> &movedPaths)
+{
+    // No moved sub-paths — drop the whole value.
+    if (movedPaths.empty())
+    {
+        emitDrop(place);
+        return;
+    }
+
+    auto ct = std::dynamic_pointer_cast<CustomType>(place.type);
+    if (!ct)
+    {
+        // Not a struct with movable fields — safe fallback.
+        emitDrop(place);
+        return;
+    }
+
+    for (const auto &field : ct->getFields())
+    {
+        if (isCopyType(field.type)) continue;
+
+        bool fieldFullyMoved = false;
+        std::vector<std::vector<std::string>> subPaths;
+        for (const auto &path : movedPaths)
+        {
+            if (path.empty() || path.front() != field.name) continue;
+            if (path.size() == 1)
+                fieldFullyMoved = true; // the whole field moved out
+            else
+                subPaths.push_back(std::vector<std::string>(path.begin() + 1, path.end()));
+        }
+
+        if (fieldFullyMoved) continue; // the receiver owns this field
+
+        MIRPlace fieldPlace = place;
+        fieldPlace.projections.push_back(
+            Projection{ProjectionKind::Field, field.name, 0});
+        fieldPlace.type = field.type;
+
+        if (subPaths.empty())
+            emitDrop(fieldPlace);
+        else
+            emitDropPartial(fieldPlace, subPaths);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -153,6 +276,52 @@ MIROperand MIRBuilder::placeToOperand(MIRPlace place)
 {
     if (isCopyType(place.type))
         return MIRCopy{.place = std::move(place)};
+
+    // A non-Copy local read as an operand is a *move* — the source no longer
+    // owns its value, so it must not be dropped at block end.
+    if (place.base == PlaceBase::Local)
+    {
+        if (place.projections.empty())
+        {
+            // Whole-root move: the root owns nothing anymore. Also clears any
+            // stale partial-move record so a later re-assign can't re-decompose.
+            movedLocals_.insert(place.index);
+            partiallyMovedFields_.erase(place.index);
+        }
+        else
+        {
+            // Partial (field) move, e.g. `let x = opt.value`. The root still
+            // owns the remaining fields, so it is NOT fully moved: record which
+            // direct field left and let emitDrop() drop the rest individually.
+            // Complex chains (derefs / index / multi-level) stay conservative —
+            // mark the root moved, which leaks sibling fields but never
+            // double-frees.
+            bool simpleFieldChain = true;
+            for (const auto &proj : place.projections)
+            {
+                if (proj.kind != ProjectionKind::Field)
+                {
+                    simpleFieldChain = false;
+                    break;
+                }
+            }
+            if (simpleFieldChain)
+            {
+                // Record the FULL Field projection path (e.g. p.a.b →
+                // ["a","b"]). emitDrop() decomposes the root recursively,
+                // dropping everything except the moved-out leaves.
+                std::vector<std::string> path;
+                for (const auto &proj : place.projections)
+                    path.push_back(proj.field);
+                partiallyMovedFields_[place.index].push_back(std::move(path));
+            }
+            else
+            {
+                movedLocals_.insert(place.index);
+            }
+        }
+    }
+
     return MIRMove{.place = std::move(place)};
 }
 
@@ -298,6 +467,13 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     body_ = &freshBody;
     tempCtr_ = 0;
     varMap_.clear();
+    // Local indices restart per function, so per-function ownership/loop state
+    // must not leak across functions (a moved local in fn A must not suppress
+    // the drop of an unrelated same-index local in fn B).
+    movedLocals_.clear();
+    partiallyMovedFields_.clear();
+    ownedLocalsStack_.clear();
+    loopTargets_.clear();
 
     // ── local[0]: return slot ────────────────────────────────────────────────
     newLocal("_0", fn->returnType, /*isMut=*/true, /*isTemp=*/true);
@@ -313,6 +489,24 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     }
     freshBody.argCount = fn->params.size();
 
+    // ── function-scope owned frame ────────────────────────────────────────────
+    // By-value non-Copy parameters are owned by this function and must be
+    // dropped on exit (both the explicit `ret` path — dropOwnedLocalsFrom(0)
+    // in buildReturn walks frame 0 — and the fall-through path below). Push a
+    // dedicated frame so args are tracked independently of the body's blocks.
+    ownedLocalsStack_.emplace_back();
+    for (auto &[pname, ptype] : fn->params)
+    {
+        if (isCopyType(ptype))
+            continue;
+        // The Drop trait's `drop(self)` takes self BY VALUE; the drop glue
+        // calls X::drop itself. Dropping `self` again at function exit would
+        // infinite-recurse (X::drop → __drop_X → X::drop → ...).
+        if (fn->associatedTrait == "Drop" && pname == "self")
+            continue;
+        ownedLocalsStack_.back().push_back(localPlace(varMap_[pname]));
+    }
+
     // ── entry basic block ────────────────────────────────────────────────────
     BasicBlockId entry = newBlock("entry");
     switchTo(entry);
@@ -322,9 +516,20 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
 
     // ── ensure the last block has a terminator ────────────────────────────────
     // If control falls off the end of a void function, add an implicit return.
+    // On the fall-through edge, drop the function-scope owned frame (params)
+    // before sealing — the body's own block already dropped its locals when it
+    // fell through (buildBlock), but frame 0 belongs to this function only.
     MIRBasicBlock &last = body_->blocks[curBB_];
     if (std::holds_alternative<MIRTermUnreachable>(last.terminator))
+    {
+        // Skip the drop when the body ended with an explicit `ret`: buildBlock
+        // switched curBB_ to its "dead" router block, and buildReturn already
+        // dropped frame 0 on the live path. Re-dropping here would only add
+        // unreachable duplicate drops.
+        if (last.label != "dead")
+            dropOwnedLocalsFrom(0);
         sealBlock(curBB_, MIRTermReturn{.value = std::nullopt});
+    }
 
     MIRFunction out;
     out.name = fn->name;
@@ -338,6 +543,29 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     for (auto &gParam : fn->gParams)
     {
         out.genericParams.push_back(gParam->getParamName());
+    }
+
+    // Methods of a GENERIC struct (`impl<T> Foo<T> { fn bar(self) }`) are
+    // written against `self: Foo<T>`, so their bodies reference the struct's
+    // generic params. Without them in the mono signature, monomorphization has
+    // nothing to substitute (and the generic `Foo<T>` param would crash the
+    // LLVM type lowering). Prepend them in declaration order (the dedup keeps
+    // `impl Box { fn new<T> }` — own T == struct T — at a single [T]).
+    if (!out.associatedStruct.empty())
+    {
+        if (auto ct = context->typeContext->getCustom(out.associatedStruct))
+        {
+            std::vector<std::string> structParams;
+            for (auto &gp : (*ct)->getGenericParams())
+            {
+                auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
+                if (std::find(out.genericParams.begin(), out.genericParams.end(),
+                              gpTy->getParamName()) == out.genericParams.end())
+                    structParams.push_back(gpTy->getParamName());
+            }
+            out.genericParams.insert(out.genericParams.begin(),
+                                     structParams.begin(), structParams.end());
+        }
     }
 
     if (!fn->associatedTrait.empty())
@@ -355,16 +583,44 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
 
 void MIRBuilder::buildBlock(HIRBlock *block)
 {
-    // Collect the places of non-Copy locals declared in this block
-    // so we can drop them when the block ends.
-    std::vector<MIRPlace> ownedLocals;
+    // Open a fresh owned-local list for this block. Nested blocks push their
+    // own list, so each scope only drops what it declared.
+    ownedLocalsStack_.emplace_back();
+
+    bool terminatedEarly = false;
 
     for (auto &stmt : block->stmts)
+    {
         buildStmt(stmt.get());
 
-    // Emit drops in reverse declaration order (LIFO, like real destructors).
-    for (auto it = ownedLocals.rbegin(); it != ownedLocals.rend(); ++it)
-        emitDrop(*it);
+        // A break/continue/return sealed the current block with a terminator.
+        // Any following statements are dead code — route them into a fresh
+        // block so they aren't appended after a terminator (which would make
+        // them execute at runtime).
+        if (!std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
+        {
+            curBB_ = newBlock("dead");
+            switchTo(curBB_);
+            terminatedEarly = true;
+        }
+    }
+
+    // Fetch the list fresh: building nested blocks may have reallocated
+    // ownedLocalsStack_, so a reference cached earlier would be dangling.
+    auto &ownedLocals = ownedLocalsStack_.back();
+
+    // Emit drops in reverse declaration order (LIFO, like real destructors)
+    // — but only when this block ended by falling through. If a jump/return
+    // sealed it, the jump handler already dropped this block's locals on that
+    // edge; re-dropping here would just land in unreachable code (a "dead"
+    // block) and double the drop on sibling runtime paths.
+    if (!terminatedEarly)
+    {
+        for (auto it = ownedLocals.rbegin(); it != ownedLocals.rend(); ++it)
+            emitDrop(*it);
+    }
+
+    ownedLocalsStack_.pop_back();
 }
 
 void MIRBuilder::buildStmt(HIRStmt *stmt)
@@ -384,6 +640,12 @@ void MIRBuilder::buildStmt(HIRStmt *stmt)
     if (auto *ret = dynamic_cast<HIRReturn *>(stmt))
         return buildReturn(ret);
 
+    if (auto *brk = dynamic_cast<HIRBreak *>(stmt))
+        return buildBreak(brk);
+
+    if (auto *cont = dynamic_cast<HIRContinue *>(stmt))
+        return buildContinue(cont);
+
     if (auto *es = dynamic_cast<HIRExprStmt *>(stmt))
         return buildExprStmt(es);
 
@@ -399,6 +661,11 @@ void MIRBuilder::buildVarDecl(HIRVarDecl *decl)
 {
     size_t idx = newLocal(decl->name, decl->type, decl->isMutable, /*isTemp=*/false);
     varMap_[decl->name] = idx;
+
+    // Non-Copy locals declared in this block are owned by this scope and get
+    // dropped when the block ends.
+    if (!ownedLocalsStack_.empty() && !isCopyType(decl->type))
+        ownedLocalsStack_.back().push_back(localPlace(idx));
 
     if (decl->init.has_value())
     {
@@ -420,6 +687,17 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
     // The LHS must be a valid l-value: name-ref, member access, or deref.
     MIRPlace lhs = buildExpr(assign->target.get());
 
+    // Drop the OLD value before overwriting a whole non-Copy local that owns
+    // one on this path — otherwise the previous owner leaks (its drop glue
+    // never runs). Not in emitAssign: buildVarDecl's initializer (and loop
+    // re-inits of a let) must not drop the local that is being (re)initialized.
+    // emitDrop respects the partial-move decomposition, so `x = x.field` drops
+    // only the other fields.
+    if (lhs.base == PlaceBase::Local && lhs.projections.empty()
+        && !isCopyType(lhs.type) && !movedLocals_.count(lhs.index))
+        emitDrop(localPlace(lhs.index));
+
+    // emitAssign re-arms ownership on a whole-root-local write.
     emitAssign(lhs, MIRRValueUse{.operand = std::move(rhs)});
 }
 
@@ -430,35 +708,120 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
     // 1. Evaluate condition into a temp.
     MIROperand cond = exprToOperand(ifStmt->cond.get());
 
-    // 2. Allocate successor blocks.
+    // 2. Allocate successor blocks. The else block is ALWAYS created (even
+    //    without an else) so the implicit-else edge can hold path-specific
+    //    drops before jumping to the join.
     BasicBlockId thenId = newBlock("then");
-    BasicBlockId elseId = ifStmt->elseBlock.has_value() ? newBlock("else") : 0;
+    BasicBlockId elseId = newBlock("else");
     BasicBlockId joinId = newBlock("if_join");
 
     // 3. Terminate the current block with a branch.
     sealBlock(curBB_, MIRTermBranch{
                           .cond = std::move(cond),
                           .thenBlock = thenId,
-                          .elseBlock = ifStmt->elseBlock.has_value() ? elseId : joinId,
+                          .elseBlock = elseId,
                       });
 
-    // 4. Lower then-branch.
+    // 4. Snapshot the entry ownership state — each branch starts from it, so a
+    //    move in one branch does not leak into the other (flow-sensitivity).
+    OwnershipState entry{movedLocals_, partiallyMovedFields_};
+
+    // A branch "fell through" when its final live block ends in Unreachable and
+    // is NOT the dead-code router block buildBlock switches to after a jump.
+    auto fellThrough = [&]()
+    {
+        return std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator)
+            && currentBlock().label != "dead";
+    };
+
+    // 5. Lower then-branch.
     switchTo(thenId);
     buildBlock(ifStmt->thenBlock.get());
-    if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
-        sealBlock(curBB_, MIRTermGoto{.target = joinId});
+    bool thenFell = fellThrough();
+    OwnershipState thenSt{movedLocals_, partiallyMovedFields_};
 
-    // 5. Lower else-branch (if present).
+    // 6. Lower else-branch from the ENTRY state (restore the snapshot).
+    movedLocals_ = entry.moved;
+    partiallyMovedFields_ = entry.partial;
+    switchTo(elseId);
     if (ifStmt->elseBlock.has_value())
+        buildBlock(ifStmt->elseBlock->get());
+    bool elseFell = fellThrough();
+    OwnershipState elseSt{movedLocals_, partiallyMovedFields_};
+
+    // 7. Path-specific drops: an outer local owned on THIS edge but dead on the
+    //    sibling edge (moved there) must be dropped here before the join, or it
+    //    leaks on this path. Then seal each real edge with a Goto to the join.
+    if (thenFell)
+    {
+        switchTo(thenId);
+        emitPathDrops(thenSt, elseSt);
+        sealBlock(curBB_, MIRTermGoto{.target = joinId});
+    }
+    else if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
+        sealBlock(curBB_, MIRTermGoto{.target = joinId}); // dead router block
+
+    if (elseFell)
     {
         switchTo(elseId);
-        buildBlock(ifStmt->elseBlock->get());
-        if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
-            sealBlock(curBB_, MIRTermGoto{.target = joinId});
+        emitPathDrops(elseSt, thenSt);
+        sealBlock(curBB_, MIRTermGoto{.target = joinId});
     }
+    else if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
+        sealBlock(curBB_, MIRTermGoto{.target = joinId}); // dead router block
 
-    // 6. Continue in the join block.
+    // 8. Merge at the join: a local is dead iff dead on ANY path (owned needs
+    //    all paths to own it — the AND rule). Partial-move paths merge by union.
+    movedLocals_ = thenSt.moved;
+    movedLocals_.insert(elseSt.moved.begin(), elseSt.moved.end());
+    partiallyMovedFields_ = std::move(thenSt.partial);
+    for (const auto &[idx, paths] : elseSt.partial)
+    {
+        auto &dst = partiallyMovedFields_[idx];
+        for (const auto &path : paths)
+            if (std::find(dst.begin(), dst.end(), path) == dst.end())
+                dst.push_back(path);
+    }
+    for (size_t idx : movedLocals_)
+        partiallyMovedFields_.erase(idx);
+
     switchTo(joinId);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// emitPathDrops — drop outer locals owned on this path but dead on the sibling
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MIRBuilder::emitPathDrops(const OwnershipState &self, const OwnershipState &sibling)
+{
+    // Make the global state reflect THIS path so emitDrop's movedLocals_ check
+    // matches ownership on this edge.
+    movedLocals_ = self.moved;
+    partiallyMovedFields_ = self.partial;
+
+    // The branch's own frame was already popped by buildBlock; these are the
+    // enclosing scopes' locals — the ones that outlive the if.
+    for (const auto &frame : ownedLocalsStack_)
+    {
+        for (const auto &place : frame)
+        {
+            size_t i = place.index;
+            if (self.moved.count(i)) continue; // not owned on this path
+
+            if (sibling.moved.count(i))
+            {
+                // Fully moved on the sibling path → drop the whole value here.
+                emitDrop(place);
+                continue;
+            }
+            auto sit = sibling.partial.find(i);
+            if (sit != sibling.partial.end() && !sit->second.empty())
+            {
+                // Fields moved on the sibling path → drop those fields here.
+                emitDropPartial(place, sit->second);
+            }
+        }
+    }
 }
 
 // ── while cond { body } / for iter { body } ──────────────────────────────────
@@ -515,12 +878,21 @@ void MIRBuilder::buildLoop(HIRLoop *loop)
         }
     }
 
+    // Make break/continue inside this loop resolve to its exit/header.
+    // The frame base is captured BEFORE the body block pushes its frame, so a
+    // break/continue can drop exactly the loop body's scopes and nothing above
+    // them.
+    size_t bodyFrameBase = ownedLocalsStack_.size();
+    loopTargets_.emplace_back(LoopTarget{exitId, headerId, bodyFrameBase});
+
     // Lower the body.
     switchTo(bodyId);
     buildBlock(loop->body.get());
 
+    loopTargets_.pop_back();
+
     // Back-edge: body jumps back to header (unless body already terminated,
-    // e.g. via an inner return or a future break statement).
+    // e.g. via an inner return or a break/continue statement).
     if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
         sealBlock(curBB_, MIRTermGoto{.target = headerId});
 
@@ -534,16 +906,50 @@ void MIRBuilder::buildReturn(HIRReturn *ret)
 {
     if (ret->value.has_value())
     {
-        // Write into the return slot (_0) and then return.
+        // Write into the return slot (_0) and then return. Evaluating the
+        // return expression first is essential: a non-Copy `ret x;` moves `x`
+        // into the slot (marking it moved), so the drop sweep below must NOT
+        // drop `x` itself — otherwise the returned value would be dropped
+        // before the caller ever receives it.
         MIROperand val = exprToOperand(ret->value->get());
         MIRPlace ret0{.base = PlaceBase::Local, .index = 0, .name = "_0", .projections = {}, .type = body_->returnType};
         emitAssign(ret0, MIRRValueUse{.operand = std::move(val)});
-        sealBlock(curBB_, MIRTermReturn{.value = std::nullopt});
     }
-    else
-    {
-        sealBlock(curBB_, MIRTermReturn{.value = std::nullopt});
-    }
+
+    // Drop all owned locals (except any moved into the return slot) before
+    // the return takes effect. Without this, a function whose body ends in
+    // `ret` would leak its drops into a dead block.
+    dropOwnedLocalsFrom(0);
+
+    sealBlock(curBB_, MIRTermReturn{.value = std::nullopt});
+}
+
+// ── break; / continue; ────────────────────────────────────────────────────────
+
+void MIRBuilder::buildBreak(HIRBreak *)
+{
+    buildJump("break", /*toExit=*/true);
+}
+
+void MIRBuilder::buildContinue(HIRContinue *)
+{
+    buildJump("continue", /*toExit=*/false);
+}
+
+void MIRBuilder::buildJump(const char *keyword, bool toExit)
+{
+    if (loopTargets_.empty())
+        throw std::runtime_error(std::string("MIRBuilder::buildJump: ") + keyword + " outside of a loop");
+
+    const LoopTarget &target = loopTargets_.back();
+
+    // Drop the locals owned by the loop body and any nested scopes before
+    // jumping out. Enclosing (loop-outer) scopes stay alive, so only the
+    // frames from the loop body's frame down are dropped — never above it.
+    dropOwnedLocalsFrom(target.ownedFrameBase);
+
+    // Seals the current block with a jump to the innermost loop's exit/header.
+    sealBlock(curBB_, MIRTermGoto{.target = toExit ? target.breakTarget : target.continueTarget});
 }
 
 // ── expr; (expression used as statement) ─────────────────────────────────────
@@ -553,6 +959,45 @@ void MIRBuilder::buildExprStmt(HIRExprStmt *es)
     MIRPlace result = buildExpr(es->expr.get());
     // The value is discarded. If it's a non-Copy type, drop it immediately.
     emitDrop(result);
+    if (result.base == PlaceBase::Local)
+    {
+        if (result.projections.empty())
+        {
+            // The whole value was dropped — block-end must not drop it again.
+            movedLocals_.insert(result.index);
+        }
+        else
+        {
+            // Only a FIELD was discarded (`p.a;`): the root still owns the
+            // other fields, so record the dropped field as partially moved.
+            // The block-end sweep then drops the remaining fields and skips
+            // the discarded one — otherwise marking the whole root moved
+            // would leak the sibling fields, and dropping the whole root
+            // would double-free the discarded field.
+            std::vector<std::string> path;
+            for (const auto &proj : result.projections)
+                if (proj.kind == ProjectionKind::Field)
+                    path.push_back(proj.field);
+            if (!path.empty())
+                partiallyMovedFields_[result.index].push_back(std::move(path));
+        }
+    }
+}
+
+// ── Drop owned locals in scopes down to `frameBase` (for early-exit paths) ─────
+
+void MIRBuilder::dropOwnedLocalsFrom(size_t frameBase)
+{
+    // Walk scopes from innermost (last pushed) down to frameBase, emitting
+    // drops in reverse declaration order within each scope. emitDrop() skips
+    // locals whose value was moved out (movedLocals_), which persists across
+    // all edges — a moved-out local must never be dropped on any path.
+    for (size_t f = ownedLocalsStack_.size(); f > frameBase; --f)
+    {
+        const auto &frame = ownedLocalsStack_[f - 1];
+        for (auto it = frame.rbegin(); it != frame.rend(); ++it)
+            emitDrop(*it);
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -751,8 +1196,8 @@ MIRPlace MIRBuilder::buildMemberAccess(HIRMemberAccess *ma)
         .field = ma->memberName,
     });
     // Update the type to the member's type (already resolved in sema).
-    if (ma->memberSymbol)
-        obj.type = ma->memberSymbol->type; // assumes Symbol has a `type` field
+    if (ma->type)
+        obj.type = ma->type;
     return obj;
 }
 
@@ -766,9 +1211,17 @@ MIRPlace MIRBuilder::buildStructInit(HIRStructInit *si)
     for (auto &[fname, fexpr] : si->members)
         fields.push_back({fname, exprToOperand(fexpr.get())});
 
+    // Use the *resolved* (possibly instantiated) type's name: for a generic
+    // struct like Option<T>, si->type is the mangled instantiation (Option$i32),
+    // which is what LLVM declares. structSymbol->name would be the un-mangled
+    // "Option", which has no LLVM struct body → crash.
+    std::string structName;
+    if (auto ct = std::dynamic_pointer_cast<CustomType>(si->type))
+        structName = ct->getName();
+
     MIRPlace tmp = makeTempPlace(si->type);
     emitAssign(tmp, MIRRValueStructInit{
-                        .structName = si->structSymbol ? si->structSymbol->name : "",
+                        .structName = structName,
                         .fields = std::move(fields),
                         .type = si->type,
                     });

@@ -6,15 +6,64 @@
 #include "Lexer/Token.hpp"
 #include "Parser/ASTPrinter.hpp"
 
+Token Parser::eofToken_;
+
+void Parser::synchronize()
+{
+    // Skip tokens until a safe restart point: a `;` (consumed), a `}`, or a
+    // statement / declaration-start keyword. This prevents a failed construct
+    // from cascading bogus errors into the next one.
+    while (!finished())
+    {
+        TokenCode c = currentToken().code;
+        switch (c)
+        {
+        case TokenCode::SEMI: advance(); return;
+        case TokenCode::RBRACE: return;
+        case TokenCode::LBRACE:
+        case TokenCode::IF: case TokenCode::LET: case TokenCode::WHILE:
+        case TokenCode::FOR: case TokenCode::RET: case TokenCode::BREAK:
+        case TokenCode::CONTINUE:
+        case TokenCode::FN: case TokenCode::STRUCT: case TokenCode::IMPL:
+        case TokenCode::TRAIT:
+            return;
+        default: advance();
+        }
+    }
+}
+
 void Parser::run()
 {
     tokenStream = &(context->tokenStream);
     auto &program = context->program;
 
+    // Errors are non-fatal during parsing so all of them surface; the count
+    // gates the pipeline at the end. The count is NOT reset here — the Lexer
+    // (which runs first and resets per file) may have already logged lexing
+    // errors for this file, and they must not be discarded.
     while (!finished())
     {
-        program.globalStatements.push_back(parseGlobalStatement());
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
+
+        auto node = parseGlobalStatement();
+
+        if (node)
+            program.globalStatements.push_back(std::move(node));
+
+        // Guarantee forward progress even when a construct failed without
+        // consuming a token (avoids an infinite loop on malformed input).
+        if (currentPos == beforePos)
+            advance();
+
+        // A construct failed — skip to the next statement/declaration boundary
+        // so the next construct parses cleanly.
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
     }
+
+    if (Logger::GetErrorCount() > 0)
+        exit(1);
 
     if (context->args->getArg("print_ast").compare("true") == 0)
     {
@@ -46,9 +95,8 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     }
     else
     {
-        Logger::LogInfo logInfo;
-        initLogInfo(currentToken(), logInfo, "illegal global statement");
-        Logger::Log(Logger::LogLevel::ERROR, logInfo);
+        logError(currentToken(), "illegal global statement");
+        advance(); // consume the bad token so run() makes progress
     }
 
     return nullptr;
@@ -82,9 +130,17 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
 
     consume(TokenCode::LBRACE, "expect a '{' after struct name", E_ExpectALBRACE);
 
-    while (!match(TokenCode::RBRACE))
+    while (!match(TokenCode::RBRACE) && !finished())
     {
-        structDef->members.push_back(parseMemberVariableDefinition());
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
+        auto member = parseMemberVariableDefinition();
+        if (member)
+            structDef->members.push_back(std::move(member));
+        if (currentPos == beforePos)
+            advance(); // guarantee progress on a member that consumed nothing
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
     }
 
     knownTypes.insert(structDef->name);
@@ -108,13 +164,28 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
         consume(TokenCode::UNDEFINED, "mutidefined trait '" + traitDef->name + "'", E_MutidefinedTrait);
     }
 
+    // Generic traits: trait Iterator<T> { ... }
+    if (check(TokenCode::LT))
+    {
+        traitDef->genericParams = std::move(parseGenericParams());
+    }
+
     consume(TokenCode::LBRACE, "expect a '{' after trait name", E_ExpectALBRACE);
 
-    while (!match(TokenCode::RBRACE))
+    while (!match(TokenCode::RBRACE) && !finished())
     {
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
         auto it = parseMemberFunctionDefinition();
-        it->traitName = traitDef->name;
-        traitDef->methods.push_back(std::move(it));
+        if (it)
+        {
+            it->traitName = traitDef->name;
+            traitDef->methods.push_back(std::move(it));
+        }
+        if (currentPos == beforePos)
+            advance(); // guarantee progress
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
     }
 
     knownTypes.insert(traitDef->name);
@@ -136,25 +207,27 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     std::string name = consume(TokenCode::IDENTIFIER, "expect a identifer after impl", E_ExpectAnIdentifier).value;
 
+    // Optional generic args after the first name — could be a trait
+    // instantiation (impl Iterator<i32> for Range) or a plain struct impl
+    // (impl Box<T>). Parse them speculatively, then decide based on `for`.
+    std::vector<std::unique_ptr<TypeNode>> firstArgs;
+    if (check(TokenCode::LT))
+        firstArgs = parseCallGenericParams();
+
     if (match(TokenCode::FOR))
     {
-        impl->structName = consume(TokenCode::IDENTIFIER, "expect a trait name", E_ExpectAnIdentifier).value;
         impl->traitName = name;
+        impl->traitGenericArgs = std::move(firstArgs);
+        impl->structName = consume(TokenCode::IDENTIFIER, "expect a struct name after 'for'", E_ExpectAnIdentifier).value;
     }
     else
     {
         impl->structName = name;
+        impl->structGenericArgs = std::move(firstArgs);
     }
 
-    if (match(TokenCode::LT))
-    {
-        do
-        {
-            impl->structGenericArgs.push_back(std::move(parseType()));
-        } while (match(TokenCode::COMMA));
-
-        match(TokenCode::GT);
-    }
+    if (check(TokenCode::LT))
+        impl->structGenericArgs = parseCallGenericParams();
 
     recorder.bindNode(impl.get());
 
@@ -165,12 +238,21 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     consume(TokenCode::LBRACE, "expect a '{'", E_ExpectALBRACE);
 
-    while (!check(TokenCode::RBRACE))
+    while (!check(TokenCode::RBRACE) && !finished())
     {
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
         auto it = parseMemberFunctionDefinition();
-        it->structName = impl->structName;
-        it->traitName = impl->traitName.has_value() ? impl->traitName.value() : "";
-        impl->methods.push_back(std::move(it));
+        if (it)
+        {
+            it->structName = impl->structName;
+            it->traitName = impl->traitName.has_value() ? impl->traitName.value() : "";
+            impl->methods.push_back(std::move(it));
+        }
+        if (currentPos == beforePos)
+            advance(); // guarantee progress
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
     }
 
     consume(TokenCode::RBRACE, "expect a '}'", E_ExpectARBRACE);
@@ -290,9 +372,8 @@ std::unique_ptr<TypeNode> Parser::parseType()
         return type;
     }
 
-    Logger::LogInfo logInfo;
-    initLogInfo(currentToken(), logInfo, "expected type", E_ExpectType);
-    Logger::Log(Logger::LogLevel::ERROR, logInfo);
+    logError(currentToken(), "expected type", E_ExpectType);
+    advance(); // consume the bad token — generic-arg loops (Foo<,,,>) need progress
 
     return nullptr;
 }
@@ -410,9 +491,21 @@ std::unique_ptr<CompoundStmt> Parser::parseCompoundStatement()
 
     recorder.bindNode(block.get());
 
-    while (!check(TokenCode::RBRACE))
+    while (!check(TokenCode::RBRACE) && !finished())
     {
-        block->statements.push_back(parseStatement());
+        size_t beforePos = currentPos;
+        int beforeErr = Logger::GetErrorCount();
+
+        auto stmt = parseStatement();
+
+        if (stmt)
+            block->statements.push_back(std::move(stmt));
+
+        if (currentPos == beforePos)
+            advance(); // guarantee progress
+
+        if (Logger::GetErrorCount() > beforeErr)
+            synchronize();
     }
 
     consume(TokenCode::RBRACE, "expected '}' after compound statement", E_ExpectARBRACE);
@@ -445,6 +538,14 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     {
         return parseWhileLoop();
     }
+    else if (check(TokenCode::BREAK))
+    {
+        return parseBreakStmt();
+    }
+    else if (check(TokenCode::CONTINUE))
+    {
+        return parseContinueStmt();
+    }
 
     // 赋值语句或表达式语句
     auto expr = parseExpression();
@@ -452,6 +553,10 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     if (match(TokenCode::ASSIGN))
     {
         auto assign = std::make_unique<AssignStmt>();
+        // Anchor the statement at its target expression so diagnostics (e.g.
+        // "cannot assign to immutable variable") point at the right location.
+        assign->position = expr->position;
+        assign->length = expr->length;
         assign->target = std::move(expr);
         assign->value = parseExpression();
         consume(TokenCode::SEMI, "expected ';' after assignment", E_ExpectASEMI);
@@ -474,7 +579,9 @@ std::unique_ptr<IfStmt> Parser::parseIfStmt()
     recorder.bindNode(ifStmt.get());
 
     // now if statement needn't '(' and ')'
+    inControlFlowCondition_ = true;
     ifStmt->condition = parseExpression();
+    inControlFlowCondition_ = false;
     ifStmt->thenBranch = parseStatement();
 
     if (match(TokenCode::ELSE))
@@ -501,6 +608,32 @@ std::unique_ptr<ReturnStmt> Parser::parseReturnStmt()
 
     consume(TokenCode::SEMI, "expected ';' after return", E_ExpectASEMI);
     return returnStmt;
+}
+
+std::unique_ptr<BreakStmt> Parser::parseBreakStmt()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    match(TokenCode::BREAK);
+    auto stmt = std::make_unique<BreakStmt>();
+
+    recorder.bindNode(stmt.get());
+
+    consume(TokenCode::SEMI, "expected ';' after break", E_ExpectASEMI);
+    return stmt;
+}
+
+std::unique_ptr<ContinueStmt> Parser::parseContinueStmt()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    match(TokenCode::CONTINUE);
+    auto stmt = std::make_unique<ContinueStmt>();
+
+    recorder.bindNode(stmt.get());
+
+    consume(TokenCode::SEMI, "expected ';' after continue", E_ExpectASEMI);
+    return stmt;
 }
 
 std::unique_ptr<DeclStmt> Parser::parseDeclarationStatement()
@@ -540,7 +673,12 @@ std::unique_ptr<ForStmt> Parser::parseForLoop()
 
     forStmt->loopVar = consume(TokenCode::IDENTIFIER, "expected an identifier as the loop variable", E_ExpectAnIdentifier).value;
     consume(TokenCode::IN, "expected keyword 'in'", E_ExpectedKeyword);
+
+    // A bare-identifier iterable followed by `{` is the loop body, not a struct
+    // literal — but a known-struct-type literal is still allowed as the iterable.
+    inForIterable_ = true;
     forStmt->iterable = parseExpression();
+    inForIterable_ = false;
 
     forStmt->body = parseStatement();
     return forStmt;
@@ -555,7 +693,9 @@ std::unique_ptr<WhileStmt> Parser::parseWhileLoop()
 
     recorder.bindNode(whileLoop.get());
 
+    inControlFlowCondition_ = true;
     whileLoop->condition = parseExpression();
+    inControlFlowCondition_ = false;
 
     whileLoop->body = parseStatement();
     return whileLoop;
@@ -620,6 +760,7 @@ int Parser::getPrecedence(TokenCode type)
     {
     case TokenCode::STAR:
     case TokenCode::SLASH:
+    case TokenCode::MOD:
         return 8;
     case TokenCode::PLUS:
     case TokenCode::MINUS:
@@ -668,8 +809,14 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         Token identifier = currentToken();
         advance();
 
-        if (match(TokenCode::LBRACE))
+        // `Name { ... }` is a struct literal. Normally any identifier works
+        // (cross-file types like the stdlib's Option aren't in knownTypes). In a
+        // for-loop iterable or an if/while condition the `{` is ambiguous with a
+        // block/body, so there we require Name to be a known struct type.
+        if (check(TokenCode::LBRACE) && (knownTypes.count(identifier.value) > 0
+            || !(inForIterable_ || inControlFlowCondition_)))
         {
+            match(TokenCode::LBRACE);
             auto expr = parseStructInitialization(identifier);
             recorder.bindNode(expr.get());
             return expr;
@@ -720,11 +867,15 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return expr;
     }
 
-    Logger::LogInfo logInfo;
-    initLogInfo(currentToken(), logInfo, "expected expression", E_ExpectedExpression);
-    Logger::Log(Logger::LogLevel::ERROR, logInfo);
+    logError(currentToken(), "expected expression", E_ExpectedExpression);
+    advance(); // consume the bad token — guarantees callers make progress
 
-    return nullptr;
+    // Return a placeholder so callers (parseStatement's `expr->position`, the
+    // binary-op loop, etc.) don't dereference null. The Parser gates on the
+    // error count before HIRBuilder ever sees this AST.
+    auto placeholder = std::make_unique<IdentifierExpr>();
+    placeholder->name = "<error>";
+    return placeholder;
 }
 
 std::unique_ptr<BorrowExpr> Parser::parseBorrowExpression()
@@ -773,9 +924,7 @@ std::unique_ptr<LiteralExpr> Parser::parseLiteral()
         literal->kind = LiteralExpr::LiteralType::Bool;
         break;
     default:
-        Logger::LogInfo logInfo;
-        initLogInfo(currentToken(), logInfo, "invalid literal kind", E_InvalidLiteralType);
-        Logger::Log(Logger::LogLevel::ERROR, logInfo);
+        logError(currentToken(), "invalid literal kind", E_InvalidLiteralType);
     }
 
     advance();
@@ -945,13 +1094,26 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
     return left;
 }
 
-std::vector<std::string> Parser::parseGenericConstraints()
+std::vector<GenericConstraint> Parser::parseGenericConstraints()
 {
-    std::vector<std::string> result;
+    std::vector<GenericConstraint> result;
 
     do
     {
-        result.push_back(consume(TokenCode::IDENTIFIER, "expected a idenfiter for constraint trait name", E_ExpectAnIdentifier).value);
+        GenericConstraint c;
+        c.name = consume(TokenCode::IDENTIFIER, "expected an identifier for constraint trait name", E_ExpectAnIdentifier).value;
+
+        // Optional concrete args: T: Iterator<i32>
+        if (match(TokenCode::LT))
+        {
+            do
+            {
+                c.args.push_back(std::move(parseType()));
+            } while (match(TokenCode::COMMA));
+            match(TokenCode::GT);
+        }
+
+        result.push_back(std::move(c));
     } while (match(TokenCode::PLUS));
 
     return result;

@@ -37,6 +37,8 @@ public:
     void visit(CompoundStmt *node) override;
     void visit(IfStmt *node) override;
     void visit(ReturnStmt *node) override;
+    void visit(BreakStmt *node) override;
+    void visit(ContinueStmt *node) override;
     void visit(DeclStmt *node) override;
     void visit(AssignStmt *node) override;
     void visit(ExprStmt *node) override;

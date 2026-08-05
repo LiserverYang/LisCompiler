@@ -48,7 +48,25 @@ public:
 
     std::shared_ptr<CustomType> createCustom(std::string name, std::vector<CustomType::Field> fields);
 
+    /** Create (or return the cached) CustomType with empty fields — a shell
+     *  registered so forward/recursive references resolve before fields are set. */
+    std::shared_ptr<CustomType> createCustomShell(std::string name);
+    std::shared_ptr<CustomType> createGenericCustomShell(std::string name, std::vector<std::shared_ptr<Type>> genericParams);
+
     std::optional<std::shared_ptr<CustomType>> getCustom(std::string name);
+
+    /**
+     * Substitute generic params in `ty` via `subst` (param name → concrete type).
+     * Single implementation shared by the semantic analyzer, monomorphization and
+     * struct-field instantiation.
+     *
+     * @param strict  when true, a GenericParam missing from `subst` throws (mono's
+     *                fail-fast invariant); when false it passes through unchanged
+     *                (sema/type-context callers substitute partial maps).
+     */
+    std::shared_ptr<Type> substitute(std::shared_ptr<Type> ty,
+        const std::unordered_map<std::string, std::shared_ptr<Type>> &subst,
+        bool strict = false);
 
     std::shared_ptr<FunctionType> getFunction(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType);
 
@@ -70,9 +88,30 @@ public:
         std::vector<std::shared_ptr<Type>> genericParams,
         std::vector<CustomType::Field> fields);
 
+    std::shared_ptr<TraitType> createGenericTrait(
+        std::string name,
+        std::vector<std::shared_ptr<Type>> genericParams,
+        std::vector<TraitType::Method> methods);
+
+    /** Create an instantiated TraitType (e.g. Iterator<i32>) with use-site args. */
+    std::shared_ptr<TraitType> instantiateTrait(
+        std::shared_ptr<TraitType> generic,
+        std::vector<std::shared_ptr<Type>> args);
+
     std::shared_ptr<CustomType> instantiateCustom(
         std::shared_ptr<CustomType> generic,
         std::vector<std::shared_ptr<Type>> args);
+
+    /** Re-derive an instantiation's implTrait from its origin (order-independent
+     *  conformance; a cache hit may be older than the origin's implTrait). */
+    void reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic,
+        const std::unordered_map<std::string, std::shared_ptr<Type>> &subst);
+
+    /** Re-derive an instantiation's FIELDS from its origin (order-independent
+     *  layout; an instance created while its origin was still an empty pass-1b
+     *  shell keeps empty fields unless re-synced on a cache hit). */
+    void reSyncFields(CustomType *inst, const std::shared_ptr<CustomType> &generic,
+        const std::unordered_map<std::string, std::shared_ptr<Type>> &subst);
 
     const std::unordered_map<std::string, std::shared_ptr<CustomType>> &
     getInstantiatedCustoms() const

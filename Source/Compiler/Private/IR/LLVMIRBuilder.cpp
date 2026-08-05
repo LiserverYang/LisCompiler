@@ -6,6 +6,7 @@
  */
 
 #include "IR/LLVMIRBuilder.hpp"
+#include "IR/MIRMonomorphization.hpp"
 
 #include <cassert>
 #include <sstream>
@@ -40,8 +41,14 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
     // Pass 3 — globals.
     lowerGlobals(prog);
 
-    // Pass 4 — function bodies.
+    // Pass 4 — generate drop glue bodies. Must run BEFORE function bodies are
+    // lowered: lowerDrop() skips a glue function that is still a pure
+    // declaration, so every __drop_<T> that a MIRStmtDrop will reference must
+    // already have a body by then. All struct field layouts (structFields_)
+    // and function signatures (for Drop::drop methods) are ready by now.
+    generateDropGlue();
 
+    // Pass 5 — function bodies.
     for (const auto &mirFn : prog.functions)
     {
         lowerFunctionBody(*mirFn.get());
@@ -330,32 +337,79 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     std::optional<llvm::BasicBlock *> normalDest,
     std::optional<llvm::BasicBlock *> unwindDest)
 {
-    // Resolve the callee.
-    llvm::Function *callee = nullptr;
-
-    if (auto *move = std::get_if<MIRMove>(&s.callee))
-    {
-        // Function pointer in a local — load it.
-        llvm::Value *fnPtr = loadPlace(fs, move->place);
-        // For now treat as a direct call if we can resolve the name.
-        // A full implementation would emit an indirect call via fnPtr.
-        (void)fnPtr;
-    }
-
-    // Direct call by name (most common path).
-    callee = context->module->getFunction(s.funcName);
-    if (!callee)
-    {
-        // The function is external — declare it with an opaque signature.
-        // This happens for stdlib/intrinsic calls.
-        callee = getOrDeclareFn(s.funcName);
-    }
-
-    // Lower arguments.
+    // Lower arguments first (shared by the direct and indirect paths).
     std::vector<llvm::Value *> args;
     args.reserve(s.args.size());
     for (const auto &arg : s.args)
         args.push_back(lowerOperand(fs, arg));
+
+    // Resolve the callee.
+    llvm::Function *callee = nullptr;
+    llvm::Value *indirectPtr = nullptr;
+    std::shared_ptr<FunctionType> indirectTy;
+
+    if (auto *move = std::get_if<MIRMove>(&s.callee))
+    {
+        // Direct call by name (most common path): the callee temp holds the
+        // function name and s.funcName is the real symbol.
+        callee = context->module->getFunction(s.funcName);
+        if (!callee)
+        {
+            // Not a module function. If the callee place is FUNCTION-typed it is
+            // a function-pointer VALUE (a local/param) — call through it rather
+            // than minting a bogus external declaration.
+            auto funcTy = std::dynamic_pointer_cast<FunctionType>(move->place.type);
+            if (funcTy)
+            {
+                indirectPtr = loadPlace(fs, move->place);
+                indirectTy = funcTy;
+            }
+            else
+            {
+                // The function is external — declare it with an opaque signature
+                // (stdlib/intrinsic calls).
+                callee = getOrDeclareFn(s.funcName);
+            }
+        }
+    }
+    else if (auto *copy = std::get_if<MIRCopy>(&s.callee))
+    {
+        callee = context->module->getFunction(s.funcName);
+        if (!callee)
+        {
+            auto funcTy = std::dynamic_pointer_cast<FunctionType>(copy->place.type);
+            if (funcTy)
+            {
+                indirectPtr = loadPlace(fs, copy->place);
+                indirectTy = funcTy;
+            }
+            else
+            {
+                callee = getOrDeclareFn(s.funcName);
+            }
+        }
+    }
+
+    // Indirect call: rebuild the llvm::FunctionType from the MIR FunctionType
+    // (opaque pointers erase it), then call through the loaded pointer.
+    if (indirectPtr)
+    {
+        std::vector<llvm::Type *> paramTys;
+        for (const auto &p : indirectTy->getParams())
+            paramTys.push_back(toLLVMType(p));
+        llvm::FunctionType *fty = llvm::FunctionType::get(
+            toLLVMType(indirectTy->getReturnType()), paramTys, /*isVarArg=*/false);
+
+        llvm::Type *retTy = fty->getReturnType();
+        bool isVoid = retTy->isVoidTy();
+        llvm::CallInst *call =
+            builder_->CreateCall(fty, indirectPtr, args,
+                isVoid ? "" : s.funcName + ".ret");
+
+        if (s.dest.has_value() && !isVoid)
+            storePlace(fs, *s.dest, call);
+        return;
+    }
 
     if (unwindDest.has_value())
     {
@@ -392,6 +446,12 @@ void LLVMIRBuilder::lowerDrop(FunctionState &fs, const MIRStmtDrop &s)
         return; // primitives have no drop glue
 
     llvm::Function *dropFn = getOrDeclareDropGlue(sName);
+
+    // Drop glue for a struct may not have been generated yet. Calling a pure
+    // declaration (no body) would only produce an undefined symbol at link
+    // time, so skip the call until the glue exists.
+    if (dropFn->isDeclaration())
+        return;
 
     // Drop glue receives a pointer to the value.
     llvm::Value *ptr = lowerPlaceAsPtr(fs, s.place);
@@ -706,6 +766,15 @@ llvm::Value *LLVMIRBuilder::lowerConst(const MIRConst &c)
 
     case Kind::String:
     {
+        // A function name used as a VALUE (`let fp = foo;`, passing `foo`)
+        // resolves to the named function's address, not a string literal.
+        if (c.type && c.type->getKind() == Type::Kind::Function)
+        {
+            const std::string &fnName = std::get<std::string>(c.value);
+            if (llvm::Function *fn = context->module->getFunction(fnName))
+                return fn;
+            return getOrDeclareFn(fnName); // external — opaque declaration
+        }
         // Emit a null-terminated global string constant and return a pointer.
         const std::string &s = std::get<std::string>(c.value);
         return builder_->CreateGlobalStringPtr(s, ".str");
@@ -749,11 +818,11 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
             auto refTy = std::static_pointer_cast<ReferenceType>(currentTy);
             auto innerTy = refTy->getBaseType();
 
-            ptr = builder_->CreateGEP(
-                toLLVMType(innerTy),
-                ptr,
-                {builder_->getInt32(0)},
-                "deref");
+            // A reference is a pointer value stored in an addressable slot
+            // (alloca / global). Dereferencing must LOAD that pointer to get
+            // the referent's address — a GEP with index 0 would be a no-op.
+            ptr = builder_->CreateLoad(
+                toLLVMType(currentTy), ptr, "deref");
             currentTy = innerTy;
             break;
         }
@@ -907,5 +976,113 @@ LLVMIRBuilder::getElementType(const std::shared_ptr<Type> &ty)
 
     default:
         llvm_unreachable("getElementType: type has no element type");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drop-glue generation
+// ─────────────────────────────────────────────────────────────────────────────
+// Synthesize a __drop_<StructName> body for every concrete struct type. Must
+// run before function bodies are lowered (lowerDrop() skips glue that is still
+// a declaration).
+//
+// Two cases:
+//   * The struct implements the Drop trait (`impl Drop for X { fn drop(self) }`)
+//     → the glue calls X::drop on the value, by value. Because drop(self) takes
+//       self BY VALUE, the user's method owns the whole teardown — the glue does
+//       NOT also recurse into fields (that would double-drop anything the drop
+//       method moved, and there is no field-drop syntax to coordinate with).
+//   * Otherwise → recursively call the glue of every non-Copy, non-reference
+//     field. References (&T / &mut T) are borrowed data, not owned, so they are
+//     skipped; primitives are Copy and need no drop.
+
+void LLVMIRBuilder::generateDropGlue()
+{
+    for (const auto &[structName, fields] : structFields_)
+    {
+        llvm::Function *dropFn = getOrDeclareDropGlue(structName);
+        if (!dropFn->isDeclaration())
+            continue; // body already exists (e.g. hand-written drop glue)
+
+        auto stIt = structTypes_.find(structName);
+        if (stIt == structTypes_.end())
+            continue;
+
+        llvm::StructType *stTy = stIt->second;
+
+        // ── Create the entry block ─────────────────────────────────────────
+        llvm::BasicBlock *entry =
+            llvm::BasicBlock::Create(ctx_, "entry", dropFn);
+        builder_->SetInsertPoint(entry);
+
+        // The single parameter is an opaque pointer to the struct value.
+        llvm::Value *ptr = dropFn->getArg(0);
+
+        // ── Case 1: the struct implements the Drop trait ───────────────────
+        // If so, delegate the whole teardown to the user's drop(self) method.
+        bool implementsDrop = false;
+        if (auto custom = context->typeContext->getCustom(structName))
+            implementsDrop = (*custom)->implementsTrait("Drop");
+
+        if (implementsDrop)
+        {
+            // The drop method is a by-value `fn drop(self)` → LLVM void(X).
+            // Glue holds a pointer, so load the whole value and pass it by
+            // value. The method is a regular MIR function, already declared.
+            //
+            // Derive its name from the struct's ORIGIN + generic args so a
+            // generic instantiation resolves to the monomorphized drop method
+            // (`impl<T> Drop for Box<T>` → Box::drop_Mono_int32), not the
+            // never-existing `Box$int32::drop`. For a non-generic struct the
+            // args are empty and the name is just "Box::drop".
+            std::string dropName;
+            if (auto custom = context->typeContext->getCustom(structName))
+            {
+                dropName = (*custom)->getOriginName() + "::drop";
+                const auto &args = (*custom)->getGenericArgs();
+                if (!args.empty())
+                    dropName = MIRMonomorphization::makeMonoFuncName(dropName, args);
+            }
+            if (!dropName.empty())
+            {
+                if (llvm::Function *userDrop =
+                        context->module->getFunction(dropName))
+                {
+                    llvm::Value *val = builder_->CreateLoad(stTy, ptr);
+                    builder_->CreateCall(
+                        userDrop->getFunctionType(), userDrop, {val});
+                    builder_->CreateRetVoid();
+                    continue;
+                }
+            }
+            // Defensive: the Drop impl exists but the method is missing.
+            // Fall through to field recursion rather than dropping nothing.
+        }
+
+        // ── Case 2: no Drop impl — recursively drop owned fields ───────────
+        for (const auto &[fieldName, fieldType] : fields)
+        {
+            // Primitives and references are Copy / borrowed — no drop needed.
+            if (fieldType->isCopyable())
+                continue;
+
+            // Custom / struct fields: recursively call the field type's glue.
+            std::string fieldStructName = getStructName(fieldType);
+            if (fieldStructName.empty())
+                continue; // Trait objects etc. — skip for now
+
+            llvm::Function *fieldDropFn =
+                getOrDeclareDropGlue(fieldStructName);
+
+            // GEP to the field and call its drop glue.
+            unsigned idx = fieldIndexOf(structName, fieldName);
+            llvm::Value *fieldPtr =
+                builder_->CreateStructGEP(stTy, ptr, idx, fieldName);
+
+            builder_->CreateCall(
+                fieldDropFn->getFunctionType(), fieldDropFn, {fieldPtr});
+        }
+
+        builder_->CreateRetVoid();
     }
 }

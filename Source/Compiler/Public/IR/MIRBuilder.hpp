@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 /**
  * MIRBuilder
@@ -65,6 +67,45 @@ private:
     /** Maps user variable name → local index inside the current function. */
     std::unordered_map<std::string, size_t> varMap_;
 
+    /**
+     * Stack of "owned local" vectors, one per lexical block currently being
+     * lowered. buildVarDecl records non-Copy locals here; buildBlock drops them
+     * in reverse declaration order (LIFO) when the block ends.
+     */
+    std::vector<std::vector<MIRPlace>> ownedLocalsStack_;
+
+    /**
+     * Locals whose value has been moved out (via a MIRMove operand). These
+     * must not be dropped at block end — the receiver now owns the value.
+     */
+    std::unordered_set<size_t> movedLocals_;
+
+    /**
+     * Root local index → full Field projection paths moved out by partial
+     * (field) moves, e.g. `let x = pair.a` → [["a"]], `let x = p.a.b` →
+     * [["a","b"]]. The root still owns the remaining fields, so emitDrop()
+     * must not drop the whole struct (that would double-free the moved field);
+     * instead it decomposes the root recursively via emitDropPartial(),
+     * dropping every still-owned non-Copy field down the tree.
+     */
+    std::unordered_map<size_t, std::vector<std::vector<std::string>>> partiallyMovedFields_;
+
+    /**
+     * Enclosing loop targets, innermost last. break lowers to
+     * Goto{breakTarget} (the loop exit), continue to Goto{continueTarget}
+     * (the loop header). ownedFrameBase is the index into ownedLocalsStack_
+     * of the loop-body block's frame: a break/continue must drop exactly the
+     * frames from the current innermost one down to (and including) the loop
+     * body frame — NOT enclosing scopes, whose locals outlive the loop.
+     */
+    struct LoopTarget
+    {
+        BasicBlockId breakTarget;
+        BasicBlockId continueTarget;
+        size_t ownedFrameBase;
+    };
+    std::vector<LoopTarget> loopTargets_;
+
     // ── top-level builders ────────────────────────────────────────────────────
     MIRFunction buildFunction(HIRFunction *fn);
     MIRGlobal buildGlobal(HIRVarDecl *decl);
@@ -78,7 +119,33 @@ private:
     void buildIf(HIRIf *ifStmt);
     void buildLoop(HIRLoop *loop);
     void buildReturn(HIRReturn *ret);
+    void buildBreak(HIRBreak *brk);
+    void buildContinue(HIRContinue *cont);
+    void buildJump(const char *keyword, bool toExit);
     void buildExprStmt(HIRExprStmt *es);
+
+    /** Emit drop statements for owned locals in scopes from the innermost
+     *  active one down to (and including) frame `frameBase`, innermost-first
+     *  (reverse LIFO). Used on early-exit paths to correctly drop locals that
+     *  would otherwise only be dropped at block-end fall-through:
+     *    - return:      frameBase = 0 (the whole function dies)
+     *    - break/continue: frameBase = the loop body's frame — enclosing
+     *      scopes outlive the loop and must NOT be dropped here. */
+    void dropOwnedLocalsFrom(size_t frameBase);
+
+    /// Ownership state at one CFG point: which locals are fully moved out and
+    /// which field paths are moved out. Used for per-branch flow-sensitivity.
+    struct OwnershipState
+    {
+        std::unordered_set<size_t> moved;
+        std::unordered_map<size_t, std::vector<std::vector<std::string>>> partial;
+    };
+
+    /** On THIS branch's edge, drop outer-scope locals that are owned here but
+     *  dead on the SIBLING branch (moved out there) — otherwise they leak on
+     *  this path while the join suppresses the drop. Sets the global state to
+     *  `self` so emitDrop's movedLocals_ check reflects this path. */
+    void emitPathDrops(const OwnershipState &self, const OwnershipState &sibling);
 
     // ── expression builders ───────────────────────────────────────────────────
     // Every buildExpr* returns the MIRPlace that holds the result.
@@ -121,6 +188,13 @@ private:
     void emit(MIRStatement stmt);
     void emitAssign(MIRPlace lhs, MIRRValue rhs);
     void emitDrop(MIRPlace place);
+
+    /** Drop `place` but skip the moved-out sub-paths (relative to `place`).
+     *  Recurses into struct fields; used to decompose a partially-moved root
+     *  into per-field drops so sibling fields are dropped but the moved ones
+     *  are not (double-free). */
+    void emitDropPartial(MIRPlace place,
+        const std::vector<std::vector<std::string>> &movedPaths);
 
     // ── BinaryOp kind conversion ──────────────────────────────────────────────
     static MIRRValueBinaryOp::Op convertBinOp(HIRBinaryOp::OpKind kind);

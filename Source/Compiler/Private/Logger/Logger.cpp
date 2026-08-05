@@ -33,6 +33,12 @@ void LogCode(Logger::LogInfo &info, const std::string &color)
 
     const std::string &code = *info.code;
 
+    // beginPosition may come from a compiler-generated node (e.g. the for-loop
+    // desugar) whose position is unset/garbage — clamp it so the line scan
+    // below never reads out of bounds.
+    if (info.beginPosition > code.size())
+        info.beginPosition = code.size();
+
     int lineLength = 1;
     if (info.line > 0)
     {
@@ -82,8 +88,23 @@ void LogCode(Logger::LogInfo &info, const std::string &color)
     printf("%s| %s%s\n", indicatorSpaces.c_str(), errorIndent.c_str(), errorMark.c_str());
 }
 
+static int gErrorCount = 0;
+
+int Logger::GetErrorCount()
+{
+    return gErrorCount;
+}
+
+void Logger::ResetErrorCount()
+{
+    gErrorCount = 0;
+}
+
 void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
 {
+    if (level == LogLevel::ERROR)
+        gErrorCount++;
+
     printf("\033[1m%s:%d:%d:\033[0m", info.codePath.c_str(), info.line, info.col);
 
     std::string color = "";
@@ -116,6 +137,9 @@ void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
 
     if (level == LogLevel::ERROR && info.exit)
     {
+        // Flush before terminating — in debug builds DEBUG_POINT() (int 3)
+        // would otherwise kill the process with the message still buffered.
+        fflush(stdout);
 #ifdef __DEBUG__
         // if it is debug, we should create debug point to get the call stack
         DEBUG_POINT();

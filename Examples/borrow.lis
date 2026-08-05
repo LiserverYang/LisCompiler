@@ -1,0 +1,63 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// borrow.lis — demonstrates the borrow checker: shared (&) vs mutable (&mut)
+// references, borrow lifetimes, and NLL (non-lexical lifetimes).
+//
+// Everything here COMPILES. Patterns the compiler rejects are shown as comments.
+
+struct counter
+{
+    pub value: i32
+}
+
+impl counter
+{
+    fn new(v: i32) -> counter
+    {
+        ret counter { value: v };
+    }
+
+    // &mut self: mutates the receiver for the call.
+    fn add(self: &mut counter, d: i32)
+    {
+        self.value = self.value + d;
+    }
+
+    // &self: reads the receiver without mutating it.
+    fn get(self: &counter) -> i32
+    {
+        ret self.value;
+    }
+}
+
+fn read_sum(a: &counter, b: &counter) -> i32
+{
+    ret a.value + b.value;
+}
+
+fn main() -> i32
+{
+    let mut c = counter::new(0);
+
+    // Method receivers borrow the receiver for the call only (temporary borrow).
+    c.add(10);
+    let v1 = c.get();
+    // c.add(5); // <-- would be rejected if c were NOT `let mut` (cannot borrow as mutable)
+
+    // A shared borrow: c is readable through r, but not writable while r is used.
+    let r = &c;
+    let v2 = r.value;
+    // c.value = 99;  // <-- rejected: cannot assign to 'c.value' because it is borrowed
+    let v3 = read_sum(r, &c); // multiple shared borrows coexist
+
+    // NLL: r's borrow ends at its last use (read_sum above), so a mutable
+    // borrow afterwards is allowed.
+    let m = &mut c;
+    m.value = m.value + 5; // mutate through the mutable reference (field access)
+
+    // Two disjoint field borrows coexist (field precision).
+    //   let a = &c.value; let b = &mut c.value; // <-- rejected: same field
+
+    ret v1 + v2 + v3 + c.value;
+}

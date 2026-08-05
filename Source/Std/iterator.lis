@@ -1,0 +1,81 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// iterator.lis
+//
+// The Iterator protocol. A type implements Iterator<T> by providing next(),
+// which returns the next element wrapped in Option<T> (None when exhausted).
+//
+// The for-loop desugars to:
+//     let mut __it = <iterable>;
+//     while true {
+//         let __opt = __it.next();
+//         if __opt.is_some {
+//             let x = __opt.value;
+//             ...
+//         } else {
+//             break;
+//         }
+//     }
+
+trait Iterator<T>
+{
+    fn next(self: &mut Self) -> Option<T>;
+}
+
+// A concrete half-open range [start, end). Generic Range<T> with arithmetic is
+// deferred until numeric trait bounds exist, so the impl is specialised to i32.
+struct Range
+{
+    pub start: i32,
+    pub end: i32,
+    pub current: i32
+}
+
+impl Iterator<i32> for Range
+{
+    fn next(self: &mut Self) -> Option<i32>
+    {
+        if self.current < self.end {
+            let v = self.current;
+            self.current = self.current + 1;
+            ret Option { is_some: true, value: v };
+        }
+        ret Option { is_some: false, value: 0 };
+    }
+}
+
+fn range(start: i32, end: i32) -> Range
+{
+    ret Range { start: start, end: end, current: start };
+}
+
+// ---------------------------------------------------------------------------
+// Generic iterator helpers. These monomorphize per concrete iterator type.
+// ---------------------------------------------------------------------------
+
+fn sum<T: Iterator<i32>>(it: T) -> i32
+{
+    let mut s = 0;
+    for x in it {
+        s = s + x;
+    }
+    ret s;
+}
+
+fn count<T: Iterator<i32>>(it: T) -> i32
+{
+    let mut n = 0;
+    for _x in it {
+        n = n + 1;
+    }
+    ret n;
+}
+
+fn first<T: Iterator<i32>>(it: T) -> Option<i32>
+{
+    for x in it {
+        ret Option { is_some: true, value: x };
+    }
+    ret Option { is_some: false, value: 0 };
+}

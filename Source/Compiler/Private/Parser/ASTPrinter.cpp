@@ -167,7 +167,19 @@ void ASTPrinter::visit(GenericParam *node)
 
     for (size_t i = 0; i < node->constraints.size(); i ++)
     {
-        os << node->constraints[i] << " ";
+        const auto &c = node->constraints[i];
+        os << c.name;
+        if (!c.args.empty())
+        {
+            os << "<";
+            for (size_t j = 0; j < c.args.size(); ++j)
+            {
+                os << c.args[j]->typeName;
+                if (j != c.args.size() - 1) os << ", ";
+            }
+            os << ">";
+        }
+        os << " ";
 
         if (i != node->constraints.size() - 1)
             os << "+ ";
@@ -244,6 +256,18 @@ void ASTPrinter::visit(ReturnStmt *node)
 {
     printCommon(node);
     os << " [ReturnStmt]";
+}
+
+void ASTPrinter::visit(BreakStmt *node)
+{
+    printCommon(node);
+    os << " [BreakStmt]";
+}
+
+void ASTPrinter::visit(ContinueStmt *node)
+{
+    printCommon(node);
+    os << " [ContinueStmt]";
 }
 
 void ASTPrinter::visit(DeclStmt *node)

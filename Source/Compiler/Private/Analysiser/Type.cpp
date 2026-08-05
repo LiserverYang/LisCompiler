@@ -20,6 +20,13 @@ bool is_one_of(const T &value, const Args &...args)
 // ========================= Type =========================
 Type::Type(Kind kind) : kind(kind) {}
 
+bool Type::implementsTrait(const std::string &name) const
+{
+    for (const auto &t : implTrait)
+        if (t->getName() == name) return true;
+    return false;
+}
+
 Type::Kind Type::getKind() const
 {
     return kind;
@@ -121,6 +128,11 @@ CustomType::CustomType(std::string name,
 const std::string &CustomType::getName() const
 {
     return name;
+}
+
+const std::string &CustomType::getOriginName() const
+{
+    return genericOrigin ? genericOrigin->getName() : name;
 }
 const std::vector<CustomType::Field> &CustomType::getFields() const
 {
@@ -256,9 +268,27 @@ std::string FunctionType::toString() const
 TraitType::TraitType(std::string name, std::vector<Method> methods)
     : Type(Kind::Trait), name(std::move(name)), methods(std::move(methods)) {}
 
+TraitType::TraitType(std::string name, std::vector<std::shared_ptr<Type>> genericParams, std::vector<Method> methods)
+    : Type(Kind::Trait), name(std::move(name)), genericParams(std::move(genericParams)), methods(std::move(methods)) {}
+
 const std::string &TraitType::getName() const
 {
     return name;
+}
+
+const std::vector<std::shared_ptr<Type>> &TraitType::getGenericParams() const
+{
+    return genericParams;
+}
+
+void TraitType::setGenericArgs(std::vector<std::shared_ptr<Type>> args)
+{
+    genericArgs = std::move(args);
+}
+
+const std::vector<std::shared_ptr<Type>> &TraitType::getGenericArgs() const
+{
+    return genericArgs;
 }
 
 const std::vector<TraitType::Method> &TraitType::getMethods() const
@@ -278,7 +308,12 @@ bool TraitType::equals(const std::shared_ptr<Type> &other) const
 {
     if (other->getKind() != Kind::Trait) return false;
     auto tt = std::static_pointer_cast<TraitType>(other);
-    return tt->name == name;
+    if (tt->name != name) return false;
+    if (tt->genericArgs.size() != genericArgs.size()) return false;
+    for (size_t i = 0; i < genericArgs.size(); ++i)
+        if (!genericArgs[i]->equals(tt->genericArgs[i]))
+            return false;
+    return true;
 }
 
 std::string TraitType::toString() const

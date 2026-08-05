@@ -14,6 +14,7 @@
 ERRORID E_UnClosedStringLiteral = 1001;
 ERRORID E_UnclosedCharLiteral = 1002;
 ERRORID E_UnknownCharacter = 1003;
+ERRORID E_UnclosedBlockComment = 1004;
 
 // Parsing errors
 
@@ -34,3 +35,26 @@ ERRORID E_ExpectType = 2014;
 ERRORID E_ExpectedExpression = 2015;
 ERRORID E_InvalidLiteralType = 2016;
 ERRORID E_MutidefinedTrait = 2017;
+
+// Semantic (HIR) errors
+
+ERRORID E_SemanticError = 3001;          // general/default semantic error
+ERRORID E_TypeMismatch = 3002;
+ERRORID E_UndefinedIdentifier = 3003;
+ERRORID E_AssignToImmutable = 3004;
+ERRORID E_UseOfMovedValue = 3005;
+ERRORID E_ArgMismatch = 3006;
+ERRORID E_GenericError = 3007;
+ERRORID E_TraitError = 3008;
+ERRORID E_ReturnTypeMismatch = 3009;
+ERRORID E_CastError = 3010;
+
+// Borrow-checker errors (4000 series)
+
+ERRORID E_CannotBorrowMutWhileBorrowed = 4001;
+ERRORID E_CannotBorrowWhileMutBorrowed = 4002;
+ERRORID E_CannotMutateWhileBorrowed = 4003;
+ERRORID E_CannotMoveWhileBorrowed = 4004;
+ERRORID E_CannotBorrowMovedValue = 4005;
+ERRORID E_CannotBorrowAsMutable = 4006;
+ERRORID E_BorrowDoesNotLiveLongEnough = 4007;

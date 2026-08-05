@@ -49,6 +49,7 @@ TypeContext::TypeContext()
     primitives[PrimitiveType::PrimKind::F32] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::F32);
     primitives[PrimitiveType::PrimKind::F64] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::F64);
     primitives[PrimitiveType::PrimKind::BOOL] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::BOOL);
+    primitives[PrimitiveType::PrimKind::CHAR] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::CHAR);
     primitives[PrimitiveType::PrimKind::VOID] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::VOID);
 }
 
@@ -82,6 +83,32 @@ std::shared_ptr<CustomType> TypeContext::createCustom(std::string name, std::vec
     }
 
     auto customType = std::make_shared<CustomType>(name, fields);
+    customs[name] = customType;
+    return customType;
+}
+
+std::shared_ptr<CustomType> TypeContext::createCustomShell(std::string name)
+{
+    auto it = customs.find(name);
+    if (it != customs.end())
+    {
+        return it->second;
+    }
+
+    auto customType = std::make_shared<CustomType>(name, std::vector<CustomType::Field>{});
+    customs[name] = customType;
+    return customType;
+}
+
+std::shared_ptr<CustomType> TypeContext::createGenericCustomShell(std::string name, std::vector<std::shared_ptr<Type>> genericParams)
+{
+    auto it = customs.find(name);
+    if (it != customs.end())
+    {
+        return it->second;
+    }
+
+    auto customType = std::make_shared<CustomType>(name, std::move(genericParams), std::vector<CustomType::Field>{});
     customs[name] = customType;
     return customType;
 }
@@ -121,6 +148,36 @@ std::shared_ptr<TraitType> TypeContext::createTrait(std::string name, std::vecto
     auto traitType = std::make_shared<TraitType>(name, std::move(methods));
     traits[name] = traitType;
     return traitType;
+}
+
+std::shared_ptr<TraitType> TypeContext::createGenericTrait(
+    std::string name,
+    std::vector<std::shared_ptr<Type>> genericParams,
+    std::vector<TraitType::Method> methods)
+{
+    auto it = traits.find(name);
+    if (it != traits.end())
+    {
+        return it->second;
+    }
+
+    auto traitType = std::make_shared<TraitType>(name, std::move(genericParams), std::move(methods));
+    traits[name] = traitType;
+    return traitType;
+}
+
+std::shared_ptr<TraitType> TypeContext::instantiateTrait(
+    std::shared_ptr<TraitType> generic,
+    std::vector<std::shared_ptr<Type>> args)
+{
+    // A malformed constraint like `T: Iterator<i32, i64>` on a single-param
+    // trait would silently truncate in callers' zip loops. Fail loudly.
+    assert(generic->getGenericParams().empty() || generic->getGenericParams().size() == args.size());
+
+    auto inst = std::make_shared<TraitType>(
+        generic->getName(), generic->getGenericParams(), generic->getMethods());
+    inst->setGenericArgs(std::move(args));
+    return inst;
 }
 
 std::optional<std::shared_ptr<TraitType>> TypeContext::getTrait(std::string name)
@@ -296,10 +353,10 @@ static std::string mangleCustomName(const std::string &name,
     return s;
 }
 
-static std::shared_ptr<Type> substTypeForCustom(
-    TypeContext *ctx,
+std::shared_ptr<Type> TypeContext::substitute(
     std::shared_ptr<Type> ty,
-    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
+    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst,
+    bool strict)
 {
     if (!ty) return ty;
     switch (ty->getKind())
@@ -308,24 +365,69 @@ static std::shared_ptr<Type> substTypeForCustom(
     {
         auto gp = std::static_pointer_cast<GenericParamType>(ty);
         auto it = subst.find(gp->getParamName());
-        return it != subst.end() ? it->second : ty;
+        if (it == subst.end())
+        {
+            if (strict)
+                throw std::runtime_error("Generic parameter '" + gp->getParamName() + "' not found in substitution map");
+            return ty;
+        }
+        return it->second;
     }
     case Type::Kind::Reference:
     {
         auto r = std::static_pointer_cast<ReferenceType>(ty);
-        return ctx->getReference(substTypeForCustom(ctx, r->getBaseType(), subst), r->isMutableRef());
+        return getReference(substitute(r->getBaseType(), subst, strict), r->isMutableRef());
     }
     case Type::Kind::Custom:
     {
         auto c = std::static_pointer_cast<CustomType>(ty);
-        if (c->getGenericArgs().empty()) return ty;
-        std::vector<std::shared_ptr<Type>> newArgs;
-        for (auto &a : c->getGenericArgs())
-            newArgs.push_back(substTypeForCustom(ctx, a, subst));
-        auto origin = c->genericOrigin ? c->genericOrigin : c;
-        return ctx->instantiateCustom(origin, std::move(newArgs));
+        if (!c->getGenericArgs().empty())
+        {
+            // Already-instantiated type (e.g. Foo$i32): substitute nested args.
+            std::vector<std::shared_ptr<Type>> newArgs;
+            for (auto &a : c->getGenericArgs())
+                newArgs.push_back(substitute(a, subst, strict));
+            auto origin = c->genericOrigin ? c->genericOrigin : c;
+            return instantiateCustom(origin, std::move(newArgs));
+        }
+        if (!c->getGenericParams().empty())
+        {
+            // Generic DEFINITION (e.g. Foo<T>: params, no args) — appears as a
+            // field of a generic struct or `self: Foo<T>` in generic-impl method
+            // bodies. Instantiate from the substitution map.
+            std::vector<std::shared_ptr<Type>> newArgs;
+            bool anySubstituted = false;
+            for (auto &gp : c->getGenericParams())
+            {
+                auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
+                auto it = subst.find(gpTy->getParamName());
+                if (it != subst.end())
+                {
+                    newArgs.push_back(it->second);
+                    anySubstituted = true;
+                }
+                else
+                {
+                    newArgs.push_back(gp); // keep the param if not in map
+                }
+            }
+            if (anySubstituted)
+                return instantiateCustom(c, std::move(newArgs));
+            return c;
+        }
+        return ty; // fully concrete
+    }
+    case Type::Kind::Function:
+    {
+        auto ft = std::static_pointer_cast<FunctionType>(ty);
+        std::vector<std::shared_ptr<Type>> newParams;
+        for (const auto &p : ft->getParams())
+            newParams.push_back(substitute(p, subst, strict));
+        auto newRet = substitute(ft->getReturnType(), subst, strict);
+        return getFunction(std::move(newParams), newRet);
     }
     default:
+        // Primitive / Trait / Self — pass through unchanged.
         return ty;
     }
 }
@@ -382,12 +484,9 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
 
     std::string mangled = mangleCustomName(generic->getName(), args);
 
-    if (concrete)
-    {
-        auto it = instantiatedCustoms.find(mangled);
-        if (it != instantiatedCustoms.end()) return it->second;
-    }
-
+    // Build the substitution map BEFORE the cache check so a cache hit can
+    // re-derive conformance (the origin's implTrait may have grown since the
+    // instance was first created — see reSyncImplTrait).
     std::unordered_map<std::string, std::shared_ptr<Type>> subst;
     for (size_t i = 0; i < args.size(); ++i)
     {
@@ -395,9 +494,23 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
         subst[gp->getParamName()] = args[i];
     }
 
+    if (concrete)
+    {
+        auto it = instantiatedCustoms.find(mangled);
+        if (it != instantiatedCustoms.end())
+        {
+            reSyncImplTrait(it->second.get(), generic, subst);
+            // A same-file forward reference may have instantiated this from an
+            // empty pass-1b shell — re-derive the fields from the now-filled
+            // origin so the cached instance has the real layout.
+            reSyncFields(it->second.get(), generic, subst);
+            return it->second;
+        }
+    }
+
     std::vector<CustomType::Field> newFields;
     for (auto &f : generic->getFields())
-        newFields.push_back(CustomType::Field{f.name, substTypeForCustom(this, f.type, subst)});
+        newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst)});
 
     auto inst = std::make_shared<CustomType>(mangled,
         std::vector<std::shared_ptr<Type>>{},
@@ -405,6 +518,7 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
 
     inst->setGenericArgs(std::move(args));
     inst->genericOrigin = generic;
+    reSyncImplTrait(inst.get(), generic, subst);
 
     if (concrete)
         instantiatedCustoms[mangled] = inst;
@@ -412,4 +526,32 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
     customs[mangled] = inst;
 
     return inst;
+}
+
+void TypeContext::reSyncFields(CustomType *inst, const std::shared_ptr<CustomType> &generic,
+    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
+{
+    if (generic->getFields().empty())
+        return; // origin still an empty shell — nothing to sync yet
+    std::vector<CustomType::Field> newFields;
+    for (auto &f : generic->getFields())
+        newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst)});
+    inst->setFields(std::move(newFields));
+}
+
+void TypeContext::reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic,
+    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
+{
+    // Propagate trait conformance, substituting the struct's generic args into
+    // the trait's use-site args — `impl<T> Iterator<T> for Range<T>` must yield
+    // Iterator<i32> (not Iterator<T>) on Range$i32 for bound checks to pass.
+    inst->implTrait.clear();
+    for (auto &tr : generic->implTrait)
+    {
+        auto traitTy = std::static_pointer_cast<TraitType>(tr);
+        std::vector<std::shared_ptr<Type>> newArgs;
+        for (auto &a : traitTy->getGenericArgs())
+            newArgs.push_back(substitute(a, subst));
+        inst->implTrait.push_back(instantiateTrait(traitTy, std::move(newArgs)));
+    }
 }

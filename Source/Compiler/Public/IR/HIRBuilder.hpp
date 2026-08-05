@@ -20,6 +20,13 @@ class HIRBuilder : public ASTVisitor, public Pass
 private:
     std::stack<std::unique_ptr<HIRNode>> nodeStack;
 
+    /**
+     * Counter for naming the temporaries that for-loops desugar into.
+     * Unique names (`__it_0`/`__opt_0`) keep nested loops from shadowing each
+     * other through the MIRBuilder's flat varMap_ (which is not scope-aware).
+     */
+    size_t forLoopCtr_ = 0;
+
 public:
     HIRBuilder() = default;
     HIRBuilder(std::shared_ptr<Context> cnt)
@@ -54,6 +61,8 @@ public:
     virtual void visit(CompoundStmt *node) override;
     virtual void visit(IfStmt *node) override;
     virtual void visit(ReturnStmt *node) override;
+    virtual void visit(BreakStmt *node) override;
+    virtual void visit(ContinueStmt *node) override;
     virtual void visit(DeclStmt *node) override;
     virtual void visit(AssignStmt *node) override;
     virtual void visit(ExprStmt *node) override;

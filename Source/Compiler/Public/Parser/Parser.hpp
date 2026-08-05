@@ -35,6 +35,19 @@ protected:
     size_t snapshot = 0;
     TokenStream *tokenStream = nullptr;
 
+    /// Sentinel returned by currentToken()/getToken() for an empty stream.
+    static Token eofToken_;
+
+    /** While parsing a `for x in <iterable>`, a bare identifier followed by `{`
+     *  is ambiguous (struct literal vs loop body). In that context we require
+     *  the identifier to be a known struct type for it to be a struct literal. */
+    bool inForIterable_ = false;
+
+    /** While parsing an if/while CONDITION, a bare identifier followed by `{` is
+     *  the body block, not a struct literal (same disambiguation as for-loop
+     *  iterables). */
+    bool inControlFlowCondition_ = false;
+
     std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char", "void"};
     std::unordered_set<std::string> knownTraits = {};
 
@@ -54,10 +67,17 @@ protected:
     {
         if (pos >= tokenStream->size())
         {
+            if (tokenStream->empty())
+                return eofToken_; // empty stream — nothing to log against
             Logger::LogInfo logInfo;
-            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpeced finish", E_UnexpectFinish);
+            // Guard against currentPos == 0: currentPos - 1 would wrap to SIZE_MAX.
+            size_t anchor = currentPos > 0 ? currentPos - 1 : 0;
+            initLogInfo(tokenStream->at(anchor), logInfo, "Unexpeced finish", E_UnexpectFinish);
+            logInfo.exit = false;
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
+            // Clamp to the last valid token instead of at(size()) (which throws).
+            return tokenStream->at(anchor);
         }
 
         return tokenStream->at(pos);
@@ -67,10 +87,17 @@ protected:
     {
         if (finished())
         {
+            if (tokenStream->empty())
+                return eofToken_; // empty stream — nothing to log against
             Logger::LogInfo logInfo;
-            initLogInfo(tokenStream->at(currentPos - 1), logInfo, "Unexpect finish", E_UnexpectFinish);
+            // Guard against currentPos == 0: currentPos - 1 would wrap to SIZE_MAX.
+            size_t anchor = currentPos > 0 ? currentPos - 1 : 0;
+            initLogInfo(tokenStream->at(anchor), logInfo, "Unexpect finish", E_UnexpectFinish);
+            logInfo.exit = false;
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
+            // Clamp to the last valid token instead of at(size()) (which throws).
+            return tokenStream->at(anchor);
         }
 
         return tokenStream->at(currentPos);
@@ -96,6 +123,7 @@ protected:
     {
         if (finished() || currentToken().code != code)
         {
+            logInfo.exit = false; // recoverable — continue past the error
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
         }
 
@@ -110,6 +138,7 @@ protected:
         {
             Logger::LogInfo logInfo;
             initLogInfo(currentToken(), logInfo, msg, errorID);
+            logInfo.exit = false; // recoverable
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
         }
 
@@ -142,6 +171,22 @@ protected:
         logInfo.msg = msg;
         logInfo.errorId = errorId;
     }
+
+    /// Log a recoverable (non-fatal) parse error at `token`. Recovery skips to
+    /// the next statement boundary and keeps going so all errors surface in one
+    /// run; the Parser gates on the error count at the end (see run()).
+    inline void logError(Token &token, const std::string &msg, size_t errorId = 1)
+    {
+        Logger::LogInfo logInfo;
+        initLogInfo(token, logInfo, msg, errorId);
+        logInfo.exit = false;
+        Logger::Log(Logger::LogLevel::ERROR, logInfo);
+    }
+
+    /** Skip tokens until a safe restart point: a `;` (consumed), a `}`, or a
+     *  statement/declaration-start keyword. Used after a construct fails so the
+     *  next construct parses cleanly instead of cascading bogus errors. */
+    void synchronize();
 
     inline void createSnapshot()
     {
@@ -187,6 +232,8 @@ protected:
     std::unique_ptr<Expr> parseExpression();
     std::unique_ptr<IfStmt> parseIfStmt();
     std::unique_ptr<ReturnStmt> parseReturnStmt();
+    std::unique_ptr<BreakStmt> parseBreakStmt();
+    std::unique_ptr<ContinueStmt> parseContinueStmt();
     std::unique_ptr<DeclStmt> parseDeclarationStatement();
     std::unique_ptr<ForStmt> parseForLoop();
     std::unique_ptr<WhileStmt> parseWhileLoop();
@@ -203,7 +250,7 @@ protected:
     std::unique_ptr<BorrowExpr> parseBorrowExpression();
     std::vector<std::unique_ptr<GenericParam>> parseGenericParams();
     std::vector<std::unique_ptr<TypeNode>> parseCallGenericParams();
-    std::vector<std::string> parseGenericConstraints();
+    std::vector<GenericConstraint> parseGenericConstraints();
 
     bool looksLikeCallGenericParams();
 };
