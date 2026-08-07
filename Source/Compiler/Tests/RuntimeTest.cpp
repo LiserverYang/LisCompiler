@@ -910,6 +910,17 @@ TEST_F(RuntimeTest, StringIndexOption)
               " ret (c as i32) - (d as i32); }", 104 - 63);
 }
 
+TEST_F(RuntimeTest, StringIsEmpty)
+{
+    // is_empty() flips from true (String::new) to false after a push_char.
+    expectRun("fn main() -> i32 { let mut s = String::new();"
+              " let mut e = 0;"
+              " if s.is_empty() { e = e + 1; }"
+              " s.push_char('a');"
+              " if s.is_empty() { ret e; } else { ret e + 1; }"
+              " }", 2);
+}
+
 TEST_F(RuntimeTest, StringFreedExactlyOnce)
 {
     // A heap-owning struct with a Drop counter: moving it transfers ownership,

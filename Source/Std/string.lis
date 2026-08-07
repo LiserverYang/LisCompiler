@@ -108,6 +108,12 @@ impl String
 
         ret Option::None;
     }
+
+    // True when this String holds no characters (length is zero).
+    fn is_empty(self: &String) -> bool
+    {
+        ret self.len == 0;
+    }
 }
 
 impl Drop for String
