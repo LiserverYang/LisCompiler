@@ -16,6 +16,11 @@
 
 #include "Analysiser/Type.hpp"
 
+// Upper bound on `[T; N]` element counts. Keeps an alloca/GEP sane (1M elems of
+// i32 = 4 MB) and matches what LLVM accepts without risk of an assertion on
+// pathological sizes. The parser rejects literals that don't even fit int64.
+constexpr size_t MAX_ARRAY_ELEMENTS = 1 << 20;
+
 template <typename T>
 void hash_combine(size_t &seed, T const &v);
 
@@ -33,9 +38,45 @@ struct RefHash
     std::size_t operator()(const std::pair<void *, bool> &p) const;
 };
 
+struct ArrayHash
+{
+    std::size_t operator()(const std::pair<void *, size_t> &p) const
+    {
+        return std::hash<void *>()(p.first) ^ (std::hash<size_t>()(p.second) << 1);
+    }
+};
+
 struct FuncHash
 {
     std::size_t operator()(const std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>> &p) const;
+};
+
+/// Key for interning SelfType: (trait name, receiver mutability, receiver ref).
+/// libstdc++ (MinGW) ships no std::hash<std::tuple>, so this is a plain struct
+/// with its own hash, following the RefHash/FuncHash pattern above.
+struct SelfKey
+{
+    std::string name;
+    bool isMut = false;
+    bool isRef = false;
+    bool operator==(const SelfKey &o) const
+    {
+        return name == o.name && isMut == o.isMut && isRef == o.isRef;
+    }
+};
+
+struct SelfKeyHash
+{
+    std::size_t operator()(const SelfKey &k) const
+    {
+        // Plain std::hash like ArrayHash — hash_combine's definition lives in
+        // the .cpp and would not be visible where this inline operator() is
+        // instantiated in other translation units.
+        std::size_t seed = std::hash<std::string>()(k.name);
+        seed ^= (std::hash<bool>()(k.isMut) << 1);
+        seed ^= (std::hash<bool>()(k.isRef) << 2);
+        return seed;
+    }
 };
 
 class TypeContext
@@ -46,6 +87,9 @@ public:
     std::shared_ptr<PrimitiveType> getPrimitive(PrimitiveType::PrimKind kind);
 
     std::shared_ptr<ReferenceType> getReference(std::shared_ptr<Type> base, bool isMutable);
+
+    /** Get (or create + cache) `[elementType; size]`. */
+    std::shared_ptr<ArrayType> getArray(std::shared_ptr<Type> elementType, size_t size);
 
     std::shared_ptr<CustomType> createCustom(std::string name, std::vector<CustomType::Field> fields);
 
@@ -77,7 +121,7 @@ public:
 
     std::shared_ptr<SelfType> createSelf(std::string name, bool isMut, bool isRef);
 
-    std::optional<std::shared_ptr<SelfType>> getSelf(std::string name);
+    std::optional<std::shared_ptr<SelfType>> getSelf(const std::string &name, bool isMut, bool isRef);
 
     std::shared_ptr<FunctionType> getGenericFunction(
         std::vector<std::shared_ptr<GenericParamType>> genericParams,
@@ -132,7 +176,12 @@ private:
     std::unordered_map<std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>>, std::shared_ptr<FunctionType>, FuncHash> functions;
     std::unordered_map<std::pair<void *, bool>, std::shared_ptr<ReferenceType>, RefHash> refCache;
     std::unordered_map<std::string, std::shared_ptr<TraitType>> traits;
-    std::unordered_map<std::string, std::shared_ptr<SelfType>> selfs;
+    // SelfType is interned by (trait name, isMut, isRef) — the SAME triple
+    // SelfType::equals compares. Keying by name alone made a `&self` and a
+    // `&mut self` method of one trait share a SelfType, silently dropping the
+    // &mut receiver's mutability from borrow checking (P2).
+    std::unordered_map<SelfKey, std::shared_ptr<SelfType>, SelfKeyHash> selfs;
     std::unordered_map<std::string, std::shared_ptr<GenericParamType>> gParams;
     std::unordered_map<std::string, std::shared_ptr<CustomType>> instantiatedCustoms;
+    std::unordered_map<std::pair<void *, size_t>, std::shared_ptr<ArrayType>, ArrayHash> arrayCache;
 };

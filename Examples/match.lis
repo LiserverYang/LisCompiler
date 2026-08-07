@@ -3,7 +3,7 @@
 //
 // match.lis — enums + pattern matching.
 //
-// An enum is a tagged union: `color` is all unit variants, `option<T>` carries
+// An enum is a tagged union: `color` is all unit variants, `Option<T>` carries
 // a payload. `match` dispatches on the discriminant and binds the active
 // variant's payload. Matching an owned enum consumes it (Rust semantics).
 
@@ -14,10 +14,10 @@ enum color
     blue
 }
 
-enum option<T>
+enum Option<T>
 {
-    some(T),
-    none
+    Some(T),
+    None
 }
 
 fn color_to_int(c: color) -> i32
@@ -34,9 +34,9 @@ fn main() -> i32
     let c = color::green;
     let a = color_to_int(c);       // 1
 
-    let o = option::some(7);
+    let o = Option::Some(7);
     match o {
-        some(v) => { ret a + v; }, // 1 + 7 = 8
-        none => { ret 0; },
+        Some(v) => { ret a + v; }, // 1 + 7 = 8
+        None => { ret 0; },
     }
 }

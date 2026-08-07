@@ -28,3 +28,10 @@ book
 Build/Binaries/lstdlib
 
 *.d
+
+# 多 agent 协调协议 + 本地工作文档(不入版本控制;删除本行即纳入 git)
+AgentCoordination/
+CLAUDE.md
+
+# BorrowCheckerTest 的输出捕获残留
+bc_test_out_*.txt

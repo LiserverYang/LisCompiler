@@ -11,7 +11,8 @@
 //     - Numeric / Integer : marker traits for generic numeric bounds.
 //     - Add ... Rem        : arithmetic,  `a + b` → `a.add(b)`.
 //     - PartialEq/PartialOrd : `==` / `<`, return bool.
-//     - BitAnd ... Shr     : bitwise / shifts.
+//     - BitAnd ... Shr     : bitwise / shifts (BitXor/Shl/Shr have no infix
+//                            syntax — see the trait definitions below).
 //
 // The function section provides generic min/max/clamp (monomorphized per use
 // site) plus integer helpers (gcd/lcm/ipow/...). abs/fabs are specialised to
@@ -85,12 +86,20 @@ trait BitOr
     fn bitor(self, other: Self) -> Self;
 }
 
+// KNOWN LIMITATION (P13): `BitXor`, `Shl`, `Shr` have no infix operator syntax
+// — the lexer has no `^` / `<<` / `>>` tokens, so `a ^ b` and `a << b` cannot
+// be written. The traits below are still useful: primitives auto-implement them
+// and a generic bound `T: BitXor` / `T: Shl` works, with the concrete method
+// (`bitxor` / `shl` / `shr`) callable directly. They exist so the compiler's
+// operator-overload machinery stays complete; do not try to write `^`/`<<`/`>>`
+// in source.
 trait BitXor
 {
     fn bitxor(self, other: Self) -> Self;
 }
 
-// Shifts: `<<` and `>>` (arithmetic shift for signed ints).
+// Shifts: no `<<`/`>>` infix tokens (see above); `shl`/`shr` are callable
+// methods and usable as generic bounds.
 trait Shl
 {
     fn shl(self, other: Self) -> Self;

@@ -413,6 +413,18 @@ void ASTPrinter::visit(MemberAccess *node)
     os << " member_access: " << node->memberName;
 }
 
+void ASTPrinter::visit(IndexAccess *node)
+{
+    printCommon(node);
+    os << " index_access";
+}
+
+void ASTPrinter::visit(ArrayLiteral *node)
+{
+    printCommon(node);
+    os << " array_literal[" << node->elements.size() << "]";
+}
+
 void ASTPrinter::visit(BinaryOp *node)
 {
     printCommon(node);
@@ -658,6 +670,18 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
     {
         if (ma->object)
             children.push_back(ma->object.get());
+    }
+    else if (auto ia = dynamic_cast<IndexAccess *>(node))
+    {
+        if (ia->object)
+            children.push_back(ia->object.get());
+        if (ia->index)
+            children.push_back(ia->index.get());
+    }
+    else if (auto al = dynamic_cast<ArrayLiteral *>(node))
+    {
+        for (auto &elem : al->elements)
+            children.push_back(elem.get());
     }
     else if (auto bin = dynamic_cast<BinaryOp *>(node))
     {

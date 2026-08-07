@@ -4,6 +4,7 @@
  */
 
 #include "IR/HIRSemanticAnalyzer.hpp"
+#include "IR/BuiltinNames.hpp"
 
 #include <algorithm>
 #include <unordered_set>
@@ -16,15 +17,24 @@ namespace
 {
 /// True if two types are compatible as a by-value self receiver: same origin
 /// struct (tolerating a generic-definition `Foo<T>` vs its instantiation
-/// `Foo$i32` mismatch), or structurally equal.
-bool typesCompatible(const std::shared_ptr<Type> &a, const std::shared_ptr<Type> &b)
+/// `Foo$i32` mismatch), structurally equal, or a `&mut T` → `&T` mutability
+/// coercion (a mutable reference may be READ as a shared one — both are `ptr`).
+/// Directional: `expected` is the declared param/return type, `actual` is the
+/// argument/expression, so a shared `&T` never sneaks in where `&mut T` is
+/// expected.
+bool typesCompatible(const std::shared_ptr<Type> &expected, const std::shared_ptr<Type> &actual)
 {
-    if (!a || !b) return true;
-    auto ca = std::dynamic_pointer_cast<CustomType>(a);
-    auto cb = std::dynamic_pointer_cast<CustomType>(b);
-    if (ca && cb && ca->getOriginName() == cb->getOriginName())
+    if (!expected || !actual) return true;
+    auto ce = std::dynamic_pointer_cast<CustomType>(expected);
+    auto ca = std::dynamic_pointer_cast<CustomType>(actual);
+    if (ce && ca && ce->getOriginName() == ca->getOriginName())
         return true;
-    return a->equals(b);
+    auto re = std::dynamic_pointer_cast<ReferenceType>(expected);
+    auto ra = std::dynamic_pointer_cast<ReferenceType>(actual);
+    if (re && ra && !re->isMutableRef() && ra->isMutableRef()
+        && re->getBaseType()->equals(ra->getBaseType()))
+        return true;
+    return expected->equals(actual);
 }
 
 /// Decompose a member-access chain (p.a.b) into the root variable name and the
@@ -35,6 +45,16 @@ bool extractRootAndPath(HIRExpr *expr, std::string &root, std::vector<std::strin
     {
         if (!extractRootAndPath(ma->object.get(), root, path)) return false;
         path.push_back(ma->memberName);
+        return true;
+    }
+    if (auto *ia = dynamic_cast<HIRIndexAccess *>(expr))
+    {
+        // Any index maps to the wildcard segment "[*]": a[0] and a[1] both become
+        // path ["[*]"] (conservative — disjoint-element borrows are rejected, but
+        // the checker stays sound; a whole-array borrow `&a` still overlaps every
+        // element). Refined per-index tracking is a future improvement.
+        if (!extractRootAndPath(ia->object.get(), root, path)) return false;
+        path.push_back("[*]");
         return true;
     }
     if (auto *nr = dynamic_cast<HIRNameRef *>(expr))
@@ -66,7 +86,45 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
 
     std::shared_ptr<Type> base;
 
-    if (raw.isPrimitive)
+    // Array type `[T; N]`. Elements must be Copy and must NOT be references
+    // (v1 — no element drop glue / origin tracking, so a reference element
+    // could escape its owner without being caught). The array itself is always
+    // Move regardless of its element.
+    if (raw.isArray)
+    {
+        if (raw.arraySize <= 0)
+        {
+            if (!suppressTypeErrors_)
+                log(errorNode, "array size must be a positive integer (got " + std::to_string(raw.arraySize) + ").");
+            return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
+        if ((size_t)raw.arraySize > MAX_ARRAY_ELEMENTS)
+        {
+            if (!suppressTypeErrors_)
+                log(errorNode, "array size " + std::to_string(raw.arraySize)
+                    + " exceeds the limit of " + std::to_string(MAX_ARRAY_ELEMENTS) + " elements.");
+            return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
+        auto elemTy = raw.element ? resolveType(*raw.element, errorNode)
+                                  : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        if (elemTy && isReferenceType(elemTy))
+        {
+            if (!suppressTypeErrors_)
+                log(errorNode, "array element type '" + elemTy->toString()
+                    + "' cannot be a reference (reference elements are not supported yet).");
+            return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
+        if (elemTy && !elemTy->isCopyable())
+        {
+            if (!suppressTypeErrors_)
+                log(errorNode, "array element type '" + elemTy->toString()
+                    + "' must be Copy (arrays of non-Copy types are not supported yet).");
+            return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
+        base = context->typeContext->getArray(elemTy, (size_t)raw.arraySize);
+        // Fall through to reference wrapping below (for `&[T; N]` etc.)
+    }
+    else if (raw.isPrimitive)
     {
         base = context->typeContext->getPrimitive(PrimitiveType::getKind(raw.name));
     }
@@ -330,6 +388,14 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
     }
     else if (auto *f = dynamic_cast<HIRFunction *>(item))
     {
+        // A user/`stdlib` `fn` named like a builtin or a libc symbol would be
+        // silently shadowed by the compiler's call-site interception (builtins)
+        // or collide with codegen's external declaration (libc). Reject it.
+        if (isReservedFunctionName(f->name))
+        {
+            log(*f, "function name '" + f->name + "' is reserved by the compiler.");
+            return;
+        }
         if (SymbolTable::getInstance().lookupSymbol(f->name)) return;
         auto sym = std::make_unique<Symbol>();
         sym->kind = SymbolKind::Function;
@@ -1388,6 +1454,11 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
         auto resolvedTy = resolveType(rawTy, *node);
         if (!rawTy.isPresent)
             log(*node, "cannot deduce type for param '" + pname + "'.");
+        if (resolvedTy && resolvedTy->getKind() == Type::Kind::Array)
+        {
+            log(*node, "array type cannot be a function parameter yet (pass a reference instead).");
+            resolvedTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
 
         node->params.emplace_back(pname, resolvedTy);
         paramTypes.push_back(resolvedTy);
@@ -1407,6 +1478,11 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
     if (node->hasReturnType)
     {
         node->returnType = resolveType(node->rawReturnType, *node);
+        if (node->returnType && node->returnType->getKind() == Type::Kind::Array)
+        {
+            log(*node, "array type cannot be a function return type yet.");
+            node->returnType = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
         functionInfo.declaredReturnType = node->returnType;
     }
     else
@@ -2104,6 +2180,16 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         analyzeExpr(node->init.value().get());
         initType = node->init.value()->type;
 
+        // Globals live in static storage: only a literal initializer can be
+        // embedded in the object file. Anything else (a call, an array built at
+        // runtime, a reference) would silently lower to zeroed memory — reject
+        // it rather than miscompile.
+        if (node->isGlobal && !dynamic_cast<HIRLiteral *>(node->init.value().get()))
+        {
+            log(*node, "global variable initializer must be a literal (not '"
+                + (initType ? initType->toString() : std::string("?")) + "').");
+        }
+
         // Move semantics check (whole-variable or field-path move source).
         handleMoveSource(node->init.value().get(), *node);
 
@@ -2185,6 +2271,22 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         return false;
     };
 
+    // Walk a member/index chain down to its root binding (shared by all three
+    // assignment shapes so they can't drift apart).
+    auto walkToRootBinding = [](HIRExpr *&obj) -> HIRNameRef *
+    {
+        while (true)
+        {
+            if (auto *inner = dynamic_cast<HIRMemberAccess *>(obj))
+                obj = inner->object.get();
+            else if (auto *inner = dynamic_cast<HIRIndexAccess *>(obj))
+                obj = inner->object.get();
+            else
+                break;
+        }
+        return dynamic_cast<HIRNameRef *>(obj);
+    };
+
     if (auto *nameRef = dynamic_cast<HIRNameRef *>(node->target.get()))
     {
         auto *sym = SymbolTable::getInstance().lookupSymbol(nameRef->name);
@@ -2197,12 +2299,11 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     }
     else if (auto *member = dynamic_cast<HIRMemberAccess *>(node->target.get()))
     {
-        // Walk down the object chain to the root binding and check its mutability.
+        // Re-seating a field (`s.data = p`) MODIFIES the struct, so it always
+        // requires a mutable root — even when the field is itself a `&mut`
+        // reference (that reference lives IN the struct).
         HIRExpr *obj = member->object.get();
-        while (auto *inner = dynamic_cast<HIRMemberAccess *>(obj))
-            obj = inner->object.get();
-
-        if (auto *rootRef = dynamic_cast<HIRNameRef *>(obj))
+        if (auto *rootRef = walkToRootBinding(obj))
         {
             auto *sym = SymbolTable::getInstance().lookupSymbol(rootRef->name);
             if (sym && !isMutableBinding(sym))
@@ -2210,6 +2311,39 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
                 log(*node, "cannot assign to field of immutable variable '" + rootRef->name + "'",
                     E_AssignToImmutable);
                 return;
+            }
+        }
+    }
+    else if (auto *idx = dynamic_cast<HIRIndexAccess *>(node->target.get()))
+    {
+        // `a[i] = ...` / `s.data[i] = ...`.
+        //
+        // Write-through: when the indexed object is itself a `&mut T` reference
+        // (`s.data: &mut i8`), writing through it is allowed even if the root
+        // binding `s` is not `mut` — the write targets the referent, not the
+        // struct field. A shared reference is rejected. Otherwise the root
+        // binding's mutability rules.
+        if (auto refTy = std::dynamic_pointer_cast<ReferenceType>(idx->object->type))
+        {
+            if (!refTy->isMutableRef())
+            {
+                log(*node, "cannot assign through a shared reference.",
+                    E_AssignToImmutable);
+                return;
+            }
+        }
+        else
+        {
+            HIRExpr *obj = idx->object.get();
+            if (auto *rootRef = walkToRootBinding(obj))
+            {
+                auto *sym = SymbolTable::getInstance().lookupSymbol(rootRef->name);
+                if (sym && !isMutableBinding(sym))
+                {
+                    log(*node, "cannot assign to element of immutable variable '" + rootRef->name + "'",
+                        E_AssignToImmutable);
+                    return;
+                }
             }
         }
     }
@@ -2499,7 +2633,7 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
         handleMoveSource(node->value.value().get(), *node);
     }
 
-    if (functionInfo.declaredReturnType && !functionInfo.declaredReturnType->equals(retTy))
+    if (functionInfo.declaredReturnType && !typesCompatible(functionInfo.declaredReturnType, retTy))
     {
         log(*node, "return type '" + retTy->toString() + "' does not match declared '" + functionInfo.declaredReturnType->toString() + "'.");
     }
@@ -2524,6 +2658,15 @@ void HIRSemanticAnalyzer::visit(HIRExprStmt *node)
 
 void HIRSemanticAnalyzer::visit(HIRLiteral *node)
 {
+    // P1: the HIR builder flags literals whose numeric value overflowed the
+    // representation (e.g. an int64-overflowing integer). Report it here, where
+    // the diagnostic survives to the error gate — logging in the builder would
+    // be wiped by run()'s ResetErrorCount, silently turning the literal into 0.
+    if (node->overflowed)
+    {
+        log(*node, "numeric literal overflows its type.", E_InvalidLiteralType);
+    }
+
     switch (node->kind)
     {
     case HIRLiteral::Kind::Int:
@@ -2974,12 +3117,27 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
                 break;
             }
             auto tType = std::dynamic_pointer_cast<PrimitiveType>(node->targetType);
+            // char is an i32 at runtime, so i8/i16/i32 → char are widening or
+            // identity (`s.data[i] as char` reads a heap byte back as a char).
+            // P5: i64 → char would silently truncate to i32 — reject it as
+            // narrowing, consistent with the integer-narrowing check below.
+            if (tType->getPrimKind() == PrimitiveType::PrimKind::CHAR)
+            {
+                if (rType->integerBitWidth() > 32)
+                    log(*node, "cannot cast integer to a smaller integer type.");
+                break;
+            }
             if (!tType->isFloat() && !tType->isInteger())
             {
                 log(*node, "integer can only be cast to float or integer.");
                 break;
             }
-            if (tType->isInteger() && (size_t)rType->getPrimKind() > (size_t)tType->getPrimKind())
+            // P4: explicit width comparison. The old `(size_t)rType->getPrimKind()
+            // > (size_t)tType->getPrimKind()` silently depended on PrimKind being
+            // declared in bit-width order (I8=0..I64=3); inserting/reordering an
+            // enum entry would silently change which casts are considered
+            // narrowing. integerBitWidth() states the widths explicitly.
+            if (tType->isInteger() && rType->integerBitWidth() > tType->integerBitWidth())
                 log(*node, "cannot cast integer to a smaller integer type.");
             break;
         }
@@ -3116,7 +3274,7 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
         for (size_t i = 0; i < node->args.size() && i + 1 < paramTypes.size(); ++i)
         {
             analyzeExpr(node->args[i].get());
-            if (node->args[i]->type && !node->args[i]->type->equals(paramTypes[i + 1]))
+            if (node->args[i]->type && !typesCompatible(paramTypes[i + 1], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
             // By-value non-Copy arg consumes the source.
             handleMoveSource(node->args[i].get(), *node);
@@ -3191,7 +3349,7 @@ bool HIRSemanticAnalyzer::handlePrintBuiltin(HIRCall *node, const std::string &n
     for (auto &arg : node->args)
     {
         analyzeExpr(arg.get());
-        if (argTy && arg->type && !arg->type->equals(argTy))
+        if (argTy && arg->type && !typesCompatible(argTy, arg->type))
             log(*arg, "builtin '" + name + "' expects an argument of type '"
                 + argTy->toString() + "', got '" + arg->type->toString() + "'.");
     }
@@ -3225,22 +3383,139 @@ bool HIRSemanticAnalyzer::handleInputBuiltin(HIRCall *node, const std::string &n
     return true;
 }
 
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &name)
+{
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto i8Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8);
+    auto mutI8Ptr = context->typeContext->getReference(i8Ty, /*isMutable=*/true);
+    auto shI8Ptr = context->typeContext->getReference(i8Ty, /*isMutable=*/false);
+
+    std::shared_ptr<Type> retTy = nullptr;
+    std::vector<std::shared_ptr<Type>> argTys;
+    if (name == "__alloc")
+    {
+        retTy = mutI8Ptr;           // &mut i8 — the caller gets a writable buffer
+        argTys = {i32Ty};           // size
+    }
+    else if (name == "__free")
+    {
+        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        argTys = {shI8Ptr};         // &i8 — free only needs the address
+    }
+    else if (name == "__memcpy")
+    {
+        retTy = mutI8Ptr;           // returns dst (unused in .lis)
+        argTys = {shI8Ptr, shI8Ptr, i32Ty}; // dst, src, n — both shared pointers
+    }
+    else if (name == "__strlen")
+    {
+        retTy = i32Ty;              // length (truncated from size_t)
+        argTys = {shI8Ptr};         // &i8
+    }
+    else return false; // not a heap builtin
+
+    if (node->args.size() != argTys.size())
+    {
+        log(*node, "builtin '" + name + "' expects " + std::to_string(argTys.size())
+            + " argument(s), got " + std::to_string(node->args.size()) + ".");
+    }
+    for (size_t i = 0; i < node->args.size() && i < argTys.size(); ++i)
+    {
+        analyzeExpr(node->args[i].get());
+        if (node->args[i]->type && !typesCompatible(argTys[i], node->args[i]->type))
+            log(*node->args[i], "builtin '" + name + "' expects argument of type '"
+                + argTys[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
+    }
+
+    node->type = retTy;
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = retTy;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handleToStringBuiltin(HIRCall *node, const std::string &name)
+{
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto i64Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I64);
+    auto f64Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+    auto charTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::CHAR);
+
+    std::shared_ptr<Type> argTy = nullptr;
+    if (name == "to_string_i32")      argTy = i32Ty;
+    else if (name == "to_string_i64") argTy = i64Ty;
+    else if (name == "to_string_f64") argTy = f64Ty;
+    else if (name == "to_string_bool") argTy = boolTy;
+    else if (name == "to_string_char") argTy = charTy;
+    else return false; // not a to_string builtin
+
+    // The return type is the stdlib String struct (preloaded before user code).
+    auto strOpt = context->typeContext->getCustom("String");
+    if (!strOpt.has_value())
+    {
+        log(*node, "builtin '" + name + "' requires the stdlib 'String' type, which was not found.");
+        return false;
+    }
+
+    if (node->args.size() != 1)
+        log(*node, "builtin '" + name + "' expects 1 argument, got " + std::to_string(node->args.size()) + ".");
+    if (!node->args.empty())
+    {
+        analyzeExpr(node->args[0].get());
+        if (node->args[0]->type && !node->args[0]->type->equals(argTy))
+            log(*node->args[0], "builtin '" + name + "' expects an argument of type '"
+                + argTy->toString() + "', got '" + node->args[0]->type->toString() + "'.");
+    }
+
+    node->type = strOpt.value();
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = strOpt.value();
+    return true;
+}
+
 void HIRSemanticAnalyzer::visit(HIRCall *node)
 {
+    // Idempotency: once a call is resolved, re-analysis is a no-op. This
+    // matters when a method-call result is an ARGUMENT of a generic function
+    // (`take(s.get())`) — it is analyzed by both inferGenericArguments and the
+    // arg loop, and the second pass would deref the method receiver that was
+    // already MOVED into args[0] (a null `node->object`). The explicit flag
+    // (not `node->type`) distinguishes "not yet analyzed" from "analyzed as
+    // VOID" — some builtin paths set the callee's type but leave the call's
+    // type null until a later branch.
+    if (node->analyzed)
+        return;
+    node->analyzed = true;
+
     switch (node->callKind)
     {
     // ---- Regular function call -------------------------------------------
     case HIRCall::CallKind::Regular:
     {
-        // Builtin print/input functions — recognized by name before the normal
-        // callee resolution (a NameRef to `print_int` has no symbol, so it would
-        // log "undefined identifier").
+        // Builtin print/input/heap functions — recognized by name before the
+        // normal callee resolution (a NameRef to `print_int` has no symbol, so
+        // it would log "undefined identifier").
         if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
         {
-            if (handlePrintBuiltin(node, nr->name))
+            switch (classifyBuiltin(nr->name))
+            {
+            case BuiltinCategory::Print:
+                handlePrintBuiltin(node, nr->name);
                 return;
-            if (handleInputBuiltin(node, nr->name))
+            case BuiltinCategory::Input:
+                handleInputBuiltin(node, nr->name);
                 return;
+            case BuiltinCategory::Heap:
+                handleHeapBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::ToString:
+                handleToStringBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::NotBuiltin:
+                break;
+            }
         }
         analyzeExpr(node->callee.get());
         auto funcType = std::dynamic_pointer_cast<FunctionType>(node->callee->type);
@@ -3342,7 +3617,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         for (size_t i = 0; i < node->args.size() && i < instantiatedFuncType->getParams().size(); ++i)
         {
             analyzeExpr(node->args[i].get());
-            if (!node->args[i]->type->equals(instantiatedFuncType->getParams()[i]))
+            if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
             // A by-value non-Copy arg consumes the source (`foo(p)` moves p).
             handleMoveSource(node->args[i].get(), *node);
@@ -3528,7 +3803,10 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         for (size_t i = 0; i < node->args.size() && i + 1 < instantiatedFuncType->getParams().size(); ++i)
         {
             analyzeExpr(node->args[i].get());
-            if (!node->args[i]->type->equals(instantiatedFuncType->getParams()[i + 1]))
+            // typesCompatible (not equals): a `&mut T` argument satisfies a
+            // `&T` param (`s.push_str(&mut x)`), matching the builtin /
+            // dispatch / regular call paths.
+            if (!typesCompatible(instantiatedFuncType->getParams()[i + 1], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
             // By-value non-Copy arg consumes the source.
             handleMoveSource(node->args[i].get(), *node);
@@ -3564,7 +3842,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         }
         else
         {
-            if (node->object->type && !typesCompatible(node->object->type, selfParamTy))
+            if (node->object->type && !typesCompatible(selfParamTy, node->object->type))
                 log(*node, "receiver type mismatch for by-value self method.");
             // By-value self consumes the receiver (`x.drop()` moves x).
             HIRExpr *obj = node->object.get();
@@ -3680,7 +3958,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         for (size_t i = 0; i < node->args.size() && i < it->params.size(); ++i)
         {
             analyzeExpr(node->args[i].get());
-            if (!node->args[i]->type->equals(instantiatedFuncType->getParams()[i]))
+            if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
             // By-value non-Copy arg consumes the source.
             handleMoveSource(node->args[i].get(), *node);
@@ -3735,6 +4013,107 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
     if (node->type && node->type->isCopyable()
         && extractRootAndPath(node, root, path))
         checkBorrowUse(root, path, BorrowUseKind::Read, *node);
+}
+
+// ---------------------------------------------------------------------------
+void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
+{
+    analyzeExpr(node->object.get());
+    analyzeExpr(node->index.get());
+    auto objTy = node->object->type;
+    if (!objTy) return;
+
+    node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    // The element type: an array `[T; N]` yields T; a REFERENCE to a primitive
+    // (e.g. `s.data: &mut i8` — a heap pointer) is indexed as a C-style pointer
+    // to T elements (`s.data[i]` → i8). A reference to an array auto-derefs.
+    // Deref ALL reference layers (MIR's buildIndexAccess walks the full chain;
+    // sema used to stop at one, causing `&&T` divergence).
+    bool isPointer = false;
+    while (auto ref = std::dynamic_pointer_cast<ReferenceType>(objTy))
+    {
+        objTy = ref->getBaseType();
+        isPointer = true;
+    }
+
+    std::shared_ptr<Type> elemTy;
+    if (auto arrTy = std::dynamic_pointer_cast<ArrayType>(objTy))
+        elemTy = arrTy->getElementType();
+    else if (isPointer)
+    {
+        // C-style pointer indexing `s.data[i]`. Only primitives (a byte/small
+        // buffer) or arrays are legal pointees; a reference to a struct would
+        // hit an llvm_unreachable in codegen (getElementType) and a reference
+        // to a struct would otherwise let `r[0].f = x` write through a shared
+        // reference.
+        if (objTy->getKind() != Type::Kind::Primitive && objTy->getKind() != Type::Kind::Array)
+        {
+            log(*node, "cannot index a reference to type '" + objTy->toString()
+                + "' (only references to primitives or arrays).");
+            return;
+        }
+        elemTy = objTy;
+    }
+    else
+    {
+        log(*node, "indexing a non-array type '" + objTy->toString() + "'.");
+        return;
+    }
+
+    // Index must be i32.
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    if (node->index->type && !node->index->type->equals(i32Ty))
+        log(*node->index, "array index must be of type 'i32', got '" + node->index->type->toString() + "'.");
+
+    node->type = elemTy;
+
+    // A Copy element read conflicts with active &mut borrows (same rule as a
+    // Copy field read in visit(HIRMemberAccess)); the path carries the "[*]"
+    // index segment from extractRootAndPath.
+    std::string root;
+    std::vector<std::string> path;
+    if (node->type && node->type->isCopyable()
+        && extractRootAndPath(node, root, path))
+        checkBorrowUse(root, path, BorrowUseKind::Read, *node);
+}
+
+// ---------------------------------------------------------------------------
+void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
+{
+    std::shared_ptr<Type> elemTy;
+    for (auto &e : node->elements)
+    {
+        analyzeExpr(e.get());
+        if (!elemTy)
+            elemTy = e->type;
+        else if (e->type && !e->type->equals(elemTy))
+            log(*e, "array literal elements must all have the same type ('"
+                + elemTy->toString() + "' vs '" + e->type->toString() + "').");
+    }
+    if (!elemTy)
+    {
+        // `[]` — no element type to infer from, and `[T; 0]` is rejected too.
+        log(*node, "empty array literal has no element type; write an explicit `[T; N]` with N > 0.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    if (isReferenceType(elemTy))
+    {
+        log(*node, "array literal element type '" + elemTy->toString()
+            + "' cannot be a reference (reference elements are not supported yet).");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+    if (!elemTy->isCopyable())
+    {
+        log(*node, "array literal element type '" + elemTy->toString()
+            + "' must be Copy (arrays of non-Copy types are not supported yet).");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+    node->type = context->typeContext->getArray(elemTy, node->elements.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -3831,7 +4210,7 @@ void HIRSemanticAnalyzer::visit(HIRStructInit *node)
             log(*node, "struct '" + node->structName + "' has no field '" + mname + "'.");
             continue;
         }
-        if (mval->type && !mval->type->equals(fIt->type))
+        if (mval->type && !typesCompatible(fIt->type, mval->type))
             log(*node, "type mismatch for field '" + mname + "': expected '" + fIt->type->toString() + "', got '" + mval->type->toString() + "'.");
     }
 }
@@ -3942,7 +4321,7 @@ void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
     }
     for (size_t i = 0; i < node->args.size(); ++i)
     {
-        if (node->args[i]->type && !node->args[i]->type->equals(variant->payloadTypes[i]))
+        if (node->args[i]->type && !typesCompatible(variant->payloadTypes[i], node->args[i]->type))
             log(*node->args[i], "payload type mismatch for variant '" + node->variantName + "': expected '"
                 + variant->payloadTypes[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
     }

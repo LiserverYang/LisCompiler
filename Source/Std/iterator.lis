@@ -4,9 +4,9 @@
 // iterator.lis
 //
 // The Iterator protocol. A type implements Iterator<T> by providing next(),
-// which returns the next element wrapped in option<T> (none when exhausted).
+// which returns the next element wrapped in Option<T> (none when exhausted).
 //
-// The for-loop desugars to a match on the option:
+// The for-loop desugars to a match on the Option:
 //     let mut __it = <iterable>;
 //     while true {
 //         let __opt = __it.next();
@@ -20,11 +20,11 @@
 // `product`) are generic over any type implementing `Iterator<i32>` and
 // monomorphize per use site.
 
-// The iterator protocol: `next()` returns the next element, or `option::none`
+// The iterator protocol: `next()` returns the next element, or `Option::None`
 // once exhausted. Implement it to make a type usable in a `for x in it` loop.
 trait Iterator<T>
 {
-    fn next(self: &mut Self) -> option<T>;
+    fn next(self: &mut Self) -> Option<T>;
 }
 
 // A concrete half-open integer range [start, end): `range(1, 5)` yields
@@ -39,14 +39,14 @@ struct Range
 
 impl Iterator<i32> for Range
 {
-    fn next(self: &mut Self) -> option<i32>
+    fn next(self: &mut Self) -> Option<i32>
     {
         if self.current < self.end {
             let v = self.current;
             self.current = self.current + 1;
-            ret option::some(v);
+            ret Option::Some(v);
         }
-        ret option::none;
+        ret Option::None;
     }
 }
 
@@ -86,18 +86,18 @@ fn count<T: Iterator<i32>>(it: T) -> i32
 // The first element, or `none` for an empty iterator.
 //
 //     first(range(1, 5))  // some(1)
-fn first<T: Iterator<i32>>(it: T) -> option<i32>
+fn first<T: Iterator<i32>>(it: T) -> Option<i32>
 {
     for x in it {
-        ret option::some(x);
+        ret Option::Some(x);
     }
-    ret option::none;
+    ret Option::None;
 }
 
 // The last element, or `none` for an empty iterator.
 //
 //     last(range(1, 5))  // some(4)
-fn last<T: Iterator<i32>>(it: T) -> option<i32>
+fn last<T: Iterator<i32>>(it: T) -> Option<i32>
 {
     let mut last_v = 0;
     let mut found_any = false;
@@ -106,25 +106,25 @@ fn last<T: Iterator<i32>>(it: T) -> option<i32>
         found_any = true;
     }
     if found_any {
-        ret option::some(last_v);
+        ret Option::Some(last_v);
     }
-    ret option::none;
+    ret Option::None;
 }
 
 // The element at zero-based index `n`, or `none` if the iterator is shorter
 // than `n + 1`.
 //
 //     nth(range(10, 20), 3)  // some(13)
-fn nth<T: Iterator<i32>>(it: T, n: i32) -> option<i32>
+fn nth<T: Iterator<i32>>(it: T, n: i32) -> Option<i32>
 {
     let mut i = 0;
     for x in it {
         if i == n {
-            ret option::some(x);
+            ret Option::Some(x);
         }
         i = i + 1;
     }
-    ret option::none;
+    ret Option::None;
 }
 
 // Product of all elements; `1` for an empty iterator (the identity).

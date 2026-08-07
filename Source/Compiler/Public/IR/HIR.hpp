@@ -33,6 +33,13 @@ struct HIRRawType
     bool isPrimitive = true; // false = custom / struct type
 
     std::vector<HIRRawType> genericArgs;
+
+    // Array type `[T; N]`: when isArray, `element` is T and `arraySize` is N.
+    // A shared_ptr keeps this nested-by-value usable while HIRRawType is still
+    // incomplete inside its own definition (optional<T> would require complete T).
+    bool isArray = false;
+    std::shared_ptr<HIRRawType> element;
+    int64_t arraySize = 0;
 };
 
 /** A trait bound on a generic param, with optional concrete args. */
@@ -102,6 +109,15 @@ public:
     };
     Kind kind;
     std::variant<int64_t, double, std::string, bool, char> value;
+
+    /// True when the source literal's numeric value overflowed the representation
+    /// (e.g. an int64-overflowing integer). The builder falls the value back to
+    /// 0/0.0 so the AST stays well-formed; the semantic analyzer reports the
+    /// overflow as a clean error. The flag is carried (rather than logging in
+    /// the builder) because sema's run() resets the error count before it
+    /// visits — a builder-logged diagnostic would be silently discarded.
+    bool overflowed = false;
+
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
@@ -219,6 +235,14 @@ public:
     std::vector<std::shared_ptr<Type>> typedGenericParams;
 
     std::vector<std::unique_ptr<HIRExpr>> args;
+
+    /// Set once visit(HIRCall) has analyzed this node. Guards against
+    /// double-analysis (a call used as a generic argument is walked a second
+    /// time, and re-analysis would crash on a null `object`/`callee` after the
+    /// first pass consumed them). Prefer this over testing `type != nullptr`,
+    /// which conflates "not yet analyzed" with "analyzed to VOID".
+    bool analyzed = false;
+
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
@@ -232,6 +256,32 @@ public:
     std::unique_ptr<HIRExpr> object;
     std::string memberName;
     Symbol *memberSymbol = nullptr;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
+/// `a[i]` — array/pointer element access. Type (the element type) is filled by
+/// sema; MIR lowers it to a `ProjectionKind::Index`.
+class HIRIndexAccess : public HIRExpr
+{
+public:
+    std::unique_ptr<HIRExpr> object;
+    std::unique_ptr<HIRExpr> index;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
+/// `[a, b, c]` — an array literal; all elements must share one type.
+class HIRArrayLiteral : public HIRExpr
+{
+public:
+    std::vector<std::unique_ptr<HIRExpr>> elements;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);

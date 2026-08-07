@@ -57,6 +57,18 @@ bool PrimitiveType::isInteger() const
     return detail::is_one_of(primKind, PrimKind::I8, PrimKind::I16, PrimKind::I32, PrimKind::I64);
 }
 
+int PrimitiveType::integerBitWidth() const
+{
+    switch (primKind)
+    {
+    case PrimKind::I8: return 8;
+    case PrimKind::I16: return 16;
+    case PrimKind::I32: return 32;
+    case PrimKind::I64: return 64;
+    default: return 0; // not an integer kind
+    }
+}
+
 std::string PrimitiveType::toString() const
 {
     switch (primKind)
@@ -111,6 +123,32 @@ bool ReferenceType::equals(const std::shared_ptr<Type> &other) const
 std::string ReferenceType::toString() const
 {
     return (isMutable ? "&mut " : "&") + baseType->toString();
+}
+
+// ========================= ArrayType =========================
+ArrayType::ArrayType(std::shared_ptr<Type> elementType, size_t size)
+    : Type(Kind::Array), elementType(std::move(elementType)), size(size) {}
+
+const std::shared_ptr<Type> &ArrayType::getElementType() const
+{
+    return elementType;
+}
+
+size_t ArrayType::getSize() const
+{
+    return size;
+}
+
+bool ArrayType::equals(const std::shared_ptr<Type> &other) const
+{
+    if (other->getKind() != Kind::Array) return false;
+    auto at = std::static_pointer_cast<ArrayType>(other);
+    return at->size == size && at->elementType->equals(elementType);
+}
+
+std::string ArrayType::toString() const
+{
+    return "[" + elementType->toString() + "; " + std::to_string(size) + "]";
 }
 
 // ========================= CustomType =========================
@@ -387,6 +425,12 @@ void GenericParamType::updateContraints(std::vector<std::shared_ptr<TraitType>> 
 {
     this->constraints = std::move(constraints);
 
+    // P7: implTrait is the trait bounds this generic param carries (inherited
+    // from Type). buildStructType/buildEnumType call this on the SAME generic
+    // param twice (pass-1b pre-registration + pass-2 full analysis), so without
+    // a clear the bounds were appended again → duplicate entries (non-idempotent
+    // state update). `constraints` above is a plain overwrite (no duplicate).
+    this->implTrait.clear();
     for (auto &it : this->constraints)
     {
         this->implTrait.push_back(it);

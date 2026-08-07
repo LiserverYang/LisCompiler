@@ -237,6 +237,17 @@ static std::string fmtRValue(const MIRRValue &rv)
             }
             s << col(C::OP) << " }" << col(C::RST);
         }
+        else if constexpr (std::is_same_v<T, MIRRValueArrayInit>)
+        {
+            s << fmtType(v.type)
+              << col(C::OP) << " [" << col(C::RST);
+            for (size_t i = 0; i < v.elements.size(); ++i)
+            {
+                if (i) s << col(C::OP) << ", " << col(C::RST);
+                s << fmtOperand(v.elements[i]);
+            }
+            s << col(C::OP) << "]" << col(C::RST);
+        }
         return s.str(); },
         rv);
 }
@@ -363,7 +374,7 @@ static void printBlock(const MIRBasicBlock &bb, std::ostream &out)
 
     // Statements
     for (const auto &stmt : bb.stmts)
-    {\
+    {
         if (std::holds_alternative<MIRStmtNop>(stmt)) continue;
         out << "        " << fmtStatement(stmt) << ";\n";
     }

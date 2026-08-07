@@ -4,6 +4,7 @@
 
 #include "Lexer/Lexer.hpp"
 #include "Lexer/Token.hpp"
+#include "Logger/Logger.hpp"
 
 #include <gtest/gtest.h>
 #include <memory>
@@ -56,6 +57,11 @@ TEST_F(LexerTest, HandlesEmptyInput)
 
 TEST_F(LexerTest, RecognizesKeywords)
 {
+    // P15: `impt` is lexed as a keyword token, but the import system is NOT
+    // implemented — the Parser rejects `impt` at any scope ("illegal global
+    // statement"). This assertion only pins the lexer's keyword table; it is
+    // NOT a promise that `impt` is usable source. Do not add an import feature
+    // without a language-level decision (it is out of scope for this compiler).
     runLexer("impt struct fn let mut pub ret if else for while");
 
     expectToken(0, TokenCode::IMPT, "impt", 1, 1);
@@ -251,4 +257,44 @@ TEST_F(LexerTest, HandlesComplexExpressions)
     expectToken(14, TokenCode::INT_LITERAL, "0", 1, 40);
     expectToken(15, TokenCode::SEMI, ";", 1, 41);
     expectToken(16, TokenCode::RBRACE, "}", 1, 43);
+}
+
+// ── P1 regression: malformed / overflowing numeric literals ──────────────────
+// Before the fix, `1e`/`1e+` (exponent with no digits) and integers too large
+// for int64 were accepted by the lexer and crashed HIRBuilder's unguarded
+// std::stoll/std::stod with std::terminate. The lexer now reports a clean
+// E_InvalidLiteralType instead.
+
+TEST_F(LexerTest, MalformedFloatExponentReportsError)
+{
+    runLexer("1e");
+    ASSERT_GT(context->tokenStream.size(), 0);
+    EXPECT_EQ(context->tokenStream[0].code, TokenCode::FLOAT_LITERAL);
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "malformed exponent must report an error";
+}
+
+TEST_F(LexerTest, MalformedFloatExponentWithSignReportsError)
+{
+    runLexer("1e+ 2e-");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "exponent with sign but no digits must report an error";
+    EXPECT_GT(context->tokenStream.size(), 1) << "lexing continues after the error (both tokens emitted)";
+}
+
+TEST_F(LexerTest, HugeIntegerLiteralLexesCleanly)
+{
+    // A 20-digit integer is lexically a valid digit run; the int64 overflow is
+    // reported by the SEMANTIC analyzer (RuntimeTest.ValueIntegerLiteralOverflow
+    // Rejected), NOT here. It must not be an error at lex time — the array-size
+    // parser relies on huge literals reaching it as tokens so it can clamp them
+    // to its own sentinel and sema reports the nicer "exceeds the limit" error.
+    runLexer("99999999999999999999");
+    ASSERT_GT(context->tokenStream.size(), 0);
+    EXPECT_EQ(context->tokenStream[0].code, TokenCode::INT_LITERAL);
+    EXPECT_EQ(Logger::GetErrorCount(), 0) << "huge integer must lex cleanly (overflow is a sema error)";
+}
+
+TEST_F(LexerTest, ValidNumericLiteralsReportNoError)
+{
+    runLexer("0 42 1e10 2.5e-3 3.14");
+    EXPECT_EQ(Logger::GetErrorCount(), 0) << "valid numeric literals must not report errors";
 }

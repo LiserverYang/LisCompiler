@@ -100,6 +100,14 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
         return llvm::StructType::get(ctx, {ptrTy, ptrTy});
     }
 
+    // Fixed-size array [T; N] → llvm ArrayType.
+    case Type::Kind::Array:
+    {
+        auto at = std::static_pointer_cast<ArrayType>(ty);
+        return llvm::ArrayType::get(
+            semanticTypeToLLVM(at->getElementType(), ctx), at->getSize());
+    }
+
     default:
         throw std::runtime_error("semanticTypeToLLVM: unhandled Type::Kind "
                                  + ty->toString());

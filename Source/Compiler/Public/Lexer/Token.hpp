@@ -98,6 +98,8 @@ enum class TokenCode
     ARROW,        // "->"
     DOUBLE_ARROW, // "=>"
     REFERENCE,    // &
+    LBRACKET,     // "["
+    RBRACKET,     // "]"
 };
 
 // The length of all keywords

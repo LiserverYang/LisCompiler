@@ -29,6 +29,7 @@ public:
         Trait,
         Self,
         GenericParam,
+        Array,
     };
 
     explicit Type(Kind kind);
@@ -70,6 +71,13 @@ public:
     bool equals(const std::shared_ptr<Type> &other) const override;
     bool isFloat() const;
     bool isInteger() const;
+
+    /// Bit width of the integer kinds (i8=8 ... i64=64), or 0 for non-integers.
+    /// Explicit width comparison for the cast-narrowing check — it must NOT rely
+    /// on the PrimKind enum's declaration order (an insert/reorder would silently
+    /// change which casts are considered narrowing).
+    int integerBitWidth() const;
+
     std::string toString() const override;
     static PrimKind getKind(std::string str);
 
@@ -90,6 +98,25 @@ public:
 private:
     std::shared_ptr<Type> baseType;
     bool isMutable;
+};
+
+// --- 2b. 数组类型 [T; N] ---
+// A fixed-size array of `size` elements of `elementType`. Arrays are ALWAYS
+// Move (never Copy), even when the element is Copy — this keeps single
+// ownership of element references (`[&mut i8; 4]` cannot be copied into two
+// owners). v1 restricts elements to Copy types (no element drop glue).
+class ArrayType : public Type
+{
+public:
+    ArrayType(std::shared_ptr<Type> elementType, size_t size);
+    const std::shared_ptr<Type> &getElementType() const;
+    size_t getSize() const;
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
+
+private:
+    std::shared_ptr<Type> elementType;
+    size_t size;
 };
 
 // --- 3. 自定义类型 ---

@@ -147,6 +147,12 @@ struct MIRRValueStructInit
     std::shared_ptr<Type> type;
 };
 
+struct MIRRValueArrayInit
+{
+    std::vector<MIROperand> elements;
+    std::shared_ptr<Type> type; // the ArrayType
+};
+
 using MIRRValue = std::variant<
     MIRRValueUse,
     MIRRValueBinaryOp,
@@ -154,7 +160,8 @@ using MIRRValue = std::variant<
     MIRRValueCast,
     MIRRValueRef,
     MIRRValueAddrOf,
-    MIRRValueStructInit>;
+    MIRRValueStructInit,
+    MIRRValueArrayInit>;
 
 // ─── Statements ──────────────────────────────────────────────────────────────
 // All statements inside a basic block are non-branching.

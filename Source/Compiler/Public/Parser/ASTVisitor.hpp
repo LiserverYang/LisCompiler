@@ -42,6 +42,8 @@ class VariantInitExpr;
 class MemberFunctionCall;
 class FunctionCall;
 class MemberAccess;
+class IndexAccess;
+class ArrayLiteral;
 class BinaryOp;
 class CastExpr;
 class ParenExpr;
@@ -96,6 +98,8 @@ public:
     virtual void visit(MemberFunctionCall *node) = 0;
     virtual void visit(FunctionCall *node) = 0;
     virtual void visit(MemberAccess *node) = 0;
+    virtual void visit(IndexAccess *node) = 0;
+    virtual void visit(ArrayLiteral *node) = 0;
     virtual void visit(BinaryOp *node) = 0;
     virtual void visit(CastExpr *node) = 0;
     virtual void visit(ParenExpr *node) = 0;

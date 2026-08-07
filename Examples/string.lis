@@ -1,0 +1,46 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// string.lis — heap-backed String + arrays.
+//
+// `String` owns its heap buffer. Moving a String transfers the buffer
+// (`let t = s;` makes `s` unusable — single ownership); dropping it frees the
+// buffer exactly once (via `impl Drop for String`). `to_string_*` returns a
+// formatted String; `[a, b, c]` is an array (also Move).
+
+fn main() -> i32
+{
+    // Build a String by appending; print it.
+    let s = String::from_lit("lis");
+    let mut name = s;            // s is MOVED into name
+    name.push_char(' ');
+    name.push_str("语言");
+    print_str(name.to_cstr());
+    println();
+    print_int(name.len);
+    println();
+
+    // Indexed access returns Option<char> (None when out of bounds).
+    let f0 = unwrap_or(name.index(0), '?');
+    print_char(f0);
+    println();
+
+    // to_string_* formats a number into a heap String.
+    let n = to_string_i32(42 * 2);
+    print_str(n.to_cstr());
+    println();
+
+    // Arrays: literal, indexed read/write, while-loop sum.
+    let mut a = [1, 2, 3, 4];
+    let mut total = 0;
+    let mut i = 0;
+    while i < 4 {
+        total = total + a[i];
+        i = i + 1;
+    }
+    a[3] = 40;
+    print_int(total + a[3]);
+    println();
+
+    ret 0;
+}

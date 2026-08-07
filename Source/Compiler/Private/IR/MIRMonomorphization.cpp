@@ -246,6 +246,12 @@ void MIRMonomorphization::rewriteRValue(MIRRValue &rvalue, std::unordered_map<st
 
             if (auto ct = std::dynamic_pointer_cast<CustomType>(arg.type))
                 arg.structName = ct->getName();
+        }
+        else if constexpr (std::is_same_v<T, MIRRValueArrayInit>)
+        {
+            arg.type = replaceGenericType(arg.type, replaceTable);
+            for (auto &e : arg.elements)
+                rewriteOperand(e, replaceTable);
         } },
         rvalue);
 }

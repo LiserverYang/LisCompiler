@@ -6,6 +6,7 @@
 
 #include "Core/Context.hpp"
 #include "Lexer/Lexer.hpp"
+#include "Logger/Logger.hpp"
 #include "Parser/ASTPrinter.hpp"
 #include "Parser/Parser.hpp"
 
@@ -25,7 +26,10 @@ protected:
         Lexer lexer(context);
         lexer.run();
         Parser parser(context);
-        parser.run();
+        // parseAll() (not run()): run() calls exit(1) on any parse error, which
+        // would kill the whole test process. Gate-free parseAll() lets the
+        // parse-error regression tests below assert on the error count instead.
+        parser.parseAll();
     }
 
     inline void checkPosition(ASTNode *node, size_t line, size_t col, size_t lineStart, size_t length)
@@ -44,6 +48,83 @@ protected:
         EXPECT_EQ(token.value.length(), length);
     }
 };
+
+// ── P3 regression: trait names must be unique (single name, single entity) ─────
+// parseTraitDefinition used to check the never-populated `knownTraits` set and
+// register the name only in `knownTypes`, so duplicate traits and
+// struct-then-trait collisions were silently accepted.
+
+TEST_F(ParserTest, DuplicateTraitRejected)
+{
+    parseSource("trait A { fn f(); } trait A { fn g(); }");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "duplicate trait name must be rejected";
+}
+
+TEST_F(ParserTest, TraitThenStructSameNameRejected)
+{
+    parseSource("trait A { fn f(); } struct A { x: i32 }");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "struct after trait with same name must be rejected";
+}
+
+TEST_F(ParserTest, StructThenTraitSameNameRejected)
+{
+    parseSource("struct A { x: i32 } trait A { fn f(); }");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "trait after struct with same name must be rejected";
+}
+
+TEST_F(ParserTest, DistinctTraitNamesAccepted)
+{
+    parseSource("trait A { fn f(); } trait B { fn g(); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0) << "distinct trait names must parse cleanly";
+}
+
+// ── P6 regression: self-param span must NOT cover the whole function ───────────
+// The old parseMemberFunctionDefinition created a stack PositionRecorder for the
+// self param, manually called ~PositionRecorder() (double-destruction UB), and
+// let the second (natural) destruction run after currentPos had passed the body
+// — overwriting the self param's span to the whole function. This pins the
+// fixed behavior: the span covers exactly `self: &S` (line 3, col 13, len 8).
+
+TEST_F(ParserTest, MethodSelfParamPosition)
+{
+    std::string source =
+        "struct S { v: i32 }\n"
+        "impl S {\n"
+        "    fn read(self: &S) -> i32 { ret self.v; }\n"
+        "}";
+
+    parseSource(source);
+
+    auto &globalStmts = context->program.globalStatements;
+    ASSERT_EQ(globalStmts.size(), 2);
+
+    auto impl = dynamic_cast<StructImpl *>(globalStmts[1].get());
+    ASSERT_NE(impl, nullptr);
+    ASSERT_EQ(impl->methods.size(), 1);
+
+    auto method = impl->methods[0].get();
+    ASSERT_TRUE(method->selfParam.has_value());
+    auto &selfParam = method->selfParam.value();
+
+    // Line 1 = "struct S { v: i32 }\n" (19 chars incl. the space before `}`, +1
+    // newline = 20), line 2 = "impl S {\n" (8 + 1 = 9), so line 3 starts at index
+    // 29; `self` is col 13 and "self: &S" is 8 chars. The recorder is now built
+    // before `self` is consumed so the span covers the whole self parameter.
+    checkPosition(selfParam.get(), 3, 13, 29, 8);
+    EXPECT_EQ(selfParam->isRef, true);
+    EXPECT_EQ(selfParam->isMut, false);
+}
+
+// ── P15: `impt` (import) is lexed but NOT implemented ──────────────────────────
+// The keyword token exists in the lexer's table, but no parser path consumes it,
+// so an import statement is an "illegal global statement". This pins that
+// behavior — the test would flag (by crashing/erroring differently) if someone
+// added partial import parsing. Deliberate limitation, not a bug.
+TEST_F(ParserTest, ImptStatementRejected)
+{
+    parseSource("impt foo.bar;");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "import statements must be rejected (not implemented)";
+}
 
 TEST_F(ParserTest, GlobalVarDefPosition)
 {

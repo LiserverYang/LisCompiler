@@ -7,7 +7,9 @@
 #include "Lexer/TokenStreamPrinter.hpp"
 #include "Logger/ErrorID.hpp"
 #include "Logger/Logger.hpp"
+#include <exception>
 #include <iostream>
+#include <string>
 
 void Lexer::run()
 {
@@ -23,8 +25,12 @@ void Lexer::run()
     {
         char current = source[index];
 
+        // P9: ctype functions require an `unsigned char` (or EOF); a signed
+        // char with a byte > 127 is negative → UB. Cast at every ctype call.
+        unsigned char uc = (unsigned char)current;
+
         // skip whitespace characters (space, tab, newline, etc.)
-        if (std::isspace(current))
+        if (std::isspace(uc))
         {
             skipWhitespace();
             continue;
@@ -59,14 +65,14 @@ void Lexer::run()
             continue;
         }
         // handle numeric literals (integers/floats)
-        if (std::isdigit(current))
+        if (std::isdigit(uc))
         {
             tokens.push_back(lexNumber());
             continue;
         }
 
         // handle identifiers and keywords (start with letter or underscore)
-        if (std::isalpha(current) || current == '_')
+        if (std::isalpha(uc) || current == '_')
         {
             tokens.push_back(lexIdentifier());
             continue;
@@ -87,7 +93,7 @@ void Lexer::skipWhitespace()
 {
     std::string &source = context->fileValue;
 
-    while (index < source.size() && std::isspace(source[index]))
+    while (index < source.size() && std::isspace((unsigned char)source[index]))
     {
         // handle newline: increment line counter and reset column
         if (source[index] == '\n')
@@ -207,6 +213,7 @@ Token Lexer::lexStringLiteral()
             case 'n': value += '\n'; break;  // newline
             case 't': value += '\t'; break;  // tab
             case 'r': value += '\r'; break;  // carriage return
+            case '0': value += '\0'; break;  // NUL (matches the char literal)
             case '"': value += '"'; break;   // literal quote
             case '\\': value += '\\'; break; // literal backslash
             default:                         // invalid escape
@@ -257,10 +264,25 @@ Token Lexer::lexCharLiteral()
     index++;
     column++;
 
+    // Lexer errors are RECOVERABLE (exit=false): the Parser gate decides at the
+    // end, so ALL errors in a file surface instead of the first one killing the
+    // process mid-lex. This mirrors the Parser's recoverable-error philosophy.
+    auto logUnclosed = [&]()
+    {
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed char literal",
+                                line, column - 1, 1, lineStart, E_UnclosedCharLiteral};
+        info.exit = false;
+        Logger::Log(Logger::LogLevel::ERROR, info);
+    };
+
     // check for immediate EOF
     if (index >= source.size())
     {
-        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral});
+        // P10: after logging the error, return — do NOT fall through to
+        // `char c = source[index]` which reads out of bounds (operator[] only
+        // guarantees '\0' at exactly size(); past that it is UB).
+        logUnclosed();
+        return token;
     }
 
     char c = source[index];
@@ -271,7 +293,9 @@ Token Lexer::lexCharLiteral()
         // validate escape sequence length
         if (index >= source.size())
         {
-            Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral});
+            // P10: same OOB-read guard — return instead of reading source[index].
+            logUnclosed();
+            return token;
         }
 
         char escape = source[index];
@@ -282,6 +306,7 @@ Token Lexer::lexCharLiteral()
         case 'r': token.value = "\r"; break;
         case '\'': token.value = "'"; break;
         case '\\': token.value = "\\"; break;
+        case '0': token.value = std::string(1, '\0'); break; // null char
         default: token.value = std::string("\\") + escape; // invalid escape
         }
     }
@@ -326,7 +351,8 @@ Token Lexer::lexNumber()
         char c = source[index];
 
         // accumulate digits
-        if (std::isdigit(c))
+        // P9: cast to unsigned char — ctype UB on negative char values
+        if (std::isdigit((unsigned char)c))
         {
             value += c;
             index++;
@@ -335,7 +361,7 @@ Token Lexer::lexNumber()
         // decimal point handling (must be followed by digit)
         else if (c == '.' && !isFloat && !hasExponent)
         {
-            if (index + 1 < source.size() && std::isdigit(source[index + 1]))
+            if (index + 1 < source.size() && std::isdigit((unsigned char)source[index + 1]))
             {
                 isFloat = true;
                 value += c;
@@ -347,7 +373,7 @@ Token Lexer::lexNumber()
                 break; // not a float (e.g., member access)
             }
         }
-        // exponent handling (e/E followed by optional sign)
+        // exponent handling (e/E followed by optional sign then REQUIRED digit)
         else if ((c == 'e' || c == 'E') && !hasExponent)
         {
             hasExponent = true;
@@ -361,6 +387,24 @@ Token Lexer::lexNumber()
                 value += source[index];
                 index++;
                 column++;
+            }
+
+            // A float exponent MUST be followed by a digit: `1e` / `1e+` / `1e-`
+            // are malformed. If we accepted them, HIRBuilder's std::stod would
+            // throw std::invalid_argument → std::terminate with no diagnostic.
+            // Report here (lexing continues to surface all errors; the Parser
+            // gate stops the compile with a clean error), and still emit the
+            // token so the stream stays in sync. `exit=false` keeps this a
+            // recoverable error like the Parser's — a lexer error must NOT
+            // DEBUG_POINT/exit mid-lex, or the rest of the file's errors are
+            // never surfaced.
+            if (index >= source.size() || !std::isdigit((unsigned char)source[index]))
+            {
+                Logger::LogInfo info = {&source, context->filePath,
+                    "malformed float: exponent must be followed by a digit",
+                    line, column - 1, 1, index, E_InvalidLiteralType};
+                info.exit = false;
+                Logger::Log(Logger::LogLevel::ERROR, info);
             }
         }
         else
@@ -394,7 +438,8 @@ Token Lexer::lexIdentifier()
     while (index < source.size())
     {
         char c = source[index];
-        if (std::isalnum(c) || c == '_')
+        // P9: cast to unsigned char — ctype UB on negative char values
+        if (std::isalnum((unsigned char)c) || c == '_')
         {
             value += c;
             index++;
@@ -513,6 +558,8 @@ single_char:
     case '&': token.code = TokenCode::REFERENCE; break;
     case '!': token.code = TokenCode::NOT; break;
     case '|': token.code = TokenCode::BOR; break;
+    case '[': token.code = TokenCode::LBRACKET; break;
+    case ']': token.code = TokenCode::RBRACKET; break;
     default: // unknown character
         Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unknown character '" + std::string(1, current) + "'", line, column, 1, lineStart, E_UnknownCharacter});
     }

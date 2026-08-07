@@ -40,11 +40,26 @@ namespace
 // Save/restore C stdout so we can read the Logger's diagnostics.
 int g_savedStdout = -1;
 
+// P12: a fixed "bc_test_out.txt" in the CWD is a collision hazard: two test
+// binaries running from the same directory (or a leftover from a killed run)
+// silently overwrite each other. Key the temp file by process id so every
+// process gets its own path; the `_getpid`/`getpid` pair is already covered by
+// the platform <process.h>/<unistd.h> includes above.
+const char *captureFileName()
+{
+#ifdef _WIN32
+    static std::string name = "bc_test_out_" + std::to_string(_getpid()) + ".txt";
+#else
+    static std::string name = "bc_test_out_" + std::to_string(getpid()) + ".txt";
+#endif
+    return name.c_str();
+}
+
 void captureStdout()
 {
     fflush(stdout);
     g_savedStdout = dup(1);
-    FILE *f = freopen("bc_test_out.txt", "w", stdout);
+    FILE *f = freopen(captureFileName(), "w", stdout);
     (void)f;
 }
 
@@ -61,9 +76,9 @@ void restoreStdout()
 
 std::string readCaptured()
 {
-    std::ifstream f("bc_test_out.txt");
+    std::ifstream f(captureFileName());
     std::string out((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    std::remove("bc_test_out.txt");
+    std::remove(captureFileName());
     return out;
 }
 } // namespace
@@ -91,7 +106,11 @@ protected:
         Lexer lexer(context);
         lexer.run();
         Parser parser(context);
-        parser.run();
+        // parseAll() not run(): a parse error would make run() exit(1) and kill
+        // the whole test process. The error count below then reflects parse +
+        // sema errors (this file only feeds syntactically valid snippets, but
+        // the gate-free entry keeps the harness robust).
+        parser.parseAll();
         HIRBuilder builder(context);
         builder.run();
 
@@ -121,6 +140,34 @@ protected:
         EXPECT_EQ(Logger::GetErrorCount(), 0) << "expected clean compile, got errors:\n" << out;
     }
 };
+
+// ── P2 regression: SelfType interning must not drop receiver mutability ───────
+// createSelf was keyed by trait name only, so a trait mixing `&self` and
+// `&mut self` shared ONE SelfType: the `&mut self` method's receiver lost its
+// mutability, and the conformance check compared its `&mut S` param against a
+// `&S` expected type → false "param type mismatch" on valid code.
+
+TEST_F(BorrowCheckerTest, TraitWithMixedReceiverKinds)
+{
+    expectOk("trait Mixed { fn read(self: &Self) -> i32; fn write(self: &mut Self, v: i32); }"
+             " struct S { v: i32 } impl Mixed for S {"
+             " fn read(self: &S) -> i32 { ret self.v; }"
+             " fn write(self: &mut S, v: i32) { self.v = v; } }"
+             " fn main() -> i32 { let mut s = S { v: 1 }; s.write(5); ret s.read(); }");
+}
+
+TEST_F(BorrowCheckerTest, TraitSharedReceiverCannotWrite)
+{
+    // After the P2 fix the `&self` receiver is genuinely shared — writing
+    // through it must still be rejected (locked semantics: write through a
+    // shared reference is forbidden).
+    expectError("trait Mixed { fn read(self: &Self) -> i32; fn write(self: &mut Self, v: i32); }"
+                " struct S { v: i32 } impl Mixed for S {"
+                " fn read(self: &S) -> i32 { self.v = 5; ret self.v; }"
+                " fn write(self: &mut S, v: i32) { self.v = v; } }"
+                " fn main() -> i32 { ret 0; }",
+        "immutable");
+}
 
 // ── aliasing rules ─────────────────────────────────────────────────────────────
 

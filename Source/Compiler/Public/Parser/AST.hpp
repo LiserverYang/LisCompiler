@@ -98,6 +98,11 @@ public:
     std::shared_ptr<Type> semanticType;
     std::vector<std::unique_ptr<TypeNode>> genericArgs;
 
+    // Array type `[T; N]`: when isArray, elementType holds T and arraySize is N.
+    bool isArray = false;
+    std::unique_ptr<TypeNode> elementType;
+    int64_t arraySize = 0;
+
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);
@@ -562,6 +567,29 @@ class MemberAccess : public Expr
 public:
     std::unique_ptr<Expr> object;
     std::string memberName;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+class IndexAccess : public Expr
+{
+public:
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Expr> index;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+class ArrayLiteral : public Expr
+{
+public:
+    std::vector<std::unique_ptr<Expr>> elements;
 
     void accept(ASTVisitor *visitor) override
     {

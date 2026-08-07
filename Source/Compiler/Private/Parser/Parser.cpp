@@ -34,13 +34,31 @@ void Parser::synchronize()
 
 void Parser::run()
 {
+    parseAll();
+
+    if (Logger::GetErrorCount() > 0)
+        exit(1);
+
+    if (context->args->getArg("print_ast").compare("true") == 0)
+    {
+        printAST(context->program);
+    }
+}
+
+void Parser::parseAll()
+{
     tokenStream = &(context->tokenStream);
     auto &program = context->program;
 
     // Errors are non-fatal during parsing so all of them surface; the count
-    // gates the pipeline at the end. The count is NOT reset here — the Lexer
-    // (which runs first and resets per file) may have already logged lexing
-    // errors for this file, and they must not be discarded.
+    // gates the pipeline at the end (see run()). The count is NOT reset here —
+    // the Lexer (which runs first and resets per file) may have already logged
+    // lexing errors for this file, and they must not be discarded.
+    //
+    // parseAll() exists as a gate-free entry (mirroring how tests call
+    // sema.visit() instead of sema.run()): run() gates with exit(1), which would
+    // kill the whole test process, so tests that exercise PARSE errors call
+    // parseAll() and inspect Logger::GetErrorCount() instead.
     while (!finished())
     {
         size_t beforePos = currentPos;
@@ -60,14 +78,6 @@ void Parser::run()
         // so the next construct parses cleanly.
         if (Logger::GetErrorCount() > beforeErr)
             synchronize();
-    }
-
-    if (Logger::GetErrorCount() > 0)
-        exit(1);
-
-    if (context->args->getArg("print_ast").compare("true") == 0)
-    {
-        printAST(program);
     }
 }
 
@@ -226,10 +236,27 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
 
     recorder.bindNode(traitDef.get());
 
+    // P3: a trait name must be unique across ALL entities (structs, enums AND
+    // traits) — the language's "single name, single entity" rule. The old check
+    // looked only at knownTraits, which was never populated (dead set), so a
+    // struct-then-trait or trait-then-trait name collision slipped through and
+    // the two names silently collided in knownTypes. Check both sets so every
+    // direction is caught with the same error. A snapshot/backtrack (matching
+    // parseStructDefinition / parseEnumDefinition) keeps the token stream
+    // aligned after the recoverable error — consuming UNDEFINED from the LIVE
+    // position would skip the `{` and desync the rest of the trait body, which
+    // crashed the downstream method/param parsing on garbage tokens.
+    createSnapshot();
     traitDef->name = consume(TokenCode::IDENTIFIER, "expect an identifier as the trait name", E_ExpectAnIdentifier).value;
 
-    if (knownTraits.count(traitDef->name) > 0)
+    // Note: generic params are parsed AFTER the duplicate-name check (below).
+    // On the duplicate path backToSnapshot() rewinds to just before the name,
+    // so parsing them here too would be redundant — parseGenericParams() is
+    // pure token consumption with no side effects, and the single parse below
+    // keeps the stream aligned for BOTH the clean and the recovered path.
+    if (knownTraits.count(traitDef->name) > 0 || knownTypes.count(traitDef->name) > 0)
     {
+        backToSnapshot();
         consume(TokenCode::UNDEFINED, "mutidefined trait '" + traitDef->name + "'", E_MutidefinedTrait);
     }
 
@@ -258,6 +285,10 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
     }
 
     knownTypes.insert(traitDef->name);
+    // P3: actually register the trait name so a later trait/struct/enum with the
+    // same name is caught (previously this set was never written, making the
+    // mutidefined check above a no-op).
+    knownTraits.insert(traitDef->name);
     return traitDef;
 }
 
@@ -413,6 +444,39 @@ std::unique_ptr<TypeNode> Parser::parseType()
         type->isMutReference = match(TokenCode::MUT);
     }
 
+    // Array type `[T; N]`.
+    if (match(TokenCode::LBRACKET))
+    {
+        type->isArray = true;
+        type->elementType = parseType();
+        consume(TokenCode::SEMI, "expect ';' in array type", E_ExpectedKeyword);
+        if (currentToken().code == TokenCode::INT_LITERAL)
+        {
+            // A huge literal (e.g. `[i32; 99999999999999999999]`) makes stoll
+            // throw std::out_of_range → std::terminate. Catch it and clamp to a
+            // sentinel that the SEMANTIC analyzer's size check rejects with a
+            // clean error. NOT logged here: a parse error makes Parser::run()
+            // exit(1), killing the process before sema can report it (and the
+            // test harness with it).
+            try
+            {
+                type->arraySize = std::stoll(currentToken().value);
+            }
+            catch (const std::exception &)
+            {
+                type->arraySize = INT64_MAX; // sentinel > MAX_ARRAY_ELEMENTS
+            }
+            advance();
+        }
+        else
+        {
+            logError(currentToken(), "array size must be an integer literal", E_ExpectType);
+            advance();
+        }
+        consume(TokenCode::RBRACKET, "expect ']' after array size", E_ExpectedKeyword);
+        return type;
+    }
+
     if ((size_t)currentToken().code >= TYPE_KEYWORD_BEGIN && (size_t)currentToken().code <= TYPE_KEYWORD_END)
     {
         type->kind = TypeNode::TypeKind::Primitive;
@@ -465,11 +529,26 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
 
     consume(TokenCode::LPAREN, "expected '(' after function name", E_ExpectALPAREN);
 
-    auto selfParam = std::make_unique<SelfParam>();
-    PositionRecorder selfRecorder(this, selfParam.get());
-
-    if (match(TokenCode::SELF))
+    // P6: create the self param (and its position recorder) ONLY when a self
+    // actually follows. The old code created both unconditionally, then
+    // (a) manually called ~PositionRecorder() on the stack object and let it
+    // destruct a SECOND time at scope exit — after currentPos had moved past
+    // the params, return type and body, so the self param's recorded span was
+    // overwritten with the whole-function span (double-destruction UB), and
+    // (b) in the non-self branch leaked the SelfParam via selfParam.release().
+    // With the recorder scoped to the self branch, it destructs exactly once at
+    // the end of the branch (after the params are parsed) with the correct span,
+    // and a non-self function never allocates a SelfParam at all.
+    // Use check() + match() so the recorder is constructed BEFORE the `self`
+    // token is consumed: the recorder's recorded span therefore covers the
+    // whole `self: &S` parameter (`self` keyword through the type), not just
+    // the type annotation after the colon.
+    if (check(TokenCode::SELF))
     {
+        auto selfParam = std::make_unique<SelfParam>();
+        PositionRecorder selfRecorder(this, selfParam.get());
+        match(TokenCode::SELF);
+
         selfParam->isRef = false;
         selfParam->isMut = false;
 
@@ -489,12 +568,9 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
         {
             func->params = parseParameterList();
         }
-
-        selfRecorder.~PositionRecorder();
     }
     else
     {
-        selfParam.release();
         func->params = parseParameterList();
     }
 
@@ -896,7 +972,10 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
 
         advance();
 
-        auto right = parseBinaryExpression(precedence - 1);
+        // Right side at the SAME precedence → equal-precedence operators are
+        // left-associative (`104 - 104 + 40` = `(104 - 104) + 40`, not
+        // `104 - (104 + 40)`). Only strictly-higher precedence binds tighter.
+        auto right = parseBinaryExpression(precedence);
 
         auto binary = std::make_unique<BinaryOp>();
 
@@ -916,6 +995,14 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
 
 int Parser::getPrecedence(TokenCode type)
 {
+    // KNOWN LIMITATION (P13): there is no token for `^`, `<<`, or `>>` — the
+    // lexer reports `^` as an unknown character and `<<`/`>>` lex as two separate
+    // `<`/`>` tokens. Consequently a HIRBinaryOp with OpKind BitXor/ShiftLeft/
+    // ShiftRight can never be produced from source syntax; those opKinds exist
+    // only so the operator-overload traits BitXor/Shl/Shr can lower a struct's
+    // `bitxor`/`shl`/`shr` method calls, and for the codegen's completeness.
+    // This is deliberate — do not add precedence entries for operators the
+    // lexer cannot tokenize (they would be dead code).
     switch (type)
     {
     case TokenCode::STAR:
@@ -962,6 +1049,22 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         auto expr = parseLiteral();
         recorder.bindNode(expr.get());
         return expr;
+    }
+
+    // Array literal `[a, b, c]`.
+    if (match(TokenCode::LBRACKET))
+    {
+        auto literal = std::make_unique<ArrayLiteral>();
+        recorder.bindNode(literal.get());
+        if (!check(TokenCode::RBRACKET))
+        {
+            do
+            {
+                literal->elements.push_back(parseExpression());
+            } while (match(TokenCode::COMMA));
+        }
+        consume(TokenCode::RBRACKET, "expected ']' after array literal", E_ExpectedKeyword);
+        return literal;
     }
 
     // `match ...` is an expression (`let y = match o { ... }`).
@@ -1045,6 +1148,12 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return expr;
     }
 
+    // KNOWN LIMITATION (P14): unary operators are not implemented. A leading
+    // `-`/`!`/`~` reaches here and is reported as "expected expression" (the
+    // `-` token is otherwise only a binary minus). `!` is only meaningful in the
+    // lexed `!=` pair. Negation must be written `0 - x` (see math.lis's
+    // abs/fabs). Deliberate — do not add unary parsing without a language-level
+    // decision to support it.
     logError(currentToken(), "expected expression", E_ExpectedExpression);
     advance(); // consume the bad token — guarantees callers make progress
 
@@ -1272,29 +1381,47 @@ std::vector<std::unique_ptr<Expr>> Parser::parseArgumentList()
 
 std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
 {
-    while (match(TokenCode::DOT))
+    while (true)
     {
-        PositionRecorder recorder(this, nullptr);
-        Token member = consume(TokenCode::IDENTIFIER, "expected member name after '.'", E_ExpectAnIdentifier);
-
-        if (match(TokenCode::LPAREN))
+        if (match(TokenCode::DOT))
         {
-            auto call = std::make_unique<MemberFunctionCall>();
-            recorder.bindNode(call.get());
-            call->object = std::move(left);
-            call->methodName = member.value;
-            if (check(TokenCode::LT)) call->genericParams = parseCallGenericParams();
-            call->arguments = parseArgumentList();
-            consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectAnIdentifier);
-            left = std::move(call);
+            PositionRecorder recorder(this, nullptr);
+            Token member = consume(TokenCode::IDENTIFIER, "expected member name after '.'", E_ExpectAnIdentifier);
+
+            if (match(TokenCode::LPAREN))
+            {
+                auto call = std::make_unique<MemberFunctionCall>();
+                recorder.bindNode(call.get());
+                call->object = std::move(left);
+                call->methodName = member.value;
+                if (check(TokenCode::LT)) call->genericParams = parseCallGenericParams();
+                call->arguments = parseArgumentList();
+                consume(TokenCode::RPAREN, "expected ')' after arguments", E_ExpectAnIdentifier);
+                left = std::move(call);
+            }
+            else
+            {
+                auto access = std::make_unique<MemberAccess>();
+                recorder.bindNode(access.get());
+                access->object = std::move(left);
+                access->memberName = member.value;
+                left = std::move(access);
+            }
+        }
+        else if (match(TokenCode::LBRACKET))
+        {
+            // Array / pointer indexing: `a[i]`, `s.data[i]`.
+            PositionRecorder recorder(this, nullptr);
+            auto index = std::make_unique<IndexAccess>();
+            recorder.bindNode(index.get());
+            index->object = std::move(left);
+            index->index = parseExpression();
+            consume(TokenCode::RBRACKET, "expected ']' after index", E_ExpectedKeyword);
+            left = std::move(index);
         }
         else
         {
-            auto access = std::make_unique<MemberAccess>();
-            recorder.bindNode(access.get());
-            access->object = std::move(left);
-            access->memberName = member.value;
-            left = std::move(access);
+            break;
         }
     }
     return left;

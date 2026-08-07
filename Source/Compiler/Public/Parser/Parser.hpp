@@ -10,6 +10,7 @@
 #include "Logger/Logger.hpp"
 #include "Parser/AST.hpp"
 
+#include <cstdint>
 #include <unordered_set>
 
 /**
@@ -29,6 +30,11 @@ public:
     ~Parser() {}
 
     virtual void run() override;
+
+    /// Parse every global statement WITHOUT the exit(1) gate that run() applies
+    /// when errors are logged. Tests exercising PARSE errors call this (run()
+    /// would kill the test process via exit), then check GetErrorCount().
+    void parseAll();
 
 protected:
     size_t currentPos = 0;

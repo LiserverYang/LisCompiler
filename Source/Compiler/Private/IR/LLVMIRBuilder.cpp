@@ -6,6 +6,7 @@
  */
 
 #include "IR/LLVMIRBuilder.hpp"
+#include "IR/BuiltinNames.hpp"
 #include "IR/MIRMonomorphization.hpp"
 
 #include <cassert>
@@ -356,6 +357,20 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     if (isInputBuiltin(s.funcName))
     {
         emitInputCall(fs, s, args);
+        return;
+    }
+
+    // Builtin heap calls lower to libc malloc/free/memcpy/strlen.
+    if (isHeapBuiltin(s.funcName))
+    {
+        emitHeapCall(fs, s, args);
+        return;
+    }
+
+    // Builtin to_string calls lower to malloc + sprintf + strlen → String.
+    if (isToStringBuiltin(s.funcName))
+    {
+        emitToStringCall(fs, s, args);
         return;
     }
 
@@ -721,6 +736,17 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
             }
             return agg;
         }
+        else if constexpr (std::is_same_v<T, MIRRValueArrayInit>)
+        {
+            auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(r.type));
+            llvm::Value *agg = llvm::UndefValue::get(arrTy);
+            for (size_t i = 0; i < r.elements.size(); ++i)
+            {
+                llvm::Value *fval = lowerOperand(fs, r.elements[i]);
+                agg = builder_->CreateInsertValue(agg, fval, {i});
+            }
+            return agg;
+        }
 
         llvm_unreachable("unhandled MIRRValue variant"); },
         rv);
@@ -860,6 +886,31 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
             MIRPlace idxPlace{PlaceBase::Local, proj.localIndex, "_idx", {}, fs.body->locals[proj.localIndex].type};
             llvm::Value *idx = loadPlace(fs, idxPlace);
 
+            // Runtime bounds check for ARRAY indexing only. An array's length
+            // is known here, so `i < 0 || i >= N` traps via libc abort(). A
+            // C-style pointer index (`s.data[i]` — currentTy is a primitive,
+            // not an ArrayType) has no length to check and is left unchecked
+            // (documented in string.lis). sema already rejected empty/oversized
+            // arrays, so N >= 1 here.
+            if (auto arrTy = std::dynamic_pointer_cast<ArrayType>(currentTy))
+            {
+                llvm::Value *neg = builder_->CreateICmpSLT(idx, builder_->getInt32(0));
+                llvm::Value *oob = builder_->CreateICmpSGE(
+                    idx, builder_->getInt32((uint32_t)arrTy->getSize()));
+                llvm::Value *bad = builder_->CreateOr(neg, oob);
+
+                llvm::Function *abortFn = getOrDeclareAbort();
+                llvm::BasicBlock *trapBB = llvm::BasicBlock::Create(ctx_, "idx_oob", fs.fn);
+                llvm::BasicBlock *contBB = llvm::BasicBlock::Create(ctx_, "idx_ok", fs.fn);
+                builder_->CreateCondBr(bad, trapBB, contBB);
+
+                builder_->SetInsertPoint(trapBB);
+                builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
+                builder_->CreateUnreachable();
+
+                builder_->SetInsertPoint(contBB);
+            }
+
             ptr = builder_->CreateGEP(
                 toLLVMType(elemTy),
                 ptr,
@@ -895,8 +946,11 @@ llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
 void LLVMIRBuilder::storePlace(FunctionState &fs, const MIRPlace &p, llvm::Value *val)
 {
     llvm::Value *ptr = lowerPlaceAsPtr(fs, p);
-    if (fs.allocas[p.index] != nullptr)
-        builder_->CreateStore(val, ptr);
+    // Skip a LOCAL whose alloca is absent (the void return slot). GLOBALs are
+    // not allocas — they are module-level variables, so never gate on them.
+    if (p.base != PlaceBase::Global && fs.allocas[p.index] == nullptr)
+        return;
+    builder_->CreateStore(val, ptr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -947,8 +1001,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)
 
 bool LLVMIRBuilder::isPrintBuiltin(const std::string &name)
 {
-    return name == "print_str" || name == "print_int" || name == "print_float"
-        || name == "print_bool" || name == "print_char" || name == "println";
+    return classifyBuiltin(name) == BuiltinCategory::Print;
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclarePrintf()
@@ -1018,60 +1071,48 @@ void LLVMIRBuilder::emitPrintCall(FunctionState &fs, const MIRStmtCall &s,
 
 bool LLVMIRBuilder::isInputBuiltin(const std::string &name)
 {
-    return name == "read_line" || name == "read_int" || name == "read_f64";
+    return classifyBuiltin(name) == BuiltinCategory::Input;
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareFgets()
 {
-    if (auto *fn = context->module->getFunction("fgets"))
-        return fn;
     // char* fgets(char* str, int count, FILE* stream)
-    llvm::FunctionType *fty = llvm::FunctionType::get(
-        llvm::PointerType::getUnqual(ctx_), // returns char*
-        { llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt32Ty(ctx_),
-          llvm::PointerType::getUnqual(ctx_) },
-        /*isVarArg=*/false);
-    return llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage, "fgets", context->module.get());
+    return getOrDeclareLibcFunction("fgets",
+        llvm::FunctionType::get(
+            llvm::PointerType::getUnqual(ctx_), // returns char*
+            { llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt32Ty(ctx_),
+              llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/false));
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareStrCspn()
 {
-    if (auto *fn = context->module->getFunction("strcspn"))
-        return fn;
     // size_t strcspn(const char* str, const char* reject)
-    llvm::FunctionType *fty = llvm::FunctionType::get(
-        llvm::Type::getInt64Ty(ctx_),
-        { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
-        /*isVarArg=*/false);
-    return llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage, "strcspn", context->module.get());
+    return getOrDeclareLibcFunction("strcspn",
+        llvm::FunctionType::get(
+            llvm::Type::getInt64Ty(ctx_),
+            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/false));
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareAtoi()
 {
-    if (auto *fn = context->module->getFunction("atoi"))
-        return fn;
     // int atoi(const char* str)
-    llvm::FunctionType *fty = llvm::FunctionType::get(
-        llvm::Type::getInt32Ty(ctx_),
-        { llvm::PointerType::getUnqual(ctx_) },
-        /*isVarArg=*/false);
-    return llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage, "atoi", context->module.get());
+    return getOrDeclareLibcFunction("atoi",
+        llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(ctx_),
+            { llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/false));
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareStrtod()
 {
-    if (auto *fn = context->module->getFunction("strtod"))
-        return fn;
     // double strtod(const char* str, char** endptr)
-    llvm::FunctionType *fty = llvm::FunctionType::get(
-        llvm::Type::getDoubleTy(ctx_),
-        { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
-        /*isVarArg=*/false);
-    return llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage, "strtod", context->module.get());
+    return getOrDeclareLibcFunction("strtod",
+        llvm::FunctionType::get(
+            llvm::Type::getDoubleTy(ctx_),
+            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/false));
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareAcrtIobFunc()
@@ -1158,6 +1199,193 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s,
     }
 }
 
+// ── Builtin heap: __alloc / __free / __memcpy / __strlen ─────────────────────
+
+bool LLVMIRBuilder::isHeapBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::Heap;
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareMalloc()
+{
+    // void* malloc(size_t n)  (n passed as i32, widened at the call site)
+    return getOrDeclareLibcFunction("malloc",
+        llvm::FunctionType::get(
+            llvm::PointerType::getUnqual(ctx_), { llvm::Type::getInt64Ty(ctx_) },
+            /*isVarArg=*/false));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareFree()
+{
+    // void free(void* ptr)
+    return getOrDeclareLibcFunction("free",
+        llvm::FunctionType::get(
+            llvm::Type::getVoidTy(ctx_), { llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/false));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareMemcpy()
+{
+    // void* memcpy(void* dst, const void* src, size_t n)
+    return getOrDeclareLibcFunction("memcpy",
+        llvm::FunctionType::get(
+            llvm::PointerType::getUnqual(ctx_),
+            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_),
+              llvm::Type::getInt64Ty(ctx_) },
+            /*isVarArg=*/false));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareStrlen()
+{
+    // size_t strlen(const char* s)
+    return getOrDeclareLibcFunction("strlen",
+        llvm::FunctionType::get(
+            llvm::Type::getInt64Ty(ctx_), { llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/false));
+}
+
+void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s,
+    const std::vector<llvm::Value *> &args)
+{
+    if (s.funcName == "__alloc")
+    {
+        llvm::Function *mallocFn = getOrDeclareMalloc();
+        llvm::Value *size = builder_->CreateSExt(args[0], llvm::Type::getInt64Ty(ctx_));
+        llvm::Value *ptr = builder_->CreateCall(mallocFn->getFunctionType(), mallocFn, { size });
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, ptr);
+    }
+    else if (s.funcName == "__free")
+    {
+        llvm::Function *freeFn = getOrDeclareFree();
+        builder_->CreateCall(freeFn->getFunctionType(), freeFn, { args[0] });
+    }
+    else if (s.funcName == "__memcpy")
+    {
+        llvm::Function *memcpyFn = getOrDeclareMemcpy();
+        llvm::Value *n = builder_->CreateSExt(args[2], llvm::Type::getInt64Ty(ctx_));
+        llvm::Value *res = builder_->CreateCall(memcpyFn->getFunctionType(), memcpyFn,
+            { args[0], args[1], n });
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, res);
+    }
+    else if (s.funcName == "__strlen")
+    {
+        llvm::Function *strlenFn = getOrDeclareStrlen();
+        llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, { args[0] });
+        llvm::Value *len32 = builder_->CreateTrunc(len, llvm::Type::getInt32Ty(ctx_));
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, len32);
+    }
+}
+
+// ── Builtin to_string: malloc + sprintf + strlen → String ────────────────────
+
+bool LLVMIRBuilder::isToStringBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::ToString;
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareSprintf()
+{
+    // int sprintf(char* str, const char* format, ...)
+    return getOrDeclareLibcFunction("sprintf",
+        llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(ctx_),
+            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+            /*isVarArg=*/true));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareAbort()
+{
+    return getOrDeclareLibcFunction("abort",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), {}, /*isVarArg=*/false));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareLibcFunction(
+    const std::string &name, llvm::FunctionType *fty)
+{
+    if (auto *fn = context->module->getFunction(name))
+    {
+        // sema rejects user functions with libc names (see isReservedFunctionName),
+        // so an existing symbol is normally a previous declaration. A type
+        // mismatch would crash the verifier later — report it instead of
+        // silently returning a wrong-typed function.
+        if (fn->getFunctionType() != fty)
+            llvm::errs() << "internal error: '" << name
+                         << "' already exists with an incompatible signature\n";
+        return fn;
+    }
+    return llvm::Function::Create(fty,
+        llvm::GlobalValue::ExternalLinkage, name, context->module.get());
+}
+
+void LLVMIRBuilder::emitToStringCall(FunctionState &fs, const MIRStmtCall &s,
+    const std::vector<llvm::Value *> &args)
+{
+    // Allocate a fixed TO_STRING_BUF_CAP-byte scratch buffer for the formatted
+    // digits (see the constant in LLVMIRBuilder.hpp: a large double like 1e100
+    // overflows a 64-byte buffer).
+    llvm::Function *mallocFn = getOrDeclareMalloc();
+    llvm::Value *buf = builder_->CreateCall(mallocFn->getFunctionType(), mallocFn,
+        { llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), TO_STRING_BUF_CAP) });
+
+    llvm::Function *sprintfFn = getOrDeclareSprintf();
+    llvm::Function *strlenFn = getOrDeclareStrlen();
+
+    const char *fmt = "%d";
+    std::vector<llvm::Value *> callArgs;
+    if (s.funcName == "to_string_i32") { fmt = "%d"; callArgs = args; }
+    else if (s.funcName == "to_string_i64") { fmt = "%lld"; callArgs = args; }
+    else if (s.funcName == "to_string_f64") { fmt = "%f"; callArgs = args; }
+    else if (s.funcName == "to_string_bool")
+    {
+        fmt = "%d";
+        if (!args.empty())
+            callArgs.push_back(builder_->CreateZExt(args[0], builder_->getInt32Ty()));
+    }
+    else if (s.funcName == "to_string_char") { fmt = "%c"; callArgs = args; }
+
+    llvm::Value *fmtPtr = builder_->CreateGlobalStringPtr(fmt, ".fmt");
+    std::vector<llvm::Value *> sprintfArgs{buf, fmtPtr};
+    sprintfArgs.insert(sprintfArgs.end(), callArgs.begin(), callArgs.end());
+    builder_->CreateCall(sprintfFn->getFunctionType(), sprintfFn, sprintfArgs);
+
+    llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, { buf });
+    llvm::Value *len32 = builder_->CreateTrunc(len, llvm::Type::getInt32Ty(ctx_));
+
+    // Build the String struct { data, len, cap } and store it into the dest.
+    if (s.dest.has_value())
+    {
+        const std::string structName = "String";
+        // Defensive: a stale stdlib or a renamed field must not crash codegen
+        // with an uncaught out_of_range. sema verifies the type exists, so this
+        // is only reachable through an internal inconsistency — report it
+        // cleanly instead of throwing.
+        auto sit = structTypes_.find(structName);
+        if (sit == structTypes_.end())
+        {
+            llvm::errs() << "internal error: to_string_* requires a struct named 'String'\n";
+            return;
+        }
+        auto fit = fieldIndex_.find(structName);
+        if (fit == fieldIndex_.end() || !fit->second.count("data")
+            || !fit->second.count("len") || !fit->second.count("cap"))
+        {
+            llvm::errs() << "internal error: 'String' struct lacks data/len/cap fields\n";
+            return;
+        }
+        llvm::StructType *st = sit->second;
+        llvm::Value *agg = llvm::UndefValue::get(st);
+        agg = builder_->CreateInsertValue(agg, buf, { fit->second["data"] });
+        agg = builder_->CreateInsertValue(agg, len32, { fit->second["len"] });
+        agg = builder_->CreateInsertValue(agg,
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), TO_STRING_BUF_CAP),
+            { fit->second["cap"] });
+        storePlace(fs, *s.dest, agg);
+    }
+}
+
 llvm::AllocaInst *LLVMIRBuilder::emitEntryAlloca(llvm::Function *fn,
     llvm::Type *ty,
     const std::string &name)
@@ -1202,6 +1430,14 @@ LLVMIRBuilder::getElementType(const std::shared_ptr<Type> &ty)
     {
     case Type::Kind::Reference:
         return std::static_pointer_cast<ReferenceType>(ty)->getBaseType();
+
+    case Type::Kind::Array:
+        return std::static_pointer_cast<ArrayType>(ty)->getElementType();
+
+    // A deref'd pointer to a primitive (e.g. `s.data: &mut i8` → i8 after the
+    // Deref projection) is indexed as `T*` — the element type is the pointee.
+    case Type::Kind::Primitive:
+        return ty;
 
     default:
         llvm_unreachable("getElementType: type has no element type");
@@ -1357,6 +1593,9 @@ void LLVMIRBuilder::generateDropGlue()
         {
             // Primitives and references are Copy / borrowed — no drop needed.
             if (fieldType->isCopyable())
+                continue;
+            // Arrays of Copy elements (v1) own nothing — skip their glue.
+            if (fieldType->getKind() == Type::Kind::Array)
                 continue;
 
             // Custom / struct fields: recursively call the field type's glue.

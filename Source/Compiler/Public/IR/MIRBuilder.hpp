@@ -157,6 +157,8 @@ private:
     MIRPlace buildCast(HIRCast *cast);
     MIRPlace buildCall(HIRCall *call);
     MIRPlace buildMemberAccess(HIRMemberAccess *ma);
+    MIRPlace buildIndexAccess(HIRIndexAccess *ia);
+    MIRPlace buildArrayLiteral(HIRArrayLiteral *al);
     MIRPlace buildStructInit(HIRStructInit *si);
     MIRPlace buildVariantInit(HIRVariantInit *vi);
     MIRPlace buildRef(HIRRef *ref);

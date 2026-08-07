@@ -4,6 +4,7 @@
  */
 
 #include "IR/MIRBuilder.hpp"
+#include "Analysiser/SymbolTable.hpp"
 #include "Core/Debugging.hpp"
 
 #include <cassert>
@@ -242,6 +243,8 @@ void MIRBuilder::emitDropPartial(MIRPlace place,
     for (const auto &field : ct->getFields())
     {
         if (isCopyType(field.type)) continue;
+        // Arrays of Copy elements (v1) own nothing — skip their drop.
+        if (field.type->getKind() == Type::Kind::Array) continue;
 
         bool fieldFullyMoved = false;
         std::vector<std::vector<std::string>> subPaths;
@@ -1172,6 +1175,12 @@ MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
     if (auto *ma = dynamic_cast<HIRMemberAccess *>(expr))
         return buildMemberAccess(ma);
 
+    if (auto *ia = dynamic_cast<HIRIndexAccess *>(expr))
+        return buildIndexAccess(ia);
+
+    if (auto *al = dynamic_cast<HIRArrayLiteral *>(expr))
+        return buildArrayLiteral(al);
+
     if (auto *si = dynamic_cast<HIRStructInit *>(expr))
         return buildStructInit(si);
 
@@ -1230,7 +1239,20 @@ MIRPlace MIRBuilder::buildNameRef(HIRNameRef *ref)
     if (it != varMap_.end())
         return localPlace(it->second);
 
-    // Fall back: could be a global, a function, or a type name.
+    // A GLOBAL variable resolves to a `PlaceBase::Global` (codegen looks it up
+    // by name) so reads/writes hit the llvm::GlobalVariable. Function/type
+    // names fall through to the temp+String-const path below (function pointers).
+    if (auto *sym = SymbolTable::getInstance().lookupSymbol(ref->name);
+        sym && sym->kind == SymbolKind::GlobalVar)
+    {
+        MIRPlace g;
+        g.base = PlaceBase::Global;
+        g.name = ref->name;
+        g.type = ref->type;
+        return g;
+    }
+
+    // Fall back: could be a function, or a type name.
     // For function references we create a placeholder local.
     MIRPlace tmp = makeTempPlace(ref->type);
     // The name-ref itself becomes an unresolved operand – codegen resolves it.
@@ -1382,6 +1404,57 @@ MIRPlace MIRBuilder::buildMemberAccess(HIRMemberAccess *ma)
     if (ma->type)
         obj.type = ma->type;
     return obj;
+}
+
+// ── array / pointer indexing: a[i], s.data[i] ────────────────────────────────
+// The object's place is built first; if it is a reference (e.g. `s.data:
+// &mut i8`) a Deref projection is APPENDED to load the base pointer, then an
+// Index projection GEPs from it. lowerPlaceAsPtr already lowers Index via GEP.
+MIRPlace MIRBuilder::buildIndexAccess(HIRIndexAccess *ia)
+{
+    MIRPlace base = buildExpr(ia->object.get());
+
+    // Deref a reference-typed base (append — the reference is the VALUE of the
+    // object place, e.g. the `data` field; `&a` / `&mut a` objects get the same
+    // treatment via their empty projection prefix).
+    while (base.type->getKind() == Type::Kind::Reference)
+    {
+        base.projections.push_back(Projection{.kind = ProjectionKind::Deref});
+        auto refTy = std::static_pointer_cast<ReferenceType>(base.type);
+        base.type = refTy->getBaseType();
+    }
+
+    // Materialize the index into a fresh temp so the projection can reference a
+    // plain local (handles arbitrary index expressions and aliasing: a[b.c],
+    // a[a[0]] — buildExpr already evaluated any side effects).
+    MIRPlace idx = buildExpr(ia->index.get());
+    MIRPlace idxTemp = makeTempPlace(idx.type);
+    emitAssign(idxTemp, MIRRValueUse{placeToOperand(idx)});
+    base.projections.push_back(Projection{
+        .kind = ProjectionKind::Index,
+        .localIndex = idxTemp.index,
+    });
+    // Update the type to the element type (already resolved in sema).
+    if (ia->type)
+        base.type = ia->type;
+    return base;
+}
+
+// ── array literal: [a, b, c] ─────────────────────────────────────────────────
+
+MIRPlace MIRBuilder::buildArrayLiteral(HIRArrayLiteral *al)
+{
+    std::vector<MIROperand> elements;
+    elements.reserve(al->elements.size());
+    for (auto &e : al->elements)
+        elements.push_back(exprToOperand(e.get()));
+
+    MIRPlace tmp = makeTempPlace(al->type);
+    emitAssign(tmp, MIRRValueArrayInit{
+                        .elements = std::move(elements),
+                        .type = al->type,
+                    });
+    return tmp;
 }
 
 // ── struct initialiser: Point { x: 1, y: 2 } ─────────────────────────────────

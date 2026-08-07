@@ -20,8 +20,16 @@ static HIRRawType toRaw(const TypeNode *n)
     // reference like `Option<i32>` silently degrades to the un-instantiated `Option`.
     for (auto &ga : n->genericArgs)
         r.genericArgs.push_back(toRaw(ga.get()));
+    // Array type `[T; N]` (r.element is a shared_ptr to a nested raw type).
+    if (n->isArray)
+    {
+        r.isArray = true;
+        r.element = std::make_shared<HIRRawType>(toRaw(n->elementType.get()));
+        r.arraySize = n->arraySize;
+    }
     return r;
 }
+
 
 // Convert AST GenericConstraints (with TypeNode args) to HIRGenericConstraints.
 static std::vector<HIRGenericConstraint> toHIRConstraints(const std::vector<GenericConstraint> &cs)
@@ -649,7 +657,7 @@ void HIRBuilder::visit(ForStmt *node)
     matchExpr->scrutinee = nameRef(optName);
 
     HIRMatch::Arm someArm;
-    someArm.variantName = "some";
+    someArm.variantName = "Some";
     someArm.bindings.emplace_back(node->loopVar, nullptr);
     auto someBlock = std::make_unique<HIRBlock>();
     someBlock->position = position;
@@ -719,11 +727,38 @@ void HIRBuilder::visit(LiteralExpr *node)
     {
     case LiteralExpr::LiteralType::Int:
         result->kind = HIRLiteral::Kind::Int;
-        result->value = std::stoll(node->value);
+        // Guard against integer literals too large for int64 (`std::stoll`
+        // throws std::out_of_range → std::terminate). The Lexer accepts any
+        // digit run — only conversion reveals the overflow. Catch it, fall back
+        // to 0 so the AST stays well-formed, and flag the literal; the semantic
+        // analyzer reports the overflow (the builder cannot log it: sema's
+        // run() resets the error count before visiting, so a builder error
+        // would be silently discarded and the literal would silently become 0).
+        try
+        {
+            result->value = std::stoll(node->value);
+        }
+        catch (const std::exception &)
+        {
+            result->value = int64_t{0};
+            result->overflowed = true;
+        }
         break;
     case LiteralExpr::LiteralType::Float:
         result->kind = HIRLiteral::Kind::Float;
-        result->value = std::stod(node->value);
+        // Same guard for floats: `1e+` (if it ever reaches here) and other
+        // malformed forms throw std::invalid_argument. `std::stod` on a huge
+        // exponent returns inf rather than throwing, which is acceptable C
+        // behaviour (IEEE-754 overflow), so only the exception path is handled.
+        try
+        {
+            result->value = std::stod(node->value);
+        }
+        catch (const std::exception &)
+        {
+            result->value = 0.0;
+            result->overflowed = true;
+        }
         break;
     case LiteralExpr::LiteralType::String:
         result->kind = HIRLiteral::Kind::String;
@@ -942,6 +977,42 @@ void HIRBuilder::visit(MemberAccess *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRBuilder::visit(IndexAccess *node)
+{
+    auto result = std::make_unique<HIRIndexAccess>();
+    result->position = node->position;
+    result->length = node->length;
+
+    node->object->accept(this);
+    result->object.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    node->index->accept(this);
+    result->index.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(ArrayLiteral *node)
+{
+    auto result = std::make_unique<HIRArrayLiteral>();
+    result->position = node->position;
+    result->length = node->length;
+
+    for (auto &e : node->elements)
+    {
+        e->accept(this);
+        result->elements.push_back(std::unique_ptr<HIRExpr>(
+            dynamic_cast<HIRExpr *>(nodeStack.top().release())));
+        nodeStack.pop();
+    }
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(BinaryOp *node)
 {
     auto result = std::make_unique<HIRBinaryOp>();
@@ -984,6 +1055,13 @@ void HIRBuilder::visit(BinaryOp *node)
         result->opKind = HIRBinaryOp::OpKind::ShiftLeft;
     else if (node->op == ">>")
         result->opKind = HIRBinaryOp::OpKind::ShiftRight;
+    // KNOWN LIMITATION (P13): the `^`, `<<`, `>>` branches above are
+    // unreachable from source — the lexer has no tokens for them (`^` is an
+    // "Unknown character" error, `<<`/`>>` lex as two `<`/`>` tokens) and
+    // getPrecedence() has no entries. They are kept so the mapping is complete
+    // for the operator-overload traits (BitXor/Shl/Shr lower *method* calls,
+    // never an infix `^`) and for anyone constructing HIR directly. Do not
+    // treat them as supported syntax.
     else
     {
         // Unreachable through the normal parser path, but don't silently

@@ -201,6 +201,18 @@ public:
         }
     }
 
+    void visit(HIRIndexAccess *node)
+    {
+        printCommon(node);
+        os << " index_access";
+    }
+
+    void visit(HIRArrayLiteral *node)
+    {
+        printCommon(node);
+        os << " array_literal[" << node->elements.size() << "]";
+    }
+
     void visit(HIRStructInit *node)
     {
         printCommon(node);
@@ -398,6 +410,10 @@ public:
             visit(e);
         else if (auto e = dynamic_cast<HIRMemberAccess *>(node))
             visit(e);
+        else if (auto e = dynamic_cast<HIRIndexAccess *>(node))
+            visit(e);
+        else if (auto e = dynamic_cast<HIRArrayLiteral *>(node))
+            visit(e);
         else if (auto e = dynamic_cast<HIRStructInit *>(node))
             visit(e);
         else if (auto e = dynamic_cast<HIRVariantInit *>(node))
@@ -478,6 +494,16 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
     {
         if (e->object) children.push_back(e->object.get());
     }
+    else if (auto e = dynamic_cast<HIRIndexAccess *>(node))
+    {
+        if (e->object) children.push_back(e->object.get());
+        if (e->index) children.push_back(e->index.get());
+    }
+    else if (auto e = dynamic_cast<HIRArrayLiteral *>(node))
+    {
+        for (auto &elem : e->elements)
+            children.push_back(elem.get());
+    }
     else if (auto e = dynamic_cast<HIRStructInit *>(node))
     {
         for (auto &[name, expr] : e->members)
@@ -523,7 +549,14 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
     {
         if (s->scrutinee) children.push_back(s->scrutinee.get());
         for (auto &arm : s->arms)
+        {
+            // P8: an arm is EITHER a block (`arm.body`, void arm) OR a tail
+            // expression (`arm.tailValue`, value arm). The old code only walked
+            // `arm.body`, so `let y = match ... { Some(v) => v + 1, ... }` arms
+            // were invisible in the HIR dump. Walk both.
             if (arm.body) children.push_back(arm.body.get());
+            if (arm.tailValue) children.push_back(arm.tailValue.get());
+        }
     }
     else if (auto s = dynamic_cast<HIRLoop *>(node))
     {

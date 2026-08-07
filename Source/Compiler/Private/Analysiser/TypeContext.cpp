@@ -75,6 +75,18 @@ std::shared_ptr<ReferenceType> TypeContext::getReference(std::shared_ptr<Type> b
     return refType;
 }
 
+std::shared_ptr<ArrayType> TypeContext::getArray(std::shared_ptr<Type> elementType, size_t size)
+{
+    auto key = std::make_pair((void *)elementType.get(), size);
+    auto it = arrayCache.find(key);
+    if (it != arrayCache.end())
+        return it->second;
+
+    auto arrTy = std::make_shared<ArrayType>(elementType, size);
+    arrayCache[key] = arrTy;
+    return arrTy;
+}
+
 std::shared_ptr<CustomType> TypeContext::createCustom(std::string name, std::vector<CustomType::Field> fields)
 {
     auto it = customs.find(name);
@@ -195,20 +207,27 @@ std::optional<std::shared_ptr<TraitType>> TypeContext::getTrait(std::string name
 
 std::shared_ptr<SelfType> TypeContext::createSelf(std::string name, bool isMut, bool isRef)
 {
-    auto it = selfs.find(name);
+    // P2: cache key MUST be the same triple SelfType::equals compares. The old
+    // name-only key made `fn a(&self)` + `fn b(&mut self)` in one trait share a
+    // single SelfType, so `b`'s receiver lost its mutability and the borrow
+    // checker treated a `&mut self` method as `&self` (aliasing that should be
+    // rejected slipped through).
+    SelfKey key{std::move(name), isMut, isRef};
+    auto it = selfs.find(key);
     if (it != selfs.end())
     {
         return it->second;
     }
 
-    auto selfType = std::make_shared<SelfType>(name, isMut, isRef);
-    selfs[name] = selfType;
+    auto selfType = std::make_shared<SelfType>(key.name, isMut, isRef);
+    selfs[key] = selfType;
     return selfType;
 }
 
-std::optional<std::shared_ptr<SelfType>> TypeContext::getSelf(std::string name)
+std::optional<std::shared_ptr<SelfType>> TypeContext::getSelf(const std::string &name, bool isMut, bool isRef)
 {
-    auto it = selfs.find(name);
+    SelfKey key{name, isMut, isRef};
+    auto it = selfs.find(key);
     if (it != selfs.end())
     {
         return it->second;
@@ -384,6 +403,11 @@ std::shared_ptr<Type> TypeContext::substitute(
         auto r = std::static_pointer_cast<ReferenceType>(ty);
         return getReference(substitute(r->getBaseType(), subst, strict), r->isMutableRef());
     }
+    case Type::Kind::Array:
+    {
+        auto a = std::static_pointer_cast<ArrayType>(ty);
+        return getArray(substitute(a->getElementType(), subst, strict), a->getSize());
+    }
     case Type::Kind::Custom:
     {
         auto c = std::static_pointer_cast<CustomType>(ty);
@@ -469,6 +493,8 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
         case Type::Kind::GenericParam: return true;
         case Type::Kind::Reference:
             return hasGenericParam(std::static_pointer_cast<ReferenceType>(t)->getBaseType());
+        case Type::Kind::Array:
+            return hasGenericParam(std::static_pointer_cast<ArrayType>(t)->getElementType());
         case Type::Kind::Custom:
         {
             auto c = std::static_pointer_cast<CustomType>(t);

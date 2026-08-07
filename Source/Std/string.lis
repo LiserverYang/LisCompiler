@@ -1,0 +1,119 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// string.lis
+//
+// A heap-backed String type with single ownership. `String` owns its heap
+// buffer (`data`); moving a String transfers the buffer, and dropping it frees
+// it exactly once (via `impl Drop for String`). The low-level heap primitives
+// (`__alloc` / `__free` / `__memcpy` / `__strlen`) are compiler builtins that
+// lower to libc malloc/free/memcpy/strlen.
+//
+// Because `data` is a `&mut i8` buffer, a String is NEVER Copy: `let b = a;`
+// moves `a` (a is then unusable), and `let r = &mut s.data` keeps `s` from
+// being moved while `r` is live. Read its length via the `len` field, grow it
+// with `s.push_char(c)` / `s.push_str(...)`, and index it safely with
+// `s.index(i)` (returns `Option<char>`).
+//
+// References RETURNED by methods (`to_cstr`) borrow the receiver and dangle
+// once the owner is moved/dropped — the compiler doesn't track return borrows
+// yet, so keep the owner alive for as long as the `&i8` is used.
+//
+// OOM: `__alloc` (libc malloc) returning null is NOT checked — the language
+// has no error handling, so an allocation failure aborts inside the runtime
+// (memset/deref of a null buffer). Do not rely on graceful recovery.
+
+struct String
+{
+    pub data: &mut i8,   // heap buffer (C-string, null-terminated)
+    pub len: i32,
+    pub cap: i32
+}
+
+impl String
+{
+    // An empty String with capacity for 16 bytes.
+    fn new() -> String
+    {
+        let data = __alloc(16);
+        ret String { data: data, len: 0, cap: 16 };
+    }
+
+    // Copy the C string literal `s` into a fresh heap String.
+    fn from_lit(s: &i8) -> String
+    {
+        let n = __strlen(s);
+        let data = __alloc(n + 1);
+        __memcpy(data, s, n + 1);
+        ret String { data: data, len: n, cap: n + 1 };
+    }
+
+    // The buffer pointer as an immutable C string (for print_str / passing out).
+    //
+    // DANGER: the returned reference BORROWS the receiver's lifetime. It stays
+    // valid only while the String that owns the buffer is alive — after the
+    // owner is moved or dropped (`drop(s)` / reassigned), the pointer dangles.
+    // The compiler does not track return-value borrows yet, so this is on the
+    // caller: do not use the returned `&i8` past the owner's lifetime.
+    fn to_cstr(self: &String) -> &i8
+    {
+        ret self.data;
+    }
+
+    // Append one character. Grows the buffer (double capacity) when full; the
+    // old buffer is freed here and the new one takes its place.
+    //
+    // Grow when `len + 1 >= cap`: a full buffer must still hold the new char
+    // AND the null terminator (written right after `len` bumps). Growing at
+    // `len >= cap` would overflow the heap by one byte — `from_lit` leaves
+    // `cap = n + 1` with `len = n`, so the first push would write `data[n+1]`
+    // out of bounds. (No constant keyword exists yet, so `+ 1` is spelled out.)
+    fn push_char(self: &mut String, c: char)
+    {
+        if (self.len + 1) >= self.cap {
+            let new_cap = self.cap * 2;
+            let new_data = __alloc(new_cap);
+            __memcpy(new_data, self.data, self.len);
+            __free(self.data);
+            self.data = new_data;
+            self.cap = new_cap;
+        }
+        self.data[self.len] = c as i8;
+        self.len = self.len + 1;
+        self.data[self.len] = '\0' as i8; // keep the buffer null-terminated
+    }
+
+    // Append the C string `other` (including its null terminator).
+    fn push_str(self: &mut String, other: &i8)
+    {
+        let on = __strlen(other);
+        if (self.len + on) >= self.cap {
+            let new_cap = (self.len + on) * 2;
+            let new_data = __alloc(new_cap);
+            __memcpy(new_data, self.data, self.len);
+            __free(self.data);
+            self.data = new_data;
+            self.cap = new_cap;
+        }
+        __memcpy(&self.data[self.len], other, on + 1);
+        self.len = self.len + on;
+    }
+
+    // The byte at index `i` as a char, or `None` when out of bounds.
+    fn index(self: &String, i: i32) -> Option<char>
+    {
+        if 0 <= i && i < self.len {
+            ret Option::Some(self.data[i] as char);
+        }
+
+        ret Option::None;
+    }
+}
+
+impl Drop for String
+{
+    fn drop(self)
+    {
+        __free(self.data);
+    }
+}

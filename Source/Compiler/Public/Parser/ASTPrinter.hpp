@@ -58,6 +58,8 @@ public:
     void visit(MemberFunctionCall *node) override;
     void visit(FunctionCall *node) override;
     void visit(MemberAccess *node) override;
+    void visit(IndexAccess *node) override;
+    void visit(ArrayLiteral *node) override;
     void visit(BinaryOp *node) override;
     void visit(CastExpr *node) override;
     void visit(ParenExpr *node) override;

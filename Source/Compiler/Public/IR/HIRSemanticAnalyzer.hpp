@@ -205,6 +205,18 @@ private:
      *  These lower to libc `fgets` + parse in LLVMIRBuilder. */
     bool handleInputBuiltin(HIRCall *node, const std::string &name);
 
+    /** Recognize a builtin heap call (`__alloc` → &mut i8, `__free`,
+     *  `__memcpy`, `__strlen`) by callee name, validate args, and return true
+     *  if `node` is such a builtin. These lower to libc malloc/free/memcpy/
+     *  strlen in LLVMIRBuilder. */
+    bool handleHeapBuiltin(HIRCall *node, const std::string &name);
+
+    /** Recognize a builtin to_string call (`to_string_i32/i64/f64/bool/char` →
+     *  String) by callee name, set the return type to the stdlib String struct,
+     *  and return true. These lower to malloc + sprintf + strlen in
+     *  LLVMIRBuilder. */
+    bool handleToStringBuiltin(HIRCall *node, const std::string &name);
+
     // ── operator overloading ──────────────────────────────────────────────
     /// Trait name for a binary op (`+`→"Add"), or nullptr for logical ops
     /// (`&&`/`||`) which never overload.
@@ -313,6 +325,8 @@ public:
     virtual void visit(HIRCast *node) override;
     virtual void visit(HIRCall *node) override;
     virtual void visit(HIRMemberAccess *node) override;
+    virtual void visit(HIRIndexAccess *node) override;
+    virtual void visit(HIRArrayLiteral *node) override;
     virtual void visit(HIRStructInit *node) override;
     virtual void visit(HIRVariantInit *node) override;
     virtual void visit(HIRRef *node) override;

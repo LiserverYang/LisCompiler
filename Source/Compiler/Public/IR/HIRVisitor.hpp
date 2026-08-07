@@ -12,6 +12,8 @@ class HIRBinaryOp;
 class HIRCast;
 class HIRCall;
 class HIRMemberAccess;
+class HIRIndexAccess;
+class HIRArrayLiteral;
 class HIRStructInit;
 class HIRVariantInit;
 class HIRRef;
@@ -42,6 +44,8 @@ public:
     virtual void visit(HIRCast *node) = 0;
     virtual void visit(HIRCall *node) = 0;
     virtual void visit(HIRMemberAccess *node) = 0;
+    virtual void visit(HIRIndexAccess *node) = 0;
+    virtual void visit(HIRArrayLiteral *node) = 0;
     virtual void visit(HIRStructInit *node) = 0;
     virtual void visit(HIRVariantInit *node) = 0;
     virtual void visit(HIRRef *node) = 0;

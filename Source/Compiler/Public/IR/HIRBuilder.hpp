@@ -83,6 +83,8 @@ public:
     virtual void visit(MemberFunctionCall *node);
     virtual void visit(FunctionCall *node) override;
     virtual void visit(MemberAccess *node) override;
+    virtual void visit(IndexAccess *node) override;
+    virtual void visit(ArrayLiteral *node) override;
     virtual void visit(BinaryOp *node) override;
     virtual void visit(CastExpr *node) override;
     virtual void visit(ParenExpr *node) override;

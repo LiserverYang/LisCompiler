@@ -35,6 +35,12 @@
 #include "Core/Pass.hpp"
 #include "IR/MIR.hpp"
 
+// Scratch buffer capacity for to_string_*: wide enough for the longest
+// `%f` rendering of a double (DBL_MAX prints ~320 chars; 512 leaves headroom
+// for the sign, decimal point, and locale quirks). Used for BOTH the malloc
+// size and the String.cap field so they can never drift apart.
+constexpr size_t TO_STRING_BUF_CAP = 512;
+
 // ─── Type bridge ─────────────────────────────────────────────────────────────
 // Implement these four functions in a TypeHelper.cpp (or inline here if your
 // Type class is simple enough). The builder only calls these; it never touches
@@ -198,6 +204,32 @@ private:
     void emitInputCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
     /// True if `name` is a builtin input function.
     bool isInputBuiltin(const std::string &name);
+
+    /// Builtin heap: declare `malloc`/`free`/`memcpy`/`strlen` with real
+    /// signatures and lower `__alloc`/`__free`/`__memcpy`/`__strlen` to them.
+    llvm::Function *getOrDeclareMalloc();
+    llvm::Function *getOrDeclareFree();
+    llvm::Function *getOrDeclareMemcpy();
+    llvm::Function *getOrDeclareStrlen();
+    void emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    bool isHeapBuiltin(const std::string &name);
+
+    /// Builtin to_string: declare libc `sprintf` and lower
+    /// `to_string_i32/i64/f64/bool/char` to malloc + sprintf + strlen, wrapping
+    /// the result in a stdlib `String` struct.
+    llvm::Function *getOrDeclareSprintf();
+    void emitToStringCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    bool isToStringBuiltin(const std::string &name);
+
+    /// Declare libc `void abort(void)` — the runtime trap for out-of-bounds
+    /// array indexing.
+    llvm::Function *getOrDeclareAbort();
+
+    /// Get-or-declare an external libc function. If `name` already exists in
+    /// the module but with a DIFFERENT type, report an internal error (a user
+    /// function with a libc name is rejected in sema, so this is defensive).
+    llvm::Function *getOrDeclareLibcFunction(const std::string &name,
+        llvm::FunctionType *fty);
 
     /// Emit a single alloca at the entry block for a given local.
     llvm::AllocaInst *emitEntryAlloca(llvm::Function *fn,

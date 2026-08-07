@@ -143,6 +143,13 @@ inline MIRRValueStructInit copy(const MIRRValueStructInit &s)
         .type = copy(s.type)};
 }
 
+inline MIRRValueArrayInit copy(const MIRRValueArrayInit &a)
+{
+    return {
+        .elements = copy(a.elements),
+        .type = copy(a.type)};
+}
+
 inline MIRRValue copy(const MIRRValue &rv)
 {
     return copy_variant(rv);
