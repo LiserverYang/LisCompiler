@@ -102,7 +102,7 @@ impl String
     // The byte at index `i` as a char, or `None` when out of bounds.
     fn index(self: &String, i: i32) -> Option<char>
     {
-        if i < 0 || i >= self.len {
+        if (i < 0) || (i >= self.len) {
             ret Option::None;
         }
         ret Option::Some(self.data[i] as char);
