@@ -1104,3 +1104,89 @@ TEST_F(RuntimeTest, StringPushCharGrowsAtCap)
               " let mut i = 0; while i < 16 { s.push_char('a'); i = i + 1; }"
               " ret s.len; }", 16);
 }
+
+// ── P12 regression: control flow nested in an if body must execute ────────────
+// buildIf sealed the branch ENTRY block (thenId/elseId) with Goto(join), which
+// OVERWROTE the nested control flow's own terminator — the inner if/while/for
+// body became unreachable. Seal the branch's actual END block instead.
+
+TEST_F(RuntimeTest, NestedIfInsideIfExecutes)
+{
+    expectRun("fn main() -> i32 { let x = 5; let mut r = 0;"
+              " if x > 3 { if x > 4 { r = 1; } } ret r; }", 1);
+}
+
+TEST_F(RuntimeTest, WhileInsideIfBodyExecutes)
+{
+    expectRun("fn main() -> i32 { let mut i = 0; let mut r = 0;"
+              " if true { while i < 2 { r = r + 1; i = i + 1; } } ret r; }", 2);
+}
+
+TEST_F(RuntimeTest, ForInsideIfBodyExecutes)
+{
+    expectRun("fn main() -> i32 { let mut r = 0;"
+              " if true { for x in range(1, 3) { r = r + x; } } ret r; }", 3);
+}
+
+TEST_F(RuntimeTest, NestedIfInElseBodyExecutes)
+{
+    expectRun("fn main() -> i32 { let x = 1; let mut r = 0;"
+              " if x > 3 { r = 1; } else { if x > 0 { r = 2; } } ret r; }", 2);
+}
+
+TEST_F(RuntimeTest, ElseIfChainRunsWithoutCrash)
+{
+    // `else if` desugars to `else { if ... }` — the exact else-nested-if shape
+    // that used to segfault lisc.exe (orphaned inner blocks). Must pick the
+    // matching else-if branch and not crash.
+    expectRun("fn main() -> i32 { let x = 10; let mut r = 0;"
+              " if x < 5 { r = 1; } else if x < 20 { r = 2; } else { r = 3; }"
+              " ret r; }", 2);
+}
+
+TEST_F(RuntimeTest, ElseIfElseBranchRuns)
+{
+    // The final `else` of an else-if chain must also be reachable.
+    expectRun("fn main() -> i32 { let x = 50; let mut r = 0;"
+              " if x < 5 { r = 1; } else if x < 20 { r = 2; } else { r = 3; }"
+              " ret r; }", 3);
+}
+
+TEST_F(RuntimeTest, StatementAfterNestedIfExecutes)
+{
+    // Not only the nested if's own body — a statement AFTER it in the same block
+    // must execute too (the pre-fix seal overwrote control flow past the if).
+    expectRun("fn main() -> i32 { let mut r = 0;"
+              " if true { if true { r = 1; } r = 5; } ret r; }", 5);
+}
+
+TEST_F(RuntimeTest, IfInsideWhileBodyRegression)
+{
+    // Direction check: while body containing an if already worked; must stay.
+    expectRun("fn main() -> i32 { let mut i = 0; let mut r = 0;"
+              " while i < 2 { if true { r = 1; } i = i + 1; } ret r; }", 1);
+}
+
+TEST_F(RuntimeTest, IfInsideForBodyRegression)
+{
+    // Direction check: for body containing an if already worked; must stay.
+    expectRun("fn main() -> i32 { let mut r = 0;"
+              " for x in range(1, 4) { if x > 1 { r = r + x; } } ret r; }", 5);
+}
+
+// ── P13 regression: a bare if as a branch must not crash the compiler ─────────
+// HIRBuilder dynamic_cast'd every branch to HIRBlock; `else if ...` (else is a
+// bare IfStmt) and `if a if b {...}` (then is a bare IfStmt) produced a null
+// block and MIRBuilder's buildBlock(null) segfaulted. Branches are now wrapped
+// in a synthetic block.
+
+TEST_F(RuntimeTest, BareIfThenBranchRuns)
+{
+    expectRun("fn main() -> i32 { let mut r = 0; if true if true { r = 1; } ret r; }", 1);
+}
+
+TEST_F(RuntimeTest, BareIfThenElseBranchRuns)
+{
+    expectRun("fn main() -> i32 { let x = 1; let mut r = 0;"
+              " if true if x > 0 { r = 2; } ret r; }", 2);
+}

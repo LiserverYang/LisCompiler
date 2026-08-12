@@ -737,9 +737,14 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
             && currentBlock().label != "dead";
     };
 
-    // 5. Lower then-branch.
+    // 5. Lower then-branch. Capture the block where the branch ACTUALLY ends
+    //    (thenEnd), not just its entry block thenId: when the branch body
+    //    contains NESTED control flow (an inner if/while/for), that nested flow
+    //    seals thenId with ITS OWN terminator and switches curBB_ to its join,
+    //    so the branch "ends" at a different block than it entered.
     switchTo(thenId);
     buildBlock(ifStmt->thenBlock.get());
+    BasicBlockId thenEnd = curBB_;
     bool thenFell = fellThrough();
     OwnershipState thenSt{movedLocals_, partiallyMovedFields_};
 
@@ -749,29 +754,38 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
     switchTo(elseId);
     if (ifStmt->elseBlock.has_value())
         buildBlock(ifStmt->elseBlock->get());
+    BasicBlockId elseEnd = curBB_;
     bool elseFell = fellThrough();
     OwnershipState elseSt{movedLocals_, partiallyMovedFields_};
 
     // 7. Path-specific drops: an outer local owned on THIS edge but dead on the
     //    sibling edge (moved there) must be dropped here before the join, or it
     //    leaks on this path. Then seal each real edge with a Goto to the join.
+    //
+    //    Seal the branch's END block (thenEnd/elseEnd), never its entry block.
+    //    The pre-fix code sealed thenId/elseId: for a branch with nested control
+    //    flow that OVERWROTE the inner terminator the nested flow had sealed onto
+    //    the entry block, making the inner if/while/for body unreachable
+    //    (`if x>3 { if x>4 { r=1; } }` never ran r=1; `else if` segfaulted on the
+    //    orphaned inner blocks). buildMatch already seals curBB_ the same way —
+    //    buildIf was the only branch handler sealing the entry block.
     if (thenFell)
     {
-        switchTo(thenId);
+        switchTo(thenEnd);
         emitPathDrops(thenSt, elseSt);
         sealBlock(curBB_, MIRTermGoto{.target = joinId});
     }
-    else if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
-        sealBlock(curBB_, MIRTermGoto{.target = joinId}); // dead router block
+    else if (std::holds_alternative<MIRTermUnreachable>(body_->blocks[thenEnd].terminator))
+        sealBlock(thenEnd, MIRTermGoto{.target = joinId}); // dead router block
 
     if (elseFell)
     {
-        switchTo(elseId);
+        switchTo(elseEnd);
         emitPathDrops(elseSt, thenSt);
         sealBlock(curBB_, MIRTermGoto{.target = joinId});
     }
-    else if (std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
-        sealBlock(curBB_, MIRTermGoto{.target = joinId}); // dead router block
+    else if (std::holds_alternative<MIRTermUnreachable>(body_->blocks[elseEnd].terminator))
+        sealBlock(elseEnd, MIRTermGoto{.target = joinId}); // dead router block
 
     // 8. Merge at the join: a local is dead iff dead on ANY path (owned needs
     //    all paths to own it — the AND rule). Partial-move paths merge by union.
