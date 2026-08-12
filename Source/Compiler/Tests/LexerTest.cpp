@@ -298,3 +298,332 @@ TEST_F(LexerTest, ValidNumericLiteralsReportNoError)
     runLexer("0 42 1e10 2.5e-3 3.14");
     EXPECT_EQ(Logger::GetErrorCount(), 0) << "valid numeric literals must not report errors";
 }
+
+// ── D: string & char literals ──────────────────────────────────────────────────
+
+TEST_F(LexerTest, HandlesStringLiteral)
+{
+    runLexer("\"hello\"");
+    expectToken(0, TokenCode::STRING_LITERAL, "hello", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesEmptyStringLiteral)
+{
+    runLexer("\"\"");
+    expectToken(0, TokenCode::STRING_LITERAL, "", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesStringNewlineEscape)
+{
+    // .lis `"a\nb"` → the escape is processed into a real newline in the value.
+    runLexer("\"a\\nb\"");
+    expectToken(0, TokenCode::STRING_LITERAL, "a\nb", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesStringTabEscape)
+{
+    runLexer("\"a\\tb\"");
+    expectToken(0, TokenCode::STRING_LITERAL, "a\tb", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesStringQuoteEscape)
+{
+    runLexer("\"say \\\"hi\\\"\"");
+    expectToken(0, TokenCode::STRING_LITERAL, "say \"hi\"", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesStringBackslashEscape)
+{
+    runLexer("\"a\\\\b\"");
+    expectToken(0, TokenCode::STRING_LITERAL, "a\\b", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesCharLiteral)
+{
+    runLexer("'a'");
+    expectToken(0, TokenCode::CHAR_LITERAL, "a", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesCharNewlineEscape)
+{
+    runLexer("'\\n'");
+    expectToken(0, TokenCode::CHAR_LITERAL, "\n", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesCharQuoteEscape)
+{
+    runLexer("'\\''");
+    expectToken(0, TokenCode::CHAR_LITERAL, "'", 1, 1);
+}
+
+TEST_F(LexerTest, HandlesCharNulEscape)
+{
+    runLexer("'\\0'");
+    expectToken(0, TokenCode::CHAR_LITERAL, std::string(1, '\0'), 1, 1);
+}
+
+TEST_F(LexerTest, UnclosedStringReportsError)
+{
+    runLexer("\"abc");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "unclosed string must report an error";
+    ASSERT_GT(context->tokenStream.size(), 0);
+    EXPECT_EQ(context->tokenStream[0].code, TokenCode::STRING_LITERAL);
+}
+
+TEST_F(LexerTest, UnclosedCharReportsError)
+{
+    runLexer("'a");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "unclosed char must report an error";
+}
+
+TEST_F(LexerTest, CharAtImmediateEofReportsError)
+{
+    runLexer("'");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "bare quote at EOF must report an error";
+}
+
+TEST_F(LexerTest, CharEscapeAtEofReportsError)
+{
+    runLexer("'\\");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "escape at EOF must report an error";
+}
+
+// ── D: comments ────────────────────────────────────────────────────────────────
+
+TEST_F(LexerTest, UnclosedBlockCommentReportsError)
+{
+    runLexer("/* no closing");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "unclosed block comment must report an error";
+}
+
+TEST_F(LexerTest, LineCommentAtEofNoError)
+{
+    runLexer("// comment with no newline at EOF");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+    EXPECT_EQ(context->tokenStream.size(), 0);
+}
+
+TEST_F(LexerTest, BlockCommentWithSpecialChars)
+{
+    // Block comments close at the first `*/`; a nested-looking `/*` is data.
+    // `/* a /* b */` occupies cols 1-12, so `x` is at col 14.
+    runLexer("/* a /* b */ x");
+    expectToken(0, TokenCode::IDENTIFIER, "x", 1, 14);
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(LexerTest, NonAsciiInCommentSkipped)
+{
+    // Non-ASCII bytes in a comment must not trip ctype UB (P9 unsigned cast).
+    runLexer("// \xe4\xb8\xad\xe6\x96\x87 comment\nx");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+    ASSERT_GT(context->tokenStream.size(), 0);
+    EXPECT_EQ(context->tokenStream[0].code, TokenCode::IDENTIFIER);
+    EXPECT_EQ(context->tokenStream[0].value, "x");
+}
+
+TEST_F(LexerTest, NonAsciiInStringLiteral)
+{
+    runLexer("\"\xe4\xb8\xad\xe6\x96\x87\"");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+    expectToken(0, TokenCode::STRING_LITERAL, "\xe4\xb8\xad\xe6\x96\x87", 1, 1);
+}
+
+// ── D: numeric literal edges ───────────────────────────────────────────────────
+
+TEST_F(LexerTest, LeadingZeroInteger)
+{
+    runLexer("007");
+    expectToken(0, TokenCode::INT_LITERAL, "007", 1, 1);
+}
+
+TEST_F(LexerTest, TrailingDotIsIntegerThenDot)
+{
+    // `5.` lexes as integer 5 followed by a dot (member-access start).
+    runLexer("5.");
+    expectToken(0, TokenCode::INT_LITERAL, "5", 1, 1);
+    expectToken(1, TokenCode::DOT, ".", 1, 2);
+}
+
+TEST_F(LexerTest, DotThenNumberIsDotThenInteger)
+{
+    runLexer(".5");
+    expectToken(0, TokenCode::DOT, ".", 1, 1);
+    expectToken(1, TokenCode::INT_LITERAL, "5", 1, 2);
+}
+
+TEST_F(LexerTest, FloatWithExponent)
+{
+    runLexer("1.5e3");
+    expectToken(0, TokenCode::FLOAT_LITERAL, "1.5e3", 1, 1);
+}
+
+TEST_F(LexerTest, FloatUpperExponent)
+{
+    runLexer("1E5");
+    expectToken(0, TokenCode::FLOAT_LITERAL, "1E5", 1, 1);
+}
+
+TEST_F(LexerTest, FloatExponentPositiveSign)
+{
+    runLexer("2e+3");
+    expectToken(0, TokenCode::FLOAT_LITERAL, "2e+3", 1, 1);
+}
+
+TEST_F(LexerTest, IntegerThenIdentifier)
+{
+    runLexer("123abc");
+    expectToken(0, TokenCode::INT_LITERAL, "123", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "abc", 1, 4);
+}
+
+TEST_F(LexerTest, MemberAccessOnIntegerLiteral)
+{
+    runLexer("1.foo");
+    expectToken(0, TokenCode::INT_LITERAL, "1", 1, 1);
+    expectToken(1, TokenCode::DOT, ".", 1, 2);
+    expectToken(2, TokenCode::IDENTIFIER, "foo", 1, 3);
+}
+
+// ── D: remaining keywords ──────────────────────────────────────────────────────
+
+TEST_F(LexerTest, RecognizesControlKeywords)
+{
+    runLexer("in as self move break continue");
+    expectToken(0, TokenCode::IN, "in", 1, 1);
+    expectToken(1, TokenCode::AS, "as", 1, 4);
+    expectToken(2, TokenCode::SELF, "self", 1, 7);
+    expectToken(3, TokenCode::MOVE, "move", 1, 12);
+    expectToken(4, TokenCode::BREAK, "break", 1, 17);
+    expectToken(5, TokenCode::CONTINUE, "continue", 1, 23);
+}
+
+TEST_F(LexerTest, RecognizesDeclarationKeywords)
+{
+    runLexer("impl trait enum match");
+    expectToken(0, TokenCode::IMPL, "impl", 1, 1);
+    expectToken(1, TokenCode::TRAIT, "trait", 1, 6);
+    expectToken(2, TokenCode::ENUM, "enum", 1, 12);
+    expectToken(3, TokenCode::MATCH, "match", 1, 17);
+}
+
+TEST_F(LexerTest, RecognizesVoidKeyword)
+{
+    runLexer("void");
+    expectToken(0, TokenCode::VOID, "void", 1, 1);
+}
+
+TEST_F(LexerTest, KeywordBoundaryNotSubstring)
+{
+    // `iff` is an identifier, not `if` + `f`.
+    runLexer("iff ifx");
+    expectToken(0, TokenCode::IDENTIFIER, "iff", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "ifx", 1, 5);
+}
+
+// ── D: operators ───────────────────────────────────────────────────────────────
+
+TEST_F(LexerTest, ArrowVsMinusGreater)
+{
+    runLexer("-> - >");
+    expectToken(0, TokenCode::ARROW, "->", 1, 1);
+    expectToken(1, TokenCode::MINUS, "-", 1, 4);
+    expectToken(2, TokenCode::GT, ">", 1, 6);
+}
+
+TEST_F(LexerTest, DoubleColonVsColons)
+{
+    runLexer(":: : :");
+    expectToken(0, TokenCode::DOUBLE_COLON, "::", 1, 1);
+    expectToken(1, TokenCode::COLON, ":", 1, 4);
+    expectToken(2, TokenCode::COLON, ":", 1, 6);
+}
+
+TEST_F(LexerTest, LeVsLtEq)
+{
+    runLexer("<= < =");
+    expectToken(0, TokenCode::LT_EQ, "<=", 1, 1);
+    expectToken(1, TokenCode::LT, "<", 1, 4);
+    expectToken(2, TokenCode::ASSIGN, "=", 1, 6);
+}
+
+TEST_F(LexerTest, ModuloOperator)
+{
+    runLexer("%");
+    expectToken(0, TokenCode::MOD, "%", 1, 1);
+}
+
+TEST_F(LexerTest, NotEqAndNot)
+{
+    runLexer("!= !");
+    expectToken(0, TokenCode::NOT_EQ, "!=", 1, 1);
+    expectToken(1, TokenCode::NOT, "!", 1, 4);
+}
+
+TEST_F(LexerTest, DoubleArrow)
+{
+    runLexer("=> = >");
+    expectToken(0, TokenCode::DOUBLE_ARROW, "=>", 1, 1);
+    expectToken(1, TokenCode::ASSIGN, "=", 1, 4);
+    expectToken(2, TokenCode::GT, ">", 1, 6);
+}
+
+// ── D: unknown characters ──────────────────────────────────────────────────────
+
+TEST_F(LexerTest, UnknownCharacterReportsError)
+{
+    runLexer("$");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "unknown character must report an error";
+}
+
+TEST_F(LexerTest, UnknownCharacterAmongValidTokens)
+{
+    runLexer("a $ b");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+    ASSERT_GT(context->tokenStream.size(), 2);
+    EXPECT_EQ(context->tokenStream[0].code, TokenCode::IDENTIFIER);
+    EXPECT_EQ(context->tokenStream[2].code, TokenCode::IDENTIFIER);
+}
+
+TEST_F(LexerTest, MultipleUnknownCharsReportMultipleErrors)
+{
+    runLexer("$ # @");
+    EXPECT_GE(Logger::GetErrorCount(), 3) << "each unknown character reports an error";
+}
+
+// ── D: identifiers & positions ─────────────────────────────────────────────────
+
+TEST_F(LexerTest, IdentifierWithDigitsInside)
+{
+    runLexer("var2 x9y _1");
+    expectToken(0, TokenCode::IDENTIFIER, "var2", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "x9y", 1, 6);
+    expectToken(2, TokenCode::IDENTIFIER, "_1", 1, 10);
+}
+
+TEST_F(LexerTest, SingleCharPerLinePositions)
+{
+    runLexer("a\nbb\nccc");
+    expectToken(0, TokenCode::IDENTIFIER, "a", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "bb", 2, 1);
+    expectToken(2, TokenCode::IDENTIFIER, "ccc", 3, 1);
+}
+
+TEST_F(LexerTest, TabCountsAsOneColumn)
+{
+    runLexer("a\tb");
+    expectToken(0, TokenCode::IDENTIFIER, "a", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "b", 1, 3);
+}
+
+TEST_F(LexerTest, CommentThenCodeOnNextLine)
+{
+    runLexer("// comment\nx");
+    expectToken(0, TokenCode::IDENTIFIER, "x", 2, 1);
+}
+
+TEST_F(LexerTest, BlockCommentThenInlineCode)
+{
+    runLexer("/* c */ y");
+    expectToken(0, TokenCode::IDENTIFIER, "y", 1, 9);
+}
