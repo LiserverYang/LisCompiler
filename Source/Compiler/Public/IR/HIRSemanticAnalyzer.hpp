@@ -324,6 +324,7 @@ public:
     virtual void visit(HIRStructInit *node) override;
     virtual void visit(HIRVariantInit *node) override;
     virtual void visit(HIRRef *node) override;
+    virtual void visit(HIRImport *node) override;
 
     std::vector<std::shared_ptr<Type>> inferGenericArguments(
         const std::vector<std::shared_ptr<Type>> &genericParams,

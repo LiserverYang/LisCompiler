@@ -32,6 +32,7 @@ class HIRStruct;
 class HIREnum;
 class HIRTrait;
 class HIRImpl;
+class HIRImport;
 
 class HIRVisitor
 {
@@ -64,4 +65,5 @@ public:
     virtual void visit(HIREnum *node) = 0;
     virtual void visit(HIRTrait *node) = 0;
     virtual void visit(HIRImpl *node) = 0;
+    virtual void visit(HIRImport *node) = 0;
 };

@@ -4393,3 +4393,10 @@ void HIRSemanticAnalyzer::visit(HIRRef *node)
         }
     }
 }
+
+void HIRSemanticAnalyzer::visit(HIRImport *node)
+{
+    // Module loading happens in the Parser (each imported file is lexed and
+    // parsed into the same Program before sema runs). Nothing to do here yet.
+    (void)node;
+}
