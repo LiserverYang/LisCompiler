@@ -1190,3 +1190,28 @@ TEST_F(RuntimeTest, BareIfThenElseBranchRuns)
     expectRun("fn main() -> i32 { let x = 1; let mut r = 0;"
               " if true if x > 0 { r = 2; } ret r; }", 2);
 }
+
+// ── P14 regression: bool→int cast must be a zero-extension ────────────────────
+// bool is lowered to LLVM i1; the widening cast used SExt, so `true as i32`
+// sign-extended to -1 instead of 1. bool is unsigned → ZExt.
+
+TEST_F(RuntimeTest, BoolTrueCastToIntIsOne)
+{
+    expectRun("fn main() -> i32 { let b = true; ret b as i32; }", 1);
+}
+
+TEST_F(RuntimeTest, BoolFalseCastToIntIsZero)
+{
+    expectRun("fn main() -> i32 { let b = false; ret b as i32; }", 0);
+}
+
+TEST_F(RuntimeTest, BoolTrueCastToInt64IsOne)
+{
+    expectRun("fn main() -> i64 { let b = true; ret b as i64; }", 1);
+}
+
+TEST_F(RuntimeTest, BoolCastResultInArithmetic)
+{
+    // The cast result must be a usable 1/0 value, not -1 (which would give 9).
+    expectRun("fn main() -> i32 { let b = true; ret 10 + (b as i32); }", 11);
+}
