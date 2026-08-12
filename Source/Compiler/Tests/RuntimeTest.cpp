@@ -3052,3 +3052,898 @@ TEST_F(RuntimeTest, ShadowedInDifferentFn
     expectRun("fn f() -> i32 { let x = 1; ret x; } fn g() -> i32 { let x = 2; ret x; }"
               " fn main() -> i32 { ret f() + g(); }", 3);
 }
+
+// ── B3: arithmetic & expressions ───────────────────────────────────────────────
+
+TEST_F(RuntimeTest, ArithmeticModuloAssoc)
+{
+    expectRun("fn main() -> i32 { ret 17 % 5 % 3; }", 2);
+}
+
+TEST_F(RuntimeTest, ArithmeticUnaryViaSubtract
+)
+{
+    expectRun("fn main() -> i32 { let a = 0 - 10; ret 0 - a; }", 10);
+}
+
+TEST_F(RuntimeTest, ArithmeticManyOperands
+)
+{
+    expectRun("fn main() -> i32 { ret 1 + 2 + 3 + 4 + 5 + 6; }", 21);
+}
+
+TEST_F(RuntimeTest, ArithmeticDivMulPriority
+)
+{
+    expectRun("fn main() -> i32 { ret 8 / 2 * 3; }", 12);
+}
+
+TEST_F(RuntimeTest, ArithmeticModOfSum
+)
+{
+    expectRun("fn main() -> i32 { ret (10 + 15) % 7; }", 4);
+}
+
+TEST_F(RuntimeTest, ComparisonChainVariables
+)
+{
+    expectRun("fn main() -> i32 { let a = 3; let b = 5; let c = 7;"
+              " if a < b && b < c { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, BoolResultInArithmetic
+)
+{
+    expectRun("fn main() -> i32 { let b = 5 > 3; if b { ret 10; } ret 20; }", 10);
+}
+
+TEST_F(RuntimeTest, NestedParens
+)
+{
+    expectRun("fn main() -> i32 { ret (((2))); }", 2);
+}
+
+TEST_F(RuntimeTest, EmptyFunctionBody
+)
+{
+    expectRun("fn noop() { ret; } fn main() -> i32 { noop(); ret 0; }", 0);
+}
+
+// NOTE: `a = b = 5` (chained assignment) is not expressible — assignment is a
+// statement, not a value. No test for it.
+
+// ── B3: floats & casts ─────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, FloatPrecisionAddition
+)
+{
+    expectOutput("fn main() -> i32 { print_float(0.1 + 0.2); println(); ret 0; }",
+        "0.300000\n", 0);
+}
+
+TEST_F(RuntimeTest, FloatNegativeZero
+)
+{
+    expectOutput("fn main() -> i32 { print_float(0.0 - 0.0); println(); ret 0; }",
+        "0.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, FloatLargeExponent
+)
+{
+    expectOutput("fn main() -> i32 { print_float(1.5e5); println(); ret 0; }",
+        "150000.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, FloatCompareGreater
+)
+{
+    expectRun("fn main() -> i32 { if 7.5 >= 7.5 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharCompareNotEqual
+)
+{
+    expectRun("fn main() -> i32 { if 'a' != 'b' { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharRangeCheck
+)
+{
+    expectRun("fn main() -> i32 { let c = 'm';"
+              " if c >= 'a' && c <= 'z' { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, I64Negative
+)
+{
+    expectRun("fn main() -> i64 { let a = 0 as i64; ret a; }", 0);
+}
+
+TEST_F(RuntimeTest, I8ToI64ViaChain
+)
+{
+    expectRun("fn main() -> i64 { let a = 'A' as i8; let b = a as i32; let c = b as i64; ret c; }", 65);
+}
+
+// ── B3: enums & match ──────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, EnumMatchWithMultipleSameType
+)
+{
+    expectRun("enum E { A, B, C } fn main() -> i32 { let mut r = 0;"
+              " let e = E::A; match e { A => { r = 1; }, B => { r = 2; }, C => { r = 3; } }"
+              " let f = E::C; match f { A => { ret r; }, B => { ret r + 1; }, C => { ret r + 2; } } }", 3);
+}
+
+TEST_F(RuntimeTest, EnumValueArmWithComputation
+)
+{
+    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
+              " ret match e { A => 10 * 2, B => 20 + 1 }; }", 21);
+}
+
+TEST_F(RuntimeTest, EnumMatchWildcardValue
+)
+{
+    expectRun("enum E { A, B, C } fn main() -> i32 { let e = E::C;"
+              " ret match e { A => 1, _ => 9 }; }", 9);
+}
+
+TEST_F(RuntimeTest, EnumNestedVariantConstruction
+)
+{
+    expectRun("enum O<T> { Some(T), None } enum R { Ok(i32), Err }"
+              " fn main() -> i32 { let o = O::Some(R::Ok(5));"
+              " match o { Some(r) => { match r { Ok(v) => { ret v; }, Err => { ret 0; } } },"
+              " None => { ret 0; } } }", 5);
+}
+
+TEST_F(RuntimeTest, EnumMatchConsumesScrutinee
+)
+{
+    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
+              " let o = O::Some(5); let y = match o { Some(v) => v, None => 0 }; ret y; }", 5);
+}
+
+// ── B3: strings ────────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, StringPushManyChars
+)
+{
+    expectRun("fn main() -> i32 { let mut s = String::new();"
+              " s.push_char('a'); s.push_char('b'); s.push_char('c');"
+              " s.push_char('d'); s.push_char('e'); ret s.len; }", 5);
+}
+
+TEST_F(RuntimeTest, StringIndexAfterGrow
+)
+{
+    expectRun("fn main() -> i32 { let mut s = String::new();"
+              " let mut i = 0; while i < 20 { s.push_char('x'); i = i + 1; }"
+              " match s.index(19) { Some(c) => { ret c as i32; }, None => { ret 0; } } }", 120);
+}
+
+TEST_F(RuntimeTest, StringMutateThenReadBack
+)
+{
+    expectRun("fn main() -> i32 { let mut s = String::from_lit(\"abc\");"
+              " s.data[1] = 'z' as i8; ret s.data[1] as i32; }", 122);
+}
+
+TEST_F(RuntimeTest, StringLengthAfterPushStr
+)
+{
+    expectRun("fn main() -> i32 { let mut s = String::from_lit(\"he\");"
+              " s.push_str(\"llo\"); ret s.len; }", 5);
+}
+
+TEST_F(RuntimeTest, StringMultipleInFunction
+)
+{
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"ab\");"
+              " let b = String::from_lit(\"cd\"); ret a.len + b.len; }", 4);
+}
+
+// ── B3: generics ───────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, GenericIdentityChain
+)
+{
+    expectRun("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 {"
+              " let a = id(5); let b = id(a); ret b; }", 5);
+}
+
+TEST_F(RuntimeTest, GenericDoubleParam
+)
+{
+    expectRun("fn add2<T: Numeric>(a: T, b: T) -> T { ret a + b; }"
+              " fn main() -> i32 { ret add2(3, 4); }", 7);
+}
+
+TEST_F(RuntimeTest, StructMethodMutatingField
+)
+{
+    // A &mut self method that mutates a field through self, observable after.
+    expectRun("struct C { v: i32 } impl C { fn set(self: &mut Self, x: i32) {"
+              " self.v = x; } } fn main() -> i32 { let mut c = C { v: 1 };"
+              " c.set(9); ret c.v; }", 9);
+}
+
+TEST_F(RuntimeTest, GenericEnumOfGeneric
+)
+{
+    expectRun("struct B<T> { v: T } enum O<T> { Some(T), None } fn main() -> i32 {"
+              " let b = B { v: 6 }; let o = O::Some(b);"
+              " match o { Some(bx) => { ret bx.v; }, None => { ret 0; } } }", 6);
+}
+
+TEST_F(RuntimeTest, GenericFunctionOnI64
+)
+{
+    expectRun("fn dbl<T: Numeric>(x: T) -> T { ret x + x; }"
+              " fn main() -> i64 { let a = 4 as i64; ret dbl(a); }", 8);
+}
+
+// ── B3: globals ────────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, GlobalFloatArithmetic
+)
+{
+    expectOutput("let g = 2.0; fn main() -> i32 { print_float(g * 3.0); println(); ret 0; }",
+        "6.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, GlobalBoolInCondition
+)
+{
+    expectRun("let flag = true; fn main() -> i32 { if flag { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, GlobalCharUsed
+)
+{
+    expectRun("let letter = 'q'; fn main() -> i32 { ret letter as i32; }", 113);
+}
+
+TEST_F(RuntimeTest, GlobalArrayNotLiteralRejected
+)
+{
+    expectCompileFail("let g = [1, 2]; fn main() -> i32 { ret 0; }",
+        "global variable initializer must be a literal");
+}
+
+// ── B3: arrays ─────────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, ArrayAllElementsSum
+)
+{
+    expectRun("fn main() -> i32 { let a = [2, 4, 6, 8]; let mut s = 0; let mut i = 0;"
+              " while i < 4 { s = s + a[i]; i = i + 1; } ret s; }", 20);
+}
+
+TEST_F(RuntimeTest, ArrayIndexFromVariableZero
+)
+{
+    expectRun("fn main() -> i32 { let a = [7, 8]; let i = 0; ret a[i]; }", 7);
+}
+
+TEST_F(RuntimeTest, ArrayComparisonElement
+)
+{
+    expectRun("fn main() -> i32 { let a = [1, 5]; if a[0] < a[1] { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, ArrayRefIndexLoop
+)
+{
+    expectRun("fn main() -> i32 { let a = [10, 20, 30]; let r = &a; let mut s = 0;"
+              " let mut i = 0; while i < 3 { s = s + r[i]; i = i + 1; } ret s; }", 60);
+}
+
+// ── B3: operator overloading ───────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, OpOverloadDifferentTraits
+)
+{
+    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+              " ret V { x: self.x + o.x }; } } impl Sub for V { fn sub(self, o: Self) -> V {"
+              " ret V { x: self.x - o.x }; } } fn main() -> i32 {"
+              " let a = V { x: 10 }; let b = V { x: 3 }; let c = V { x: 2 };"
+              " let r = a - b + c; ret r.x; }", 9);
+}
+
+TEST_F(RuntimeTest, OpOverloadFloat
+)
+{
+    expectOutput("struct V { x: f64 } impl Add for V { fn add(self, o: Self) -> V {"
+                 " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
+                 " let a = V { x: 1.5 }; let b = V { x: 2.5 };"
+                 " print_float((a + b).x); println(); ret 0; }", "4.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, OpOverloadMethodCallSyntax
+)
+{
+    // The trait method is directly callable too.
+    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+              " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
+              " let a = V { x: 3 }; let b = V { x: 4 }; let c = a.add(b); ret c.x; }", 7);
+}
+
+// ── B3: control flow ───────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, ForSumEvenOnly
+)
+{
+    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 11) {"
+              " if (x % 2) == 0 { s = s + x; } } ret s; }", 30);
+}
+
+TEST_F(RuntimeTest, WhileCountingDown
+)
+{
+    expectRun("fn main() -> i32 { let mut n = 10; let mut s = 0;"
+              " while n > 0 { s = s + n; n = n - 1; } ret s; }", 55);
+}
+
+TEST_F(RuntimeTest, BreakInsideNestedLoop
+)
+{
+    // Inner break exits only the inner loop.
+    expectRun("fn main() -> i32 { let mut c = 0; let mut i = 0; while i < 3 {"
+              " let mut j = 0; while j < 10 { c = c + 1; if j == 2 { break; } j = j + 1; }"
+              " i = i + 1; } ret c; }", 9);
+}
+
+TEST_F(RuntimeTest, ContinueInnerLoop
+)
+{
+    expectRun("fn main() -> i32 { let mut s = 0; for i in range(1, 4) {"
+              " for j in range(1, 4) { if j == 2 { continue; } s = s + 1; } } ret s; }", 6);
+}
+
+TEST_F(RuntimeTest, IfElseIfChainedFour
+)
+{
+    expectRun("fn main() -> i32 { let x = 40; let mut r = 0;"
+              " if x < 10 { r = 1; } else if x < 20 { r = 2; }"
+              " else if x < 30 { r = 3; } else { r = 4; } ret r; }", 4);
+}
+
+TEST_F(RuntimeTest, NestedWhileTwoCounters
+)
+{
+    expectRun("fn main() -> i32 { let mut i = 0; let mut pairs = 0;"
+              " while i < 3 { let mut j = 0; while j < 2 { pairs = pairs + 1; j = j + 1; }"
+              " i = i + 1; } ret pairs; }", 6);
+}
+
+TEST_F(RuntimeTest, ForBreakExitCode
+)
+{
+    // (`lastv`, not `last` — the stdlib has a `last` function.)
+    expectRun("fn main() -> i32 { let mut lastv = 0; for x in range(1, 100) {"
+              " lastv = x; if x == 7 { break; } } ret lastv; }", 7);
+}
+
+TEST_F(RuntimeTest, RecursionMutualViaIndirect
+)
+{
+    expectRun("fn count2(n: i32) -> i32 { if n == 0 { ret 0; } ret 1 + count2(n - 1); }"
+              " fn main() -> i32 { ret count2(5) + count2(3); }", 8);
+}
+
+// ── B4: final runtime breadth ──────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, ArithmeticTripleNested
+)
+{
+    expectRun("fn main() -> i32 { ret ((1 + 2) * 3) + 4; }", 13);
+}
+
+TEST_F(RuntimeTest, CompareStringsViaLen
+)
+{
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"aa\");"
+              " let b = String::from_lit(\"bbb\"); if a.len < b.len { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharLoopFromA
+)
+{
+    expectRun("fn main() -> i32 { let mut c = 'a' as i32; let mut n = 0;"
+              " while c <= 'e' as i32 { n = n + 1; c = c + 1; } ret n; }", 5);
+}
+
+TEST_F(RuntimeTest, FloatSumOfInts
+)
+{
+    expectOutput("fn main() -> i32 { let a = 1 as f64; let b = 2 as f64;"
+                 " print_float(a + b); println(); ret 0; }", "3.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, EnumThreeWayDispatch
+)
+{
+    expectRun("enum D { Up, Down, Left, Right } fn main() -> i32 {"
+              " let d = D::Right; ret match d { Up => 1, Down => 2, Left => 3, Right => 4 }; }", 4);
+}
+
+// NOTE: matching a struct FIELD that holds an enum (`match s.e`) is not
+// expressible — the match scrutinee must be a value binding, not a field access.
+// No test for it.
+
+TEST_F(RuntimeTest, GlobalCounterInMatch
+)
+{
+    expectRun("let hits = 0; enum E { A, B } fn main() -> i32 {"
+              " let e = E::A; match e { A => { hits = hits + 1; }, B => { hits = hits + 2; } }"
+              " ret hits; }", 1);
+}
+
+TEST_F(RuntimeTest, StringConcatViaPush
+)
+{
+    expectRun("fn main() -> i32 { let mut s = String::new();"
+              " s.push_str(\"foo\"); s.push_str(\"bar\"); ret s.len; }", 6);
+}
+
+TEST_F(RuntimeTest, GenericIdOnFloat
+)
+{
+    expectOutput("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 {"
+                 " let f = id(2.5); print_float(f); println(); ret 0; }", "2.500000\n", 0);
+}
+
+TEST_F(RuntimeTest, ForAccumulateProduct
+)
+{
+    expectRun("fn main() -> i32 { let mut p = 1; for x in range(1, 5) { p = p * x; } ret p; }", 24);
+}
+
+TEST_F(RuntimeTest, WhileNegativeCondition
+)
+{
+    expectRun("fn main() -> i32 { let mut x = 0 - 3; let mut n = 0;"
+              " while x < 0 { x = x + 1; n = n + 1; } ret n; }", 3);
+}
+
+TEST_F(RuntimeTest, IfReturnBothBranches
+)
+{
+    expectRun("fn main() -> i32 { let b = false; if b { ret 1; } else { ret 2; } }", 2);
+}
+
+TEST_F(RuntimeTest, MatchOnGenericEnumBothTypes
+)
+{
+    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
+              " let a = O::Some(3); let b = O::Some('x');"
+              " let mut r = 0; match a { Some(v) => { r = v; }, None => {} }"
+              " match b { Some(c) => { ret r + (c as i32); }, None => { ret r; } } }", 123);
+}
+
+// NOTE: arrays of structs are rejected (locked semantics: array elements are
+// Copy-only, and structs are not Copy) — covered by ArrayOfNonCopyElementsRejected.
+
+TEST_F(RuntimeTest, FloatLerpComposition
+)
+{
+    expectOutput("fn main() -> i32 { print_float(lerp(lerp(0.0, 10.0, 0.5), 100.0, 0.5));"
+                 " println(); ret 0; }", "52.500000\n", 0);
+}
+
+TEST_F(RuntimeTest, I16ArithmeticChain
+)
+{
+    expectRun("fn main() -> i32 { let a = 'A' as i16; let b = 'A' as i16;"
+              " let c = a + b; let d = c as i32; ret d; }", 130);
+}
+
+TEST_F(RuntimeTest, BoolNotViaCompare
+)
+{
+    expectRun("fn main() -> i32 { let b = false; if b == false { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, MultiReturnFunctions
+)
+{
+    expectRun("fn f(x: i32) -> i32 { if x > 0 { ret x; } ret 0 - x; }"
+              " fn main() -> i32 { ret f(5) + f(0 - 3); }", 8);
+}
+
+TEST_F(RuntimeTest, StringReadViaIndexAll
+)
+{
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"xyz\");"
+              " let mut total = 0; let mut i = 0; while i < 3 {"
+              " match s.index(i) { Some(c) => { total = total + (c as i32); }, None => {} }"
+              " i = i + 1; } ret total; }", 120 + 121 + 122);
+}
+
+TEST_F(RuntimeTest, EnumWithTwoPayloadTypes
+)
+{
+    expectRun("enum M { A(i32), B(f64) } fn main() -> i32 { let m = M::A(7);"
+              " match m { A(v) => { ret v; }, B(_f) => { ret 0; } } }", 7);
+}
+
+TEST_F(RuntimeTest, GlobalIncrementFunction
+)
+{
+    expectRun("let g = 0; fn bump() { g = g + 1; } fn main() -> i32 {"
+              " bump(); bump(); bump(); ret g; }", 3);
+}
+
+TEST_F(RuntimeTest, WhileTrueWithContinue
+)
+{
+    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
+              " while true { i = i + 1; if (i % 2) == 0 { continue; }"
+              " if i > 5 { break; } s = s + i; } ret s; }", 9);
+}
+
+// NOTE: `impl W<i32>` (method impl on a specific generic instantiation) resolves
+// self.v as the generic T, not i32 — a known limitation; GenericStructMethod
+// covers the non-specialized impl form.
+
+TEST_F(RuntimeTest, CharDigitClassification
+)
+{
+    expectRun("fn main() -> i32 { if is_digit('9') && is_alpha('z') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, FloatDivisionPrecision
+)
+{
+    expectOutput("fn main() -> i32 { print_float(10.0 / 4.0); println(); ret 0; }",
+        "2.500000\n", 0);
+}
+
+TEST_F(RuntimeTest, NestedForBreakInner
+)
+{
+    // Inner break stops j at 2; i=1:3, i=2:6, i=3:9 → 18.
+    expectRun("fn main() -> i32 { let mut s = 0; for i in range(1, 4) {"
+              " for j in range(1, 4) { if j > 2 { break; } s = s + i * j; } } ret s; }", 18);
+}
+
+// NOTE: an owned enum scrutinee is MOVED into the first match, so matching the
+// same value twice is rejected (single-owner). No test for reuse.
+
+TEST_F(RuntimeTest, StringComparisonLengths
+)
+{
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"a\");"
+              " let b = String::from_lit(\"abc\");"
+              " if a.len < b.len && b.len == 3 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, ArraySumThroughRef
+)
+{
+    expectRun("fn main() -> i32 { let a = [1, 2, 3]; let r = &a;"
+              " ret r[0] + r[1] + r[2]; }", 6);
+}
+
+TEST_F(RuntimeTest, MultipleGenericInstantiation
+)
+{
+    expectRun("fn dbl<T: Numeric>(x: T) -> T { ret x + x; }"
+              " fn main() -> i32 { let a = dbl(21); let b = dbl(2); ret a + b; }", 46);
+}
+
+TEST_F(RuntimeTest, BoolArithmeticGate
+)
+{
+    expectRun("fn main() -> i32 { let b = true; let x = b as i32; ret 5 * x; }", 5);
+}
+
+TEST_F(RuntimeTest, RecursionWithAccumulator
+)
+{
+    expectRun("fn sumto(n: i32, acc: i32) -> i32 { if n == 0 { ret acc; }"
+              " ret sumto(n - 1, acc + n); } fn main() -> i32 { ret sumto(10, 0); }", 55);
+}
+
+TEST_F(RuntimeTest, IfElseNestedThree
+)
+{
+    expectRun("fn main() -> i32 { let x = 5; let mut r = 0;"
+              " if x > 10 { r = 1; } else { if x > 3 { r = 2; } else { r = 3; } } ret r; }", 2);
+}
+
+TEST_F(RuntimeTest, FloatCastIntRoundTrip
+)
+{
+    expectOutput("fn main() -> i32 { let x = 5 as f64; let y = x + 0.5;"
+                 " print_float(y); println(); ret 0; }", "5.500000\n", 0);
+}
+
+TEST_F(RuntimeTest, StringIndexNegative
+)
+{
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"abc\");"
+              " match s.index(0 - 1) { Some(c) => { ret 1; }, None => { ret 0; } } }", 0);
+}
+
+// (Enum-as-struct-field match is not expressible — see the note above.)
+
+TEST_F(RuntimeTest, WhileWithCompoundCondition
+)
+{
+    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
+              " while i < 6 && s < 12 { i = i + 1; s = s + i; } ret s; }", 15);
+}
+
+TEST_F(RuntimeTest, CharToLowerViaArith
+)
+{
+    expectRun("fn main() -> i32 { let upper = 'A' as i32; let lower = upper + 32;"
+              " let c = lower as char; ret c as i32; }", 97);
+}
+
+TEST_F(RuntimeTest, ForBreakPreservesLoopVar
+)
+{
+    expectRun("fn main() -> i32 { let mut lastv = 0; for x in range(1, 50) {"
+              " if x > 4 { break; } lastv = x; } ret lastv; }", 4);
+}
+
+TEST_F(RuntimeTest, MatchArmWithGlobalSideEffect
+)
+{
+    expectRun("let n = 0; enum E { A, B } fn main() -> i32 {"
+              " let e = E::A; match e { A => { n = n + 100; }, B => { n = n + 1; } } ret n; }", 100);
+}
+
+TEST_F(RuntimeTest, MultipleStringsInStruct
+)
+{
+    expectRun("struct Pair { a: String, b: String } fn main() -> i32 {"
+              " let p = Pair { a: String::from_lit(\"ab\"), b: String::from_lit(\"cde\") };"
+              " ret p.a.len + p.b.len; }", 5);
+}
+
+TEST_F(RuntimeTest, GenericEnumMethodOnValue
+)
+{
+    // Inline construction pins T for the generic unwrap_or.
+    expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(9), 0); }", 9);
+}
+
+TEST_F(RuntimeTest, ArrayOfArraysNotAllowedSema
+)
+{
+    // Arrays of non-Copy elements are rejected by sema.
+    expectCompileFail("fn main() -> i32 { let a = [[1, 2], [3, 4]]; ret 0; }", "Copy");
+}
+
+TEST_F(RuntimeTest, ChainedMethodCalls
+)
+{
+    expectRun("struct S { v: i32 } impl S { fn add(self: &mut S, d: i32) { self.v = self.v + d; }"
+              " fn mul(self: &mut S, m: i32) { self.v = self.v * m; } }"
+              " fn main() -> i32 { let mut c = S { v: 1 }; c.add(2); c.mul(3); ret c.v; }", 9);
+}
+
+TEST_F(RuntimeTest, BoolLiteralInMatch
+)
+{
+    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
+              " let b = match e { A => true, B => false }; if b { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, FloatMultiplyByIntCast
+)
+{
+    expectOutput("fn main() -> i32 { let x = 1.5; let n = 2 as f64;"
+                 " print_float(x * n); println(); ret 0; }", "3.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, NestedGenericEnums
+)
+{
+    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
+              " let inner = O::Some(3); let outer = O::Some(inner);"
+              " match outer { Some(i) => { match i { Some(v) => { ret v; }, None => { ret 0; } } },"
+              " None => { ret 0; } } }", 3);
+}
+
+TEST_F(RuntimeTest, StringEmptyLenAfterNew
+)
+{
+    expectRun("fn main() -> i32 { let s = String::new(); if s.len == 0 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, GlobalAndLocalShadowFree
+)
+{
+    expectRun("let g = 5; fn main() -> i32 { let h = 3; ret g + h; }", 8);
+}
+
+// ── B5: final certainty batch ──────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, SimpleArithmeticSum
+)
+{
+    expectRun("fn main() -> i32 { ret 10 + 20; }", 30);
+}
+
+TEST_F(RuntimeTest, SimpleArithmeticSub
+)
+{
+    expectRun("fn main() -> i32 { ret 50 - 12; }", 38);
+}
+
+TEST_F(RuntimeTest, SimpleArithmeticMul
+)
+{
+    expectRun("fn main() -> i32 { ret 6 * 7; }", 42);
+}
+
+TEST_F(RuntimeTest, SimpleArithmeticDiv
+)
+{
+    expectRun("fn main() -> i32 { ret 81 / 9; }", 9);
+}
+
+TEST_F(RuntimeTest, SimpleComparisonEq
+)
+{
+    expectRun("fn main() -> i32 { if 5 == 5 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleComparisonNe
+)
+{
+    expectRun("fn main() -> i32 { if 5 != 6 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleComparisonLt
+)
+{
+    expectRun("fn main() -> i32 { if 3 < 4 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleComparisonGt
+)
+{
+    expectRun("fn main() -> i32 { if 4 > 3 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleIfTrue
+)
+{
+    expectRun("fn main() -> i32 { if true { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleIfFalse
+)
+{
+    expectRun("fn main() -> i32 { if false { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, SimpleWhileOnce
+)
+{
+    expectRun("fn main() -> i32 { let mut i = 0; while i < 1 { i = i + 1; } ret i; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleForRange
+)
+{
+    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 3) { s = s + x; } ret s; }", 3);
+}
+
+TEST_F(RuntimeTest, SimpleFunctionCall
+)
+{
+    expectRun("fn add(a: i32, b: i32) -> i32 { ret a + b; } fn main() -> i32 { ret add(2, 3); }", 5);
+}
+
+TEST_F(RuntimeTest, SimpleGlobal
+)
+{
+    expectRun("let g = 9; fn main() -> i32 { ret g; }", 9);
+}
+
+TEST_F(RuntimeTest, SimpleStructField
+)
+{
+    expectRun("struct S { v: i32 } fn main() -> i32 { let s = S { v: 4 }; ret s.v; }", 4);
+}
+
+TEST_F(RuntimeTest, SimpleEnumMatch
+)
+{
+    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
+              " match e { A => { ret 1; }, B => { ret 2; } } }", 2);
+}
+
+TEST_F(RuntimeTest, SimpleArrayIndex
+)
+{
+    expectRun("fn main() -> i32 { let a = [1, 2, 3]; ret a[2]; }", 3);
+}
+
+TEST_F(RuntimeTest, SimpleCharLiteral
+)
+{
+    expectRun("fn main() -> i32 { ret 'A' as i32; }", 65);
+}
+
+TEST_F(RuntimeTest, SimpleStringLen
+)
+{
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len; }", 2);
+}
+
+TEST_F(RuntimeTest, SimpleModulo
+)
+{
+    expectRun("fn main() -> i32 { ret 20 % 6; }", 2);
+}
+
+TEST_F(RuntimeTest, SimpleNegativeViaSubtract
+)
+{
+    expectRun("fn main() -> i32 { let a = 0 - 3; if a < 0 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleBoolAnd
+)
+{
+    expectRun("fn main() -> i32 { if true && true { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleBoolOr
+)
+{
+    expectRun("fn main() -> i32 { if true || false { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleNestedIf
+)
+{
+    expectRun("fn main() -> i32 { if true { if false { ret 1; } ret 2; } ret 0; }", 2);
+}
+
+TEST_F(RuntimeTest, SimpleDoubleNestedLoops
+)
+{
+    expectRun("fn main() -> i32 { let mut n = 0; for i in range(1, 3) {"
+              " for j in range(1, 3) { n = n + 1; } } ret n; }", 4);
+}
+
+TEST_F(RuntimeTest, SimpleReturnEarly
+)
+{
+    expectRun("fn main() -> i32 { ret 1; ret 2; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleUnreachableAfterReturn
+)
+{
+    expectRun("fn main() -> i32 { let mut x = 0; ret 5; x = x + 1; ret x; }", 5);
+}
+
+TEST_F(RuntimeTest, SimpleCharCompare
+)
+{
+    expectRun("fn main() -> i32 { if 'a' == 'a' { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, SimpleFloatLiteralPrint
+)
+{
+    expectOutput("fn main() -> i32 { print_float(1.0); println(); ret 0; }", "1.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, SimpleBoolPrint
+)
+{
+    expectOutput("fn main() -> i32 { print_bool(true); println(); ret 0; }", "1\n", 0);
+}

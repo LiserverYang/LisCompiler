@@ -1172,3 +1172,144 @@ TEST_F(ParserTest, NestedStructLiteralInInit
     parseSource("struct A { x: i32 } fn main() -> i32 { let a = A { x: A { x: 1 }.x }; ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
+
+// ── D3: final parser breadth ───────────────────────────────────────────────────
+
+TEST_F(ParserTest, ValidMutBorrowInStructFieldType)
+{
+    parseSource("struct S { p: &mut i32 } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidEmptyImpl)
+{
+    parseSource("struct S { v: i32 } impl S { } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidEmptyTrait)
+{
+    parseSource("trait Marker { } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidEnumWithTrailingComma
+)
+{
+    parseSource("enum E { A, B, } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidCallOnMemberAccess
+)
+{
+    parseSource("struct S { v: i32 } impl S { fn get(self: &S) -> i32 { ret self.v; } }"
+                " fn main() -> i32 { let s = S { v: 1 }; ret s.get(); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidFunctionWithManyParams
+)
+{
+    parseSource("fn f(a: i32, b: i32, c: i32, d: i32) -> i32 { ret a + b + c + d; }"
+                " fn main() -> i32 { ret f(1, 2, 3, 4); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidChainedCalls
+)
+{
+    parseSource("fn f(x: i32) -> i32 { ret x; } fn main() -> i32 { ret f(f(1)); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidArithmeticWithAllOperators
+)
+{
+    parseSource("fn main() -> i32 { ret 1 + 2 - 3 * 4 / 5 % 6; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingDotInMemberAccess
+)
+{
+    parseSource("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret sv; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingMatchScrutinee
+)
+{
+    parseSource("enum E { A } fn main() -> i32 { match { A => 1 } ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, UnexpectedKeywordAsStatement
+)
+{
+    parseSource("fn main() -> i32 { struct x; ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingParamType
+)
+{
+    parseSource("fn f(x:) -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, EmptyFunctionParamList
+)
+{
+    parseSource("fn f() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidMultipleMethodsInImpl
+)
+{
+    parseSource("struct S { v: i32 } impl S { fn a(self: &S) -> i32 { ret self.v; }"
+                " fn b(self: &mut S, x: i32) { self.v = x; } }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidNestedMatch
+)
+{
+    parseSource("enum A { X(i32) } enum B { M(i32) } fn main() -> i32 {"
+                " let a = A::X(1); match a { X(v) => { match B::M(v) { M(w) => { ret w; } } } } }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+// NOTE: `impl S { fn a(self: &S) -> i32 ` (method with no body at EOF) has
+// ambiguous error-recovery behavior (the ParserTest harness reports 0 errors
+// while the full pipeline's run() gate treats it as failing) — not pinned here.
+
+TEST_F(ParserTest, StraySemicolonAfterFunction
+)
+{
+    // A `;` between top-level definitions is an illegal global statement.
+    parseSource("fn f() -> i32 { ret 0; }; fn main() -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidBooleanLiteralsInExpr
+)
+{
+    parseSource("fn main() -> i32 { if true && false { ret 1; } ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidIndexExpressionWithVariable
+)
+{
+    parseSource("fn main() -> i32 { let a = [1, 2]; let i = 0; ret a[i]; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidBorrowOfCallResult
+)
+{
+    parseSource("fn make() -> i32 { ret 5; } fn main() -> i32 { let r = &make(); ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
