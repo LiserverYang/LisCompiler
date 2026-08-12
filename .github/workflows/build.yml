@@ -25,14 +25,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Clang-format
-        run: sudo apt install clang-format 
+        with:
+          submodules: true   # Build/ is a git submodule (LisBuilder)
 
       - name: Install python3
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      # Pin clang-format 20.1.0: Ubuntu's apt ships clang-format 18, whose
+      # output differs from the version the codebase is formatted with (20,
+      # the LLVM the project builds against). Local and CI must agree.
+      - name: Set up Clang-format (20.1.0)
+        run: |
+          python3 -m pip install --user clang-format==20.1.0
+          echo "$(python3 -m site --user-base)/bin" >> $GITHUB_PATH
 
       - name: Install python modules
         run: python3 -m pip install -r requirements.txt
