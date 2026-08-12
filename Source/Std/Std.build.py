@@ -21,7 +21,15 @@ class StdModule(BuildSystem.ModuleBase):
 
         script_name = os.path.basename(__file__)
 
-        dst_dir = "./Build/Binaries/lstdlib/"
+        # Anchor to the project root so the stdlib lands in Build/Binaries
+        # regardless of the invocation cwd (a relative "./Build/..." would
+        # scatter copies into Source/Build/... when run from another directory).
+        root_path = getattr(BuildSystem.BuildContext, "RootPath", "")
+        dst_dir = (
+            os.path.join(root_path, "Build", "Binaries", "lstdlib") + "/"
+            if root_path
+            else "./Build/Binaries/lstdlib/"
+        )
 
         os.makedirs(dst_dir, exist_ok=True)
 

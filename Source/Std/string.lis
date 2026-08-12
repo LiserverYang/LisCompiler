@@ -102,10 +102,6 @@ impl String
     // The byte at index `i` as a char, or `None` when out of bounds.
     fn index(self: &String, i: i32) -> Option<char>
     {
-        // Collision-resolution note (v2 drill, 2026-08-08): HEAD parenthesized
-        // the bounds (`(i < 0) || (i >= self.len)`) while `agent` added the
-        // trailing comment — both changed this same line. Combined here: keep
-        // both (cosmetic, semantics unchanged).
         if (i < 0) || (i >= self.len) { // out-of-bounds guard (both ends)
             ret Option::None;
         }

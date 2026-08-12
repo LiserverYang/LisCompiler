@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <sstream>
 #include <string>
 
 // NOTE: do NOT include <windows.h> here — it defines `ERROR`/`TRUE`/... as
@@ -304,19 +306,19 @@ TEST_F(RuntimeTest, HIRPrinterShowsMatchTailValue)
     Parser parser(ctx); parser.parseAll();
     HIRBuilder builder(ctx); builder.run();
 
-    fflush(stdout);
-    int saved = dup(_fileno(stdout));
-    FILE *f = freopen(diagPath.string().c_str(), "w", stdout);
-    (void)f;
+    // printHIR writes to std::cout (C++ iostream), which does NOT follow the
+    // C-stdio freopen/dup2 dance that compileCapture relies on for the
+    // printf-based logger — the dump came back empty on MinGW. Swap std::cout's
+    // buffer into a local ostringstream instead (platform-independent).
+    std::ostringstream oss;
+    auto *oldBuf = std::cout.rdbuf(oss.rdbuf());
     printHIR((HIRNode *)ctx->hirProgram.get());
-    fflush(stdout);
-    dup2(saved, _fileno(stdout));
-    close(saved);
-
-    std::ifstream fi(diagPath);
-    std::string out((std::istreambuf_iterator<char>(fi)), std::istreambuf_iterator<char>());
+    std::cout.rdbuf(oldBuf);
+    std::string out = oss.str();
     // The value arm `Some(v) => v + 1` must be walked and printed as a binary op.
-    EXPECT_NE(out.find("BinaryOp"), std::string::npos)
+    // The HIRPrinter labels the node `binary_op` (lowercase, see opKindToString),
+    // so the assertion checks that exact label.
+    EXPECT_NE(out.find("binary_op"), std::string::npos)
         << "value-match arm tail expression missing from HIR dump:\n" << out;
 }
 
