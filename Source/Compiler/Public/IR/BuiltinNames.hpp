@@ -42,16 +42,30 @@ enum class BuiltinCategory
 inline BuiltinCategory classifyBuiltin(const std::string &name)
 {
     static const std::unordered_set<std::string> print = {
-        "print_str", "println", "print_int", "print_float", "print_bool", "print_char",
+        "print_str",
+        "println",
+        "print_int",
+        "print_float",
+        "print_bool",
+        "print_char",
     };
     static const std::unordered_set<std::string> input = {
-        "read_line", "read_int", "read_f64",
+        "read_line",
+        "read_int",
+        "read_f64",
     };
     static const std::unordered_set<std::string> heap = {
-        "__alloc", "__free", "__memcpy", "__strlen",
+        "__alloc",
+        "__free",
+        "__memcpy",
+        "__strlen",
     };
     static const std::unordered_set<std::string> toString = {
-        "to_string_i32", "to_string_i64", "to_string_f64", "to_string_bool", "to_string_char",
+        "to_string_i32",
+        "to_string_i64",
+        "to_string_f64",
+        "to_string_bool",
+        "to_string_char",
     };
     if (print.count(name)) return BuiltinCategory::Print;
     if (input.count(name)) return BuiltinCategory::Input;
@@ -67,8 +81,17 @@ inline bool isReservedFunctionName(const std::string &name)
     if (classifyBuiltin(name) != BuiltinCategory::NotBuiltin)
         return true;
     static const std::unordered_set<std::string> libc = {
-        "malloc", "free", "memcpy", "strlen", "sprintf", "printf", "fgets",
-        "strcspn", "atoi", "strtod", "abort",
+        "malloc",
+        "free",
+        "memcpy",
+        "strlen",
+        "sprintf",
+        "printf",
+        "fgets",
+        "strcspn",
+        "atoi",
+        "strtod",
+        "abort",
     };
     return libc.count(name);
 }

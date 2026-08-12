@@ -52,21 +52,21 @@ private:
     /// receiver, or a temporary call-argument borrow.
     struct Borrow
     {
-        std::string root;                // borrowed binding name (e.g. "x")
-        std::string holderName;          // borrow variable (`let r = &p` → "r")
-        std::vector<std::string> path;   // field path (empty = whole root)
-        bool isMut;                      // &mut vs &
-        bool isPromoted;                 // variable borrow (`let r = &p`) survives statements
-        size_t createStmt;               // statement ordinal at creation (NLL)
+        std::string root;              // borrowed binding name (e.g. "x")
+        std::string holderName;        // borrow variable (`let r = &p` → "r")
+        std::vector<std::string> path; // field path (empty = whole root)
+        bool isMut;                    // &mut vs &
+        bool isPromoted;               // variable borrow (`let r = &p`) survives statements
+        size_t createStmt;             // statement ordinal at creation (NLL)
         SourcePosition pos;
     };
 
     /// Access kind of a place use, for the borrow-conflict rules.
     enum class BorrowUseKind
     {
-        Read,     // Copy read — conflicts with active &mut borrows
-        Write,    // mutation — conflicts with any active borrow
-        Move,     // non-Copy consumption — conflicts with any active borrow
+        Read,         // Copy read — conflicts with active &mut borrows
+        Write,        // mutation — conflicts with any active borrow
+        Move,         // non-Copy consumption — conflicts with any active borrow
         BorrowShared, // creating `&p` — conflicts with active &mut borrows
         BorrowMut,    // creating `&mut p` — conflicts with any active borrow
     };
@@ -117,19 +117,16 @@ private:
     void logAtPosition(const SourcePosition &pos, size_t length, const std::string &msg, size_t errorId);
 
     /// Shared conflict message + error-id builder (inline and NLL resolve).
-    static void borrowConflictInfo(std::string &msg, size_t &errorId,
-        const std::string &name, BorrowUseKind kind);
+    static void borrowConflictInfo(std::string &msg, size_t &errorId, const std::string &name, BorrowUseKind kind);
 
     /// Register a borrow of `(root, path)`, checking aliasing conflicts first.
     /// `isPromoted` marks a borrow-variable (`let r = &p`) that survives the
     /// statement. Returns true on success.
-    bool registerBorrow(const std::string &root, const std::vector<std::string> &path,
-        bool isMut, bool isPromoted, HIRNode &errNode);
+    bool registerBorrow(const std::string &root, const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode);
 
     /// Check a place use against active borrows; logs a conflict and returns
     /// false if the access is forbidden.
-    bool checkBorrowUse(const std::string &root, const std::vector<std::string> &path,
-        BorrowUseKind kind, HIRNode &errNode);
+    bool checkBorrowUse(const std::string &root, const std::vector<std::string> &path, BorrowUseKind kind, HIRNode &errNode);
 
     /// Remove non-promoted (temporary) borrows created after `marker`.
     void endTemporaryBorrowsSince(size_t marker);
@@ -167,8 +164,7 @@ private:
     void checkStructReturn(HIRExpr *value, const std::shared_ptr<CustomType> &declaredStruct, HIRNode &errNode);
 
     // -----------------------------------------------------------------------
-    void log(HIRNode &node, const std::string &msg, size_t errorId = E_SemanticError,
-        Logger::LogLevel level = Logger::LogLevel::ERROR, bool exit = false)
+    void log(HIRNode &node, const std::string &msg, size_t errorId = E_SemanticError, Logger::LogLevel level = Logger::LogLevel::ERROR, bool exit = false)
     {
         Logger::LogInfo info{};
         info.codePath = context->filePath;
@@ -229,14 +225,12 @@ private:
     /// Resolve `node` (`a op b` on a struct/enum) to the trait-method call
     /// `a.method(b)`, filling the operator fields and node->type. Returns false
     /// (logging) if the struct's impl signature does not match.
-    bool resolveOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<CustomType> &ct,
-        const char *opMethod, const char *opTrait);
+    bool resolveOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<CustomType> &ct, const char *opMethod, const char *opTrait);
     /// Resolve `a op b` where both operands are a generic param `T: <opTrait>`
     /// inside a generic function body. Emits the placeholder callee
     /// `<T>::method`; MIRMonomorphization retargets it to the concrete struct
     /// method (or falls back to a direct binary op for primitives).
-    bool resolveGenericOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<GenericParamType> &gp,
-        const char *opMethod, const char *opTrait);
+    bool resolveGenericOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<GenericParamType> &gp, const char *opMethod, const char *opTrait);
 
     // Dispatch helpers
     void analyzeExpr(HIRExpr *expr);

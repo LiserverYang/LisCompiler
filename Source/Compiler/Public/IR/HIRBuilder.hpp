@@ -10,8 +10,8 @@
 #include <stack>
 
 #include "Core/Pass.hpp"
-#include "Parser/AST.hpp"
 #include "IR/HIR.hpp"
+#include "Parser/AST.hpp"
 
 #include "Core/Debugging.hpp"
 

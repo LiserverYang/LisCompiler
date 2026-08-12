@@ -9,10 +9,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
-#include <unordered_map>
 
 #include "Analysiser/Scope.hpp"
 #include "Analysiser/Symbol.hpp"
@@ -157,9 +157,9 @@ public:
     /// Filled by sema when both operands are a struct/enum implementing the
     /// operator trait (`a + b` → `a.add(b)`). When non-null, MIRBuilder emits a
     /// call instead of an LLVM binary op.
-    Symbol *operatorMethod = nullptr;                  // resolved method symbol
-    std::shared_ptr<FunctionType> operatorMethodType;  // instantiated signature
-    std::string operatorMethodName;                    // "<Struct>::add" (mono-ready)
+    Symbol *operatorMethod = nullptr;                      // resolved method symbol
+    std::shared_ptr<FunctionType> operatorMethodType;      // instantiated signature
+    std::string operatorMethodName;                        // "<Struct>::add" (mono-ready)
     std::vector<std::shared_ptr<Type>> operatorStructArgs; // struct generic args
     /// The operator's source symbol (for diagnostics), e.g. "<".
     const char *opToString() const
@@ -308,9 +308,9 @@ public:
 class HIRVariantInit : public HIRExpr
 {
 public:
-    std::string enumName;           // raw enum name — set by HIRBuilder
+    std::string enumName; // raw enum name — set by HIRBuilder
     std::string variantName;
-    Symbol *enumSymbol = nullptr;   // filled by HIRSemanticAnalyzer
+    Symbol *enumSymbol = nullptr; // filled by HIRSemanticAnalyzer
     std::vector<std::unique_ptr<HIRExpr>> args;
     std::vector<HIRRawType> genericArgs;
     std::vector<std::shared_ptr<Type>> typedGenericParams;
@@ -393,11 +393,11 @@ class HIRMatch : public HIRExpr
 public:
     struct Arm
     {
-        std::string variantName;                     // "" for a wildcard arm
+        std::string variantName; // "" for a wildcard arm
         bool isWildcard = false;
         std::vector<std::pair<std::string, std::shared_ptr<Type>>> bindings; // name + payload type (filled by sema)
-        std::unique_ptr<HIRBlock> body;              // block arm (void)
-        std::unique_ptr<HIRExpr> tailValue;          // expression arm (value)
+        std::unique_ptr<HIRBlock> body;                                      // block arm (void)
+        std::unique_ptr<HIRExpr> tailValue;                                  // expression arm (value)
     };
 
     std::unique_ptr<HIRExpr> scrutinee;
@@ -541,7 +541,7 @@ public:
     struct Variant
     {
         std::string name;
-        std::vector<HIRRawType> payloadRawTypes;   // set by HIRBuilder
+        std::vector<HIRRawType> payloadRawTypes;         // set by HIRBuilder
         std::vector<std::shared_ptr<Type>> payloadTypes; // filled by sema
     };
 

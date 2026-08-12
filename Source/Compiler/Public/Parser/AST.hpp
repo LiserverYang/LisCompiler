@@ -421,8 +421,8 @@ class MatchArm : public ASTNode
 {
 public:
     std::unique_ptr<Pattern> pattern;
-    std::unique_ptr<CompoundStmt> body;  // block arm (statement match, void)
-    std::unique_ptr<Expr> tailValue;     // expression arm (value match)
+    std::unique_ptr<CompoundStmt> body; // block arm (statement match, void)
+    std::unique_ptr<Expr> tailValue;    // expression arm (value match)
 
     void accept(ASTVisitor *visitor) override
     {

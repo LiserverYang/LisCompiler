@@ -8,7 +8,6 @@
 
 #include <queue>
 #include <unordered_set>
-#include <unordered_set>
 
 class MIRMonomorphization : public Pass
 {
@@ -23,7 +22,7 @@ private:
 
     std::queue<std::unique_ptr<MonoInfo>> monoInfos;
     std::unordered_set<std::string> generatedMonoFuncs;
-    std::unordered_map<std::string, MIRFunction*> functionMap;
+    std::unordered_map<std::string, MIRFunction *> functionMap;
 
 public:
     MIRMonomorphization() = default;

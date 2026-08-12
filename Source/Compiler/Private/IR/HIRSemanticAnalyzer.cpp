@@ -101,8 +101,7 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
         if ((size_t)raw.arraySize > MAX_ARRAY_ELEMENTS)
         {
             if (!suppressTypeErrors_)
-                log(errorNode, "array size " + std::to_string(raw.arraySize)
-                    + " exceeds the limit of " + std::to_string(MAX_ARRAY_ELEMENTS) + " elements.");
+                log(errorNode, "array size " + std::to_string(raw.arraySize) + " exceeds the limit of " + std::to_string(MAX_ARRAY_ELEMENTS) + " elements.");
             return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         }
         auto elemTy = raw.element ? resolveType(*raw.element, errorNode)
@@ -110,15 +109,13 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
         if (elemTy && isReferenceType(elemTy))
         {
             if (!suppressTypeErrors_)
-                log(errorNode, "array element type '" + elemTy->toString()
-                    + "' cannot be a reference (reference elements are not supported yet).");
+                log(errorNode, "array element type '" + elemTy->toString() + "' cannot be a reference (reference elements are not supported yet).");
             return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         }
         if (elemTy && !elemTy->isCopyable())
         {
             if (!suppressTypeErrors_)
-                log(errorNode, "array element type '" + elemTy->toString()
-                    + "' must be Copy (arrays of non-Copy types are not supported yet).");
+                log(errorNode, "array element type '" + elemTy->toString() + "' must be Copy (arrays of non-Copy types are not supported yet).");
             return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         }
         base = context->typeContext->getArray(elemTy, (size_t)raw.arraySize);
@@ -445,8 +442,8 @@ void HIRSemanticAnalyzer::preRegisterFunctionType(HIRFunction *f,
     {
         auto it = inferredReturns.find(f->name);
         retTy = (it != inferredReturns.end() && it->second)
-            ? it->second
-            : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+                    ? it->second
+                    : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
     }
 
     functionInfo.gParams = std::move(savedGParams);
@@ -530,8 +527,14 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::bestEffortRetType(HIRExpr *expr,
         // Comparisons and logical ops always yield bool.
         switch (bin->opKind)
         {
-        case H::Eq: case H::Ne: case H::Lt: case H::Gt: case H::Le: case H::Ge:
-        case H::And: case H::Or:
+        case H::Eq:
+        case H::Ne:
+        case H::Lt:
+        case H::Gt:
+        case H::Le:
+        case H::Ge:
+        case H::And:
+        case H::Or:
             return context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
         default: break;
         }
@@ -540,8 +543,8 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::bestEffortRetType(HIRExpr *expr,
         auto isVoid = [&](const std::shared_ptr<Type> &t)
         {
             return !t
-                || (t->getKind() == Type::Kind::Primitive
-                    && std::static_pointer_cast<PrimitiveType>(t)->getPrimKind() == PrimitiveType::PrimKind::VOID);
+                   || (t->getKind() == Type::Kind::Primitive
+                       && std::static_pointer_cast<PrimitiveType>(t)->getPrimKind() == PrimitiveType::PrimKind::VOID);
         };
         auto rightTy = bestEffortRetType(bin->right.get(), paramTypes, inferredReturns);
         if (!isVoid(rightTy)) return rightTy;
@@ -615,7 +618,9 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::scanInferredReturn(HIRBlock *body,
 // ---------------------------------------------------------------------------
 
 std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::resolveTraitArgs(
-    HIRImpl *node, const std::shared_ptr<TraitType> &traitType, std::unordered_map<std::string, std::shared_ptr<Type>> *outSubst)
+    HIRImpl *node,
+    const std::shared_ptr<TraitType> &traitType,
+    std::unordered_map<std::string, std::shared_ptr<Type>> *outSubst)
 {
     std::vector<std::shared_ptr<Type>> traitArgs;
     if (!node || !traitType || node->traitGenericArgs.empty())
@@ -648,7 +653,9 @@ std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::resolveTraitArgs(
 // ---------------------------------------------------------------------------
 
 std::shared_ptr<TraitType> HIRSemanticAnalyzer::resolveTraitConstraint(
-    const HIRGenericConstraint &con, HIRNode &errNode, bool silent)
+    const HIRGenericConstraint &con,
+    HIRNode &errNode,
+    bool silent)
 {
     auto *traitSym = SymbolTable::getInstance().lookupSymbol(con.traitName);
     if (!traitSym)
@@ -676,9 +683,7 @@ std::shared_ptr<TraitType> HIRSemanticAnalyzer::resolveTraitConstraint(
         && argTypes.size() != traitTy->getGenericParams().size())
     {
         if (!silent)
-            log(errNode, "trait constraint '" + con.traitName + "' expects "
-                + std::to_string(traitTy->getGenericParams().size())
-                + " generic argument(s), got " + std::to_string(argTypes.size()) + ".");
+            log(errNode, "trait constraint '" + con.traitName + "' expects " + std::to_string(traitTy->getGenericParams().size()) + " generic argument(s), got " + std::to_string(argTypes.size()) + ".");
         return nullptr;
     }
 
@@ -720,7 +725,7 @@ void HIRSemanticAnalyzer::preRegisterImplTrait(HIRImpl *node)
     // Arity must match: a bare `impl Iterator` on a generic trait would trip
     // instantiateTrait's assert. Pass 2 reports the authoritative error.
     bool arityOk = traitType->getGenericParams().empty()
-        || traitArgs.size() == traitType->getGenericParams().size();
+                   || traitArgs.size() == traitType->getGenericParams().size();
     if (arityOk && (!traitArgs.empty() || node->traitGenericArgs.empty()))
         baseStruct->implTrait.push_back(context->typeContext->instantiateTrait(traitType, traitArgs));
 
@@ -1527,7 +1532,11 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
             auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
             bool present = false;
             for (const auto &existing : genericParams)
-                if (existing->getParamName() == gpTy->getParamName()) { present = true; break; }
+                if (existing->getParamName() == gpTy->getParamName())
+                {
+                    present = true;
+                    break;
+                }
             if (!present) structParams.push_back(gpTy);
         }
         genericParams.insert(genericParams.begin(), structParams.begin(), structParams.end());
@@ -1587,8 +1596,7 @@ bool HIRSemanticAnalyzer::pathsOverlap(const std::vector<std::string> &a,
     return std::equal(a.begin(), a.begin() + n, b.begin());
 }
 
-void HIRSemanticAnalyzer::borrowConflictInfo(std::string &msg, size_t &errorId,
-    const std::string &name, BorrowUseKind kind)
+void HIRSemanticAnalyzer::borrowConflictInfo(std::string &msg, size_t &errorId, const std::string &name, BorrowUseKind kind)
 {
     switch (kind)
     {
@@ -1616,7 +1624,9 @@ void HIRSemanticAnalyzer::borrowConflictInfo(std::string &msg, size_t &errorId,
 }
 
 bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
-    const std::vector<std::string> &path, BorrowUseKind kind, HIRNode &errNode)
+    const std::vector<std::string> &path,
+    BorrowUseKind kind,
+    HIRNode &errNode)
 {
     if (activeBorrows_.empty()) return true;
     bool ok = true;
@@ -1629,11 +1639,11 @@ bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
         bool conflict = false;
         switch (kind)
         {
-        case BorrowUseKind::BorrowMut:    conflict = true;    break; // any borrow blocks &mut
+        case BorrowUseKind::BorrowMut: conflict = true; break;       // any borrow blocks &mut
         case BorrowUseKind::BorrowShared: conflict = b.isMut; break; // &mut blocks &; & allows &
-        case BorrowUseKind::Write:        conflict = true;    break; // any borrow blocks write
-        case BorrowUseKind::Move:         conflict = true;    break; // any borrow blocks move
-        case BorrowUseKind::Read:         conflict = b.isMut; break; // &mut blocks read; & allows
+        case BorrowUseKind::Write: conflict = true; break;           // any borrow blocks write
+        case BorrowUseKind::Move: conflict = true; break;            // any borrow blocks move
+        case BorrowUseKind::Read: conflict = b.isMut; break;         // &mut blocks read; & allows
         }
 
         if (conflict)
@@ -1660,8 +1670,7 @@ bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
     return ok;
 }
 
-void HIRSemanticAnalyzer::logAtPosition(const SourcePosition &pos, size_t length,
-    const std::string &msg, size_t errorId)
+void HIRSemanticAnalyzer::logAtPosition(const SourcePosition &pos, size_t length, const std::string &msg, size_t errorId)
 {
     Logger::LogInfo info{};
     info.codePath = context->filePath;
@@ -1710,10 +1719,12 @@ void HIRSemanticAnalyzer::resolvePromotedBorrows()
 }
 
 bool HIRSemanticAnalyzer::registerBorrow(const std::string &root,
-    const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode)
+    const std::vector<std::string> &path,
+    bool isMut,
+    bool isPromoted,
+    HIRNode &errNode)
 {
-    if (!checkBorrowUse(root, path,
-            isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode))
+    if (!checkBorrowUse(root, path, isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode))
         return false;
     activeBorrows_.push_back(Borrow{root, "", path, isMut, isPromoted, 0, errNode.position});
     return true;
@@ -1787,8 +1798,8 @@ RefOrigin HIRSemanticAnalyzer::fieldValueOrigin(const std::string &root,
     // The reference value lives in the struct the root binding points to.
     if (isReferenceType(sym->type))
     {
-        if (sym->kind == SymbolKind::Param) return RefOrigin::Param;       // caller's struct
-        if (sym->kind == SymbolKind::GlobalVar) return RefOrigin::Global;  // static struct
+        if (sym->kind == SymbolKind::Param) return RefOrigin::Param;      // caller's struct
+        if (sym->kind == SymbolKind::GlobalVar) return RefOrigin::Global; // static struct
         // Local reference → resolve its target to find the holding struct.
         if (sym->refTarget.has_value())
         {
@@ -1817,10 +1828,10 @@ RefOrigin HIRSemanticAnalyzer::fieldValueOrigin(const std::string &root,
     case SymbolKind::GlobalVar: return RefOrigin::Global;
     case SymbolKind::Param: return RefOrigin::Param;
     case SymbolKind::LocalVar:
-        {
-            auto it = sym->refFieldOrigins.find(path[0]);
-            return it != sym->refFieldOrigins.end() ? it->second : RefOrigin::Unknown;
-        }
+    {
+        auto it = sym->refFieldOrigins.find(path[0]);
+        return it != sym->refFieldOrigins.end() ? it->second : RefOrigin::Unknown;
+    }
     default: return RefOrigin::Unknown;
     }
 }
@@ -1921,10 +1932,11 @@ void HIRSemanticAnalyzer::setupBindingOrigins(HIRVarDecl *node)
             sym->refFieldOrigins = other->refFieldOrigins; // struct copy
         else if (other->kind == SymbolKind::Param)
             for (const auto &f : ct->getFields())
-                if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Param;
-        else if (other->kind == SymbolKind::GlobalVar)
-            for (const auto &f : ct->getFields())
-                if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Global;
+                if (isReferenceType(f.type))
+                    sym->refFieldOrigins[f.name] = RefOrigin::Param;
+                else if (other->kind == SymbolKind::GlobalVar)
+                    for (const auto &f : ct->getFields())
+                        if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Global;
         return;
     }
     // Calls / member access / other: not tracked → empty map → Unknown.
@@ -1984,10 +1996,11 @@ void HIRSemanticAnalyzer::updateAssignOrigins(HIRAssign *node)
                 sym->refFieldOrigins = other->refFieldOrigins;
             else if (other->kind == SymbolKind::Param)
                 for (const auto &f : ct->getFields())
-                    if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Param;
-            else if (other->kind == SymbolKind::GlobalVar)
-                for (const auto &f : ct->getFields())
-                    if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Global;
+                    if (isReferenceType(f.type))
+                        sym->refFieldOrigins[f.name] = RefOrigin::Param;
+                    else if (other->kind == SymbolKind::GlobalVar)
+                        for (const auto &f : ct->getFields())
+                            if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Global;
         }
         return;
     }
@@ -1998,8 +2011,8 @@ void HIRSemanticAnalyzer::updateAssignOrigins(HIRAssign *node)
         std::string root;
         std::vector<std::string> path;
         if (!extractRootAndPath(ma, root, path)) return;
-        if (path.size() != 1) return;                 // nested: not tracked
-        if (!isReferenceType(ma->type)) return;       // only reference-typed fields carry origins
+        if (path.size() != 1) return;           // nested: not tracked
+        if (!isReferenceType(ma->type)) return; // only reference-typed fields carry origins
         auto *sym = SymbolTable::getInstance().lookupSymbol(root);
         if (!sym || sym->kind != SymbolKind::LocalVar) return;
 
@@ -2052,13 +2065,14 @@ void HIRSemanticAnalyzer::checkDanglingReturn(HIRReturn *node)
 }
 
 void HIRSemanticAnalyzer::checkStructReturn(HIRExpr *value,
-    const std::shared_ptr<CustomType> &declaredStruct, HIRNode &errNode)
+    const std::shared_ptr<CustomType> &declaredStruct,
+    HIRNode &errNode)
 {
     if (!declaredStruct || !structHasRefFields(declaredStruct)) return;
 
-    auto logLocal = [&](const std::string &fname) {
-        log(errNode, "cannot return struct: reference field '" + fname + "' does not live long enough",
-            E_BorrowDoesNotLiveLongEnough);
+    auto logLocal = [&](const std::string &fname)
+    {
+        log(errNode, "cannot return struct: reference field '" + fname + "' does not live long enough", E_BorrowDoesNotLiveLongEnough);
     };
 
     // `ret S { r: &x }` — check each reference-typed member directly.
@@ -2117,8 +2131,7 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
         // (the receiver's whole-struct drop would also drop the moved field).
         if (!sym->movedFields.empty())
         {
-            log(errNode, "use of moved value: '" + nameRef->name + "' (partially moved)",
-                E_UseOfMovedValue);
+            log(errNode, "use of moved value: '" + nameRef->name + "' (partially moved)", E_UseOfMovedValue);
             return;
         }
         if (sym->state == VarState::Moved)
@@ -2139,8 +2152,7 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
 
         if (sym->state == VarState::Moved)
         {
-            log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'",
-                E_UseOfMovedValue);
+            log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'", E_UseOfMovedValue);
             return;
         }
         // Copy fields never move (mirrors MIR's isCopyType).
@@ -2150,13 +2162,12 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
         for (const auto &existing : sym->movedFields)
         {
             bool existingIsPrefix = existing.size() <= path.size()
-                && std::equal(existing.begin(), existing.end(), path.begin());
+                                    && std::equal(existing.begin(), existing.end(), path.begin());
             bool pathIsPrefix = path.size() <= existing.size()
-                && std::equal(path.begin(), path.end(), existing.begin());
+                                && std::equal(path.begin(), path.end(), existing.begin());
             if (existingIsPrefix || pathIsPrefix)
             {
-                log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'",
-                    E_UseOfMovedValue);
+                log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'", E_UseOfMovedValue);
                 return;
             }
         }
@@ -2186,8 +2197,7 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         // it rather than miscompile.
         if (node->isGlobal && !dynamic_cast<HIRLiteral *>(node->init.value().get()))
         {
-            log(*node, "global variable initializer must be a literal (not '"
-                + (initType ? initType->toString() : std::string("?")) + "').");
+            log(*node, "global variable initializer must be a literal (not '" + (initType ? initType->toString() : std::string("?")) + "').");
         }
 
         // Move semantics check (whole-variable or field-path move source).
@@ -2260,7 +2270,8 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     // (e.g. `let r = &mut x; r.f = 1;` is legal even though `r` is not `mut`).
     // NOTE: Symbol::isMutable is std::optional<bool>; `!sym->isMutable` would
     // only test whether the optional is engaged. Use value_or to test the flag.
-    auto isMutableBinding = [](const Symbol *sym) {
+    auto isMutableBinding = [](const Symbol *sym)
+    {
         if (sym->isMutable.has_value() && *sym->isMutable)
             return true;
         if (sym->type)
@@ -2292,8 +2303,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         auto *sym = SymbolTable::getInstance().lookupSymbol(nameRef->name);
         if (sym && !isMutableBinding(sym))
         {
-            log(*node, "cannot assign to immutable variable '" + nameRef->name + "'",
-                E_AssignToImmutable);
+            log(*node, "cannot assign to immutable variable '" + nameRef->name + "'", E_AssignToImmutable);
             return;
         }
     }
@@ -2308,8 +2318,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
             auto *sym = SymbolTable::getInstance().lookupSymbol(rootRef->name);
             if (sym && !isMutableBinding(sym))
             {
-                log(*node, "cannot assign to field of immutable variable '" + rootRef->name + "'",
-                    E_AssignToImmutable);
+                log(*node, "cannot assign to field of immutable variable '" + rootRef->name + "'", E_AssignToImmutable);
                 return;
             }
         }
@@ -2327,8 +2336,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         {
             if (!refTy->isMutableRef())
             {
-                log(*node, "cannot assign through a shared reference.",
-                    E_AssignToImmutable);
+                log(*node, "cannot assign through a shared reference.", E_AssignToImmutable);
                 return;
             }
         }
@@ -2340,8 +2348,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
                 auto *sym = SymbolTable::getInstance().lookupSymbol(rootRef->name);
                 if (sym && !isMutableBinding(sym))
                 {
-                    log(*node, "cannot assign to element of immutable variable '" + rootRef->name + "'",
-                        E_AssignToImmutable);
+                    log(*node, "cannot assign to element of immutable variable '" + rootRef->name + "'", E_AssignToImmutable);
                     return;
                 }
             }
@@ -2373,12 +2380,10 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
             if (auto *tsym = SymbolTable::getInstance().lookupSymbol(root))
             {
                 tsym->movedFields.erase(
-                    std::remove_if(tsym->movedFields.begin(), tsym->movedFields.end(),
-                        [&](const std::vector<std::string> &existing)
+                    std::remove_if(tsym->movedFields.begin(), tsym->movedFields.end(), [&](const std::vector<std::string> &existing)
                         {
                             if (existing.size() < path.size()) return false;
-                            return std::equal(path.begin(), path.end(), existing.begin());
-                        }),
+                            return std::equal(path.begin(), path.end(), existing.begin()); }),
                     tsym->movedFields.end());
             }
         }
@@ -2467,8 +2472,7 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
                 covered.insert(arm.variantName);
                 if (arm.bindings.size() != variant->payloadTypes.size())
                 {
-                    log(*node, "variant '" + arm.variantName + "' pattern expects " + std::to_string(variant->payloadTypes.size())
-                        + " binding(s), got " + std::to_string(arm.bindings.size()), E_VariantPatternMismatch);
+                    log(*node, "variant '" + arm.variantName + "' pattern expects " + std::to_string(variant->payloadTypes.size()) + " binding(s), got " + std::to_string(arm.bindings.size()), E_VariantPatternMismatch);
                 }
                 else
                 {
@@ -2524,8 +2528,7 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
         {
             if (!covered.count(v.name))
             {
-                log(*node, "match is not exhaustive: variant '" + v.name + "' is not covered (add an arm or a '_' wildcard)",
-                    E_NonExhaustiveMatch);
+                log(*node, "match is not exhaustive: variant '" + v.name + "' is not covered (add an arm or a '_' wildcard)", E_NonExhaustiveMatch);
                 break;
             }
         }
@@ -2572,7 +2575,8 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
             bool wasMoved = it->second.first || it->second.second;
             if (nowMoved && !wasMoved)
                 log(*node, "value '" + name + "' is moved inside this loop without being "
-                    "re-assigned; the next iteration would move it again.", E_UseOfMovedValue);
+                                              "re-assigned; the next iteration would move it again.",
+                    E_UseOfMovedValue);
         }
 }
 
@@ -2691,7 +2695,8 @@ void HIRSemanticAnalyzer::visit(HIRLiteral *node)
         {
             warned = true;
             log(*node, "string literals are modelled as &i8 (raw string pointer); a proper string type is not implemented yet.",
-                /*errorId=*/1, Logger::LogLevel::WARNING);
+                /*errorId=*/1,
+                Logger::LogLevel::WARNING);
         }
         break;
     case HIRLiteral::Kind::Char:
@@ -2799,22 +2804,21 @@ const char *HIRSemanticAnalyzer::operatorMethodName(HIRBinaryOp::OpKind op)
 bool HIRSemanticAnalyzer::isOperatorTrait(const std::string &name)
 {
     static const std::unordered_set<std::string> ops = {
-        "Add", "Sub", "Mul", "Div", "Rem",
-        "PartialEq", "PartialOrd",
-        "BitAnd", "BitOr", "BitXor", "Shl", "Shr"};
+        "Add", "Sub", "Mul", "Div", "Rem", "PartialEq", "PartialOrd", "BitAnd", "BitOr", "BitXor", "Shl", "Shr"};
     return ops.count(name) != 0;
 }
 
 bool HIRSemanticAnalyzer::resolveOperatorMethod(HIRBinaryOp *node,
-    const std::shared_ptr<CustomType> &ct, const char *opMethod, const char *opTrait)
+    const std::shared_ptr<CustomType> &ct,
+    const char *opMethod,
+    const char *opTrait)
 {
     std::string baseName = ct->getOriginName();
     std::string symName = baseName + "::" + opMethod;
     Symbol *symbol = SymbolTable::getInstance().lookupSymbol(symName);
     if (!symbol)
     {
-        log(*node, "operator '" + std::string(node->opToString()) + "' resolves to method '" + opMethod
-            + "' but no such method is registered on '" + baseName + "'.");
+        log(*node, "operator '" + std::string(node->opToString()) + "' resolves to method '" + opMethod + "' but no such method is registered on '" + baseName + "'.");
         return false;
     }
 
@@ -2839,15 +2843,13 @@ bool HIRSemanticAnalyzer::resolveOperatorMethod(HIRBinaryOp *node,
     // Binary operator methods take exactly (self, other).
     if (newTy->getParams().size() != 2)
     {
-        log(*node, std::string("operator method '") + opMethod + "' must take 2 parameters (self, other), got "
-            + std::to_string(newTy->getParams().size()) + ".");
+        log(*node, std::string("operator method '") + opMethod + "' must take 2 parameters (self, other), got " + std::to_string(newTy->getParams().size()) + ".");
         return false;
     }
     if (!node->left->type->equals(newTy->getParams()[0])
         || !node->right->type->equals(newTy->getParams()[1]))
     {
-        log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '"
-            + opTrait + "' method signature.");
+        log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '" + opTrait + "' method signature.");
         return false;
     }
 
@@ -2860,7 +2862,9 @@ bool HIRSemanticAnalyzer::resolveOperatorMethod(HIRBinaryOp *node,
 }
 
 bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
-    const std::shared_ptr<GenericParamType> &gp, const char *opMethod, const char *opTrait)
+    const std::shared_ptr<GenericParamType> &gp,
+    const char *opMethod,
+    const char *opTrait)
 {
     // Find the operator trait among the generic param's bounds.
     std::shared_ptr<TraitType> matchedTrait = nullptr;
@@ -2872,8 +2876,7 @@ bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
         }
     if (!matchedTrait)
     {
-        log(*node, "generic parameter '" + gp->getParamName() + "' has no '" + opTrait + "' bound; cannot resolve operator '"
-            + node->opToString() + "'.");
+        log(*node, "generic parameter '" + gp->getParamName() + "' has no '" + opTrait + "' bound; cannot resolve operator '" + node->opToString() + "'.");
         return false;
     }
 
@@ -2902,26 +2905,24 @@ bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
         auto t = substituteType(method->params[i].type, subst);
         if (auto selfTy = std::dynamic_pointer_cast<SelfType>(t))
             t = selfTy->isReference()
-                ? std::shared_ptr<Type>(context->typeContext->getReference(gp, selfTy->isMutable()))
-                : std::shared_ptr<Type>(gp);
+                    ? std::shared_ptr<Type>(context->typeContext->getReference(gp, selfTy->isMutable()))
+                    : std::shared_ptr<Type>(gp);
         paramTypes.push_back(t);
     }
     auto retTy = substituteType(method->returnType, subst);
     if (auto selfTy = std::dynamic_pointer_cast<SelfType>(retTy))
         retTy = selfTy->isReference()
-            ? std::shared_ptr<Type>(context->typeContext->getReference(gp, selfTy->isMutable()))
-            : std::shared_ptr<Type>(gp);
+                    ? std::shared_ptr<Type>(context->typeContext->getReference(gp, selfTy->isMutable()))
+                    : std::shared_ptr<Type>(gp);
 
     if (paramTypes.size() != 2)
     {
-        log(*node, "operator method '" + std::string(opMethod) + "' must take 2 parameters (self, other), got "
-            + std::to_string(paramTypes.size()) + ".");
+        log(*node, "operator method '" + std::string(opMethod) + "' must take 2 parameters (self, other), got " + std::to_string(paramTypes.size()) + ".");
         return false;
     }
     if (!node->left->type->equals(paramTypes[0]) || !node->right->type->equals(paramTypes[1]))
     {
-        log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '"
-            + opTrait + "' method signature.");
+        log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '" + opTrait + "' method signature.");
         return false;
     }
 
@@ -2948,11 +2949,11 @@ void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
     // `Add`); a struct/enum must implement the corresponding operator trait
     // (operator overloading), otherwise it is rejected here.
     using K = HIRBinaryOp::OpKind;
-    bool isCmp    = node->opKind == K::Eq || node->opKind == K::Ne || node->opKind == K::Lt
+    bool isCmp = node->opKind == K::Eq || node->opKind == K::Ne || node->opKind == K::Lt
                  || node->opKind == K::Gt || node->opKind == K::Le || node->opKind == K::Ge;
     bool isLogical = node->opKind == K::And || node->opKind == K::Or;
     bool isBitwise = node->opKind == K::BitAnd || node->opKind == K::BitOr || node->opKind == K::BitXor
-                  || node->opKind == K::ShiftLeft || node->opKind == K::ShiftRight;
+                     || node->opKind == K::ShiftLeft || node->opKind == K::ShiftRight;
 
     const char *opTrait = operatorTraitName(node->opKind);
     const char *opMethod = operatorMethodName(node->opKind);
@@ -3169,7 +3170,8 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
 // ---------------------------------------------------------------------------
 
 void HIRSemanticAnalyzer::dispatchGenericParamMethod(
-    HIRCall *node, std::shared_ptr<GenericParamType> gp)
+    HIRCall *node,
+    std::shared_ptr<GenericParamType> gp)
 {
     auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
@@ -3183,9 +3185,7 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
             continue;
         if (matchedTrait)
         {
-            log(*node, "ambiguous call to '" + node->methodName + "': generic parameter '" +
-                       gp->getParamName() + "' is bound by multiple traits that define it ('" +
-                       matchedTrait->getName() + "' and '" + traitTy->getName() + "').");
+            log(*node, "ambiguous call to '" + node->methodName + "': generic parameter '" + gp->getParamName() + "' is bound by multiple traits that define it ('" + matchedTrait->getName() + "' and '" + traitTy->getName() + "').");
             node->type = voidTy;
             return;
         }
@@ -3193,8 +3193,7 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
     }
     if (!matchedTrait)
     {
-        log(*node, "generic parameter '" + gp->getParamName() + "' has no method '" +
-                   node->methodName + "' (no matching trait bound).");
+        log(*node, "generic parameter '" + gp->getParamName() + "' has no method '" + node->methodName + "' (no matching trait bound).");
         node->type = voidTy;
         return;
     }
@@ -3332,26 +3331,34 @@ bool HIRSemanticAnalyzer::handlePrintBuiltin(HIRCall *node, const std::string &n
 
     std::shared_ptr<Type> argTy = nullptr;
     size_t argCount = 1;
-    if (name == "print_str")      argTy = i8PtrTy;
-    else if (name == "print_int") argTy = i32Ty;
-    else if (name == "print_float") argTy = f64Ty;
-    else if (name == "print_bool") argTy = boolTy;
-    else if (name == "print_char") argTy = charTy;
-    else if (name == "println")   { argTy = nullptr; argCount = 0; }
-    else return false; // not a builtin print
+    if (name == "print_str")
+        argTy = i8PtrTy;
+    else if (name == "print_int")
+        argTy = i32Ty;
+    else if (name == "print_float")
+        argTy = f64Ty;
+    else if (name == "print_bool")
+        argTy = boolTy;
+    else if (name == "print_char")
+        argTy = charTy;
+    else if (name == "println")
+    {
+        argTy = nullptr;
+        argCount = 0;
+    }
+    else
+        return false; // not a builtin print
 
     if (node->args.size() != argCount)
     {
-        log(*node, "builtin '" + name + "' expects " + std::to_string(argCount)
-            + " argument(s), got " + std::to_string(node->args.size()) + ".");
+        log(*node, "builtin '" + name + "' expects " + std::to_string(argCount) + " argument(s), got " + std::to_string(node->args.size()) + ".");
     }
 
     for (auto &arg : node->args)
     {
         analyzeExpr(arg.get());
         if (argTy && arg->type && !typesCompatible(argTy, arg->type))
-            log(*arg, "builtin '" + name + "' expects an argument of type '"
-                + argTy->toString() + "', got '" + arg->type->toString() + "'.");
+            log(*arg, "builtin '" + name + "' expects an argument of type '" + argTy->toString() + "', got '" + arg->type->toString() + "'.");
     }
 
     node->type = voidTy;
@@ -3372,7 +3379,8 @@ bool HIRSemanticAnalyzer::handleInputBuiltin(HIRCall *node, const std::string &n
         retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
     else if (name == "read_f64")
         retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
-    else return false; // not an input builtin
+    else
+        return false; // not an input builtin
 
     if (!node->args.empty())
         log(*node, "builtin '" + name + "' takes no arguments.");
@@ -3395,37 +3403,36 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
     std::vector<std::shared_ptr<Type>> argTys;
     if (name == "__alloc")
     {
-        retTy = mutI8Ptr;           // &mut i8 — the caller gets a writable buffer
-        argTys = {i32Ty};           // size
+        retTy = mutI8Ptr; // &mut i8 — the caller gets a writable buffer
+        argTys = {i32Ty}; // size
     }
     else if (name == "__free")
     {
         retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-        argTys = {shI8Ptr};         // &i8 — free only needs the address
+        argTys = {shI8Ptr}; // &i8 — free only needs the address
     }
     else if (name == "__memcpy")
     {
-        retTy = mutI8Ptr;           // returns dst (unused in .lis)
+        retTy = mutI8Ptr;                   // returns dst (unused in .lis)
         argTys = {shI8Ptr, shI8Ptr, i32Ty}; // dst, src, n — both shared pointers
     }
     else if (name == "__strlen")
     {
-        retTy = i32Ty;              // length (truncated from size_t)
-        argTys = {shI8Ptr};         // &i8
+        retTy = i32Ty;      // length (truncated from size_t)
+        argTys = {shI8Ptr}; // &i8
     }
-    else return false; // not a heap builtin
+    else
+        return false; // not a heap builtin
 
     if (node->args.size() != argTys.size())
     {
-        log(*node, "builtin '" + name + "' expects " + std::to_string(argTys.size())
-            + " argument(s), got " + std::to_string(node->args.size()) + ".");
+        log(*node, "builtin '" + name + "' expects " + std::to_string(argTys.size()) + " argument(s), got " + std::to_string(node->args.size()) + ".");
     }
     for (size_t i = 0; i < node->args.size() && i < argTys.size(); ++i)
     {
         analyzeExpr(node->args[i].get());
         if (node->args[i]->type && !typesCompatible(argTys[i], node->args[i]->type))
-            log(*node->args[i], "builtin '" + name + "' expects argument of type '"
-                + argTys[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
+            log(*node->args[i], "builtin '" + name + "' expects argument of type '" + argTys[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
     }
 
     node->type = retTy;
@@ -3444,12 +3451,18 @@ bool HIRSemanticAnalyzer::handleToStringBuiltin(HIRCall *node, const std::string
     auto charTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::CHAR);
 
     std::shared_ptr<Type> argTy = nullptr;
-    if (name == "to_string_i32")      argTy = i32Ty;
-    else if (name == "to_string_i64") argTy = i64Ty;
-    else if (name == "to_string_f64") argTy = f64Ty;
-    else if (name == "to_string_bool") argTy = boolTy;
-    else if (name == "to_string_char") argTy = charTy;
-    else return false; // not a to_string builtin
+    if (name == "to_string_i32")
+        argTy = i32Ty;
+    else if (name == "to_string_i64")
+        argTy = i64Ty;
+    else if (name == "to_string_f64")
+        argTy = f64Ty;
+    else if (name == "to_string_bool")
+        argTy = boolTy;
+    else if (name == "to_string_char")
+        argTy = charTy;
+    else
+        return false; // not a to_string builtin
 
     // The return type is the stdlib String struct (preloaded before user code).
     auto strOpt = context->typeContext->getCustom("String");
@@ -3465,8 +3478,7 @@ bool HIRSemanticAnalyzer::handleToStringBuiltin(HIRCall *node, const std::string
     {
         analyzeExpr(node->args[0].get());
         if (node->args[0]->type && !node->args[0]->type->equals(argTy))
-            log(*node->args[0], "builtin '" + name + "' expects an argument of type '"
-                + argTy->toString() + "', got '" + node->args[0]->type->toString() + "'.");
+            log(*node->args[0], "builtin '" + name + "' expects an argument of type '" + argTy->toString() + "', got '" + node->args[0]->type->toString() + "'.");
     }
 
     node->type = strOpt.value();
@@ -3761,7 +3773,8 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
 
             node->typedGenericParams = structArgs;
             node->typedGenericParams.insert(node->typedGenericParams.end(),
-                                            genericArgs.begin(), genericArgs.end());
+                genericArgs.begin(),
+                genericArgs.end());
             instantiatedFuncType = instantiateGenericFunction(newTy, genericArgs);
         }
         else
@@ -3792,8 +3805,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                         if (auto rty = std::dynamic_pointer_cast<ReferenceType>(rsym->type))
                             mut = mut || rty->isMutableRef();
                         if (!mut)
-                            log(*node, "cannot borrow '" + rroot + "' as mutable because it is not mutable",
-                                E_CannotBorrowAsMutable);
+                            log(*node, "cannot borrow '" + rroot + "' as mutable because it is not mutable", E_CannotBorrowAsMutable);
                     }
                     registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node);
                 }
@@ -3943,7 +3955,8 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
 
             node->typedGenericParams = structArgs;
             node->typedGenericParams.insert(node->typedGenericParams.end(),
-                                            genericArgs.begin(), genericArgs.end());
+                genericArgs.begin(),
+                genericArgs.end());
             instantiatedFuncType = instantiateGenericFunction(funcType, genericArgs);
         }
         else
@@ -4049,8 +4062,7 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
         // reference.
         if (objTy->getKind() != Type::Kind::Primitive && objTy->getKind() != Type::Kind::Array)
         {
-            log(*node, "cannot index a reference to type '" + objTy->toString()
-                + "' (only references to primitives or arrays).");
+            log(*node, "cannot index a reference to type '" + objTy->toString() + "' (only references to primitives or arrays).");
             return;
         }
         elemTy = objTy;
@@ -4088,8 +4100,7 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
         if (!elemTy)
             elemTy = e->type;
         else if (e->type && !e->type->equals(elemTy))
-            log(*e, "array literal elements must all have the same type ('"
-                + elemTy->toString() + "' vs '" + e->type->toString() + "').");
+            log(*e, "array literal elements must all have the same type ('" + elemTy->toString() + "' vs '" + e->type->toString() + "').");
     }
     if (!elemTy)
     {
@@ -4101,15 +4112,13 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
 
     if (isReferenceType(elemTy))
     {
-        log(*node, "array literal element type '" + elemTy->toString()
-            + "' cannot be a reference (reference elements are not supported yet).");
+        log(*node, "array literal element type '" + elemTy->toString() + "' cannot be a reference (reference elements are not supported yet).");
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
     if (!elemTy->isCopyable())
     {
-        log(*node, "array literal element type '" + elemTy->toString()
-            + "' must be Copy (arrays of non-Copy types are not supported yet).");
+        log(*node, "array literal element type '" + elemTy->toString() + "' must be Copy (arrays of non-Copy types are not supported yet).");
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
@@ -4314,16 +4323,14 @@ void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
     }
     if (variant->payloadTypes.size() != node->args.size())
     {
-        log(*node, "variant '" + node->variantName + "' expects " + std::to_string(variant->payloadTypes.size())
-            + " payload argument(s), got " + std::to_string(node->args.size()), E_VariantArgMismatch);
+        log(*node, "variant '" + node->variantName + "' expects " + std::to_string(variant->payloadTypes.size()) + " payload argument(s), got " + std::to_string(node->args.size()), E_VariantArgMismatch);
         node->type = voidTy;
         return;
     }
     for (size_t i = 0; i < node->args.size(); ++i)
     {
         if (node->args[i]->type && !typesCompatible(variant->payloadTypes[i], node->args[i]->type))
-            log(*node->args[i], "payload type mismatch for variant '" + node->variantName + "': expected '"
-                + variant->payloadTypes[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
+            log(*node->args[i], "payload type mismatch for variant '" + node->variantName + "': expected '" + variant->payloadTypes[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
     }
 
     // Non-Copy payload args are moved into the enum value.

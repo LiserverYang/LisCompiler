@@ -269,8 +269,7 @@ Token Lexer::lexCharLiteral()
     // process mid-lex. This mirrors the Parser's recoverable-error philosophy.
     auto logUnclosed = [&]()
     {
-        Logger::LogInfo info = {&source, context->filePath, "Unclosed char literal",
-                                line, column - 1, 1, lineStart, E_UnclosedCharLiteral};
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral};
         info.exit = false;
         Logger::Log(Logger::LogLevel::ERROR, info);
     };
@@ -307,7 +306,7 @@ Token Lexer::lexCharLiteral()
         case '\'': token.value = "'"; break;
         case '\\': token.value = "\\"; break;
         case '0': token.value = std::string(1, '\0'); break; // null char
-        default: token.value = std::string("\\") + escape; // invalid escape
+        default: token.value = std::string("\\") + escape;   // invalid escape
         }
     }
     else // normal character
@@ -400,9 +399,7 @@ Token Lexer::lexNumber()
             // never surfaced.
             if (index >= source.size() || !std::isdigit((unsigned char)source[index]))
             {
-                Logger::LogInfo info = {&source, context->filePath,
-                    "malformed float: exponent must be followed by a digit",
-                    line, column - 1, 1, index, E_InvalidLiteralType};
+                Logger::LogInfo info = {&source, context->filePath, "malformed float: exponent must be followed by a digit", line, column - 1, 1, index, E_InvalidLiteralType};
                 info.exit = false;
                 Logger::Log(Logger::LogLevel::ERROR, info);
             }

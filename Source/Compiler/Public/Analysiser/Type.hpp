@@ -5,11 +5,11 @@
 
 #pragma once
 
-#include <string>
 #include <memory>
 #include <optional>
-#include <vector>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 // 前向声明
 class TypeContext;
@@ -62,8 +62,15 @@ class PrimitiveType : public Type
 public:
     enum class PrimKind
     {
-        I8 = 0, I16, I32, I64,
-        F32, F64, BOOL, CHAR, VOID
+        I8 = 0,
+        I16,
+        I32,
+        I64,
+        F32,
+        F64,
+        BOOL,
+        CHAR,
+        VOID
     };
 
     explicit PrimitiveType(PrimKind pk);
@@ -152,8 +159,8 @@ public:
 public:
     CustomType(std::string name, std::vector<Field> fields);
     CustomType(std::string name,
-               std::vector<std::shared_ptr<Type>> genericParams,
-               std::vector<Field> fields);
+        std::vector<std::shared_ptr<Type>> genericParams,
+        std::vector<Field> fields);
 
     const std::string &getName() const;
     /** For an instantiation, the origin definition's name (e.g. "Range" for
@@ -167,20 +174,47 @@ public:
     std::string toString() const override;
 
     // --- generics ---
-    bool isGeneric() const { return !genericParams.empty() && genericArgs.empty(); }
-    bool isInstantiated() const { return !genericArgs.empty(); }
-    const std::vector<std::shared_ptr<Type>> &getGenericParams() const { return genericParams; }
-    const std::vector<std::shared_ptr<Type>> &getGenericArgs() const { return genericArgs; }
-    void setGenericArgs(std::vector<std::shared_ptr<Type>> args) { genericArgs = std::move(args); }
-    void setFields(std::vector<Field> f) { fields = std::move(f); }
+    bool isGeneric() const
+    {
+        return !genericParams.empty() && genericArgs.empty();
+    }
+    bool isInstantiated() const
+    {
+        return !genericArgs.empty();
+    }
+    const std::vector<std::shared_ptr<Type>> &getGenericParams() const
+    {
+        return genericParams;
+    }
+    const std::vector<std::shared_ptr<Type>> &getGenericArgs() const
+    {
+        return genericArgs;
+    }
+    void setGenericArgs(std::vector<std::shared_ptr<Type>> args)
+    {
+        genericArgs = std::move(args);
+    }
+    void setFields(std::vector<Field> f)
+    {
+        fields = std::move(f);
+    }
 
     // --- enums (tagged unions) ---
     /// An enum is a CustomType whose `variants` is non-empty and whose fields are
     /// the synthetic `{ __tag, <variant>_<idx> ... }` fat layout. A struct has an
     /// empty `variants`. The variant's discriminant is its index here.
-    bool isEnum() const { return !variants.empty(); }
-    const std::vector<EnumVariantInfo> &getVariants() const { return variants; }
-    void setVariants(std::vector<EnumVariantInfo> v) { variants = std::move(v); }
+    bool isEnum() const
+    {
+        return !variants.empty();
+    }
+    const std::vector<EnumVariantInfo> &getVariants() const
+    {
+        return variants;
+    }
+    void setVariants(std::vector<EnumVariantInfo> v)
+    {
+        variants = std::move(v);
+    }
 
     // For instantiations: points to the generic definition.
     // Methods always live on the origin; instantiations look them up there.
@@ -200,10 +234,10 @@ class FunctionType : public Type
 {
 public:
     FunctionType(std::vector<std::shared_ptr<Type>> params,
-                 std::shared_ptr<Type> returnType);
+        std::shared_ptr<Type> returnType);
     FunctionType(std::vector<std::shared_ptr<Type>> genericParams,
-                 std::vector<std::shared_ptr<Type>> params,
-                 std::shared_ptr<Type> returnType);
+        std::vector<std::shared_ptr<Type>> params,
+        std::shared_ptr<Type> returnType);
 
     bool isGeneric() const;
     const std::vector<std::shared_ptr<Type>> &getParams() const;

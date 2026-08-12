@@ -38,7 +38,7 @@ ERRORID E_MutidefinedTrait = 2017;
 
 // Semantic (HIR) errors
 
-ERRORID E_SemanticError = 3001;          // general/default semantic error
+ERRORID E_SemanticError = 3001; // general/default semantic error
 ERRORID E_TypeMismatch = 3002;
 ERRORID E_UndefinedIdentifier = 3003;
 ERRORID E_AssignToImmutable = 3004;

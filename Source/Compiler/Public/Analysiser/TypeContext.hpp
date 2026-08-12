@@ -149,14 +149,12 @@ public:
 
     /** Re-derive an instantiation's implTrait from its origin (order-independent
      *  conformance; a cache hit may be older than the origin's implTrait). */
-    void reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic,
-        const std::unordered_map<std::string, std::shared_ptr<Type>> &subst);
+    void reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic, const std::unordered_map<std::string, std::shared_ptr<Type>> &subst);
 
     /** Re-derive an instantiation's FIELDS from its origin (order-independent
      *  layout; an instance created while its origin was still an empty pass-1b
      *  shell keeps empty fields unless re-synced on a cache hit). */
-    void reSyncFields(CustomType *inst, const std::shared_ptr<CustomType> &generic,
-        const std::unordered_map<std::string, std::shared_ptr<Type>> &subst);
+    void reSyncFields(CustomType *inst, const std::shared_ptr<CustomType> &generic, const std::unordered_map<std::string, std::shared_ptr<Type>> &subst);
 
     const std::unordered_map<std::string, std::shared_ptr<CustomType>> &
     getInstantiatedCustoms() const

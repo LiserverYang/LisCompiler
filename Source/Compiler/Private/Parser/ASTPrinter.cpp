@@ -177,7 +177,7 @@ void ASTPrinter::visit(GenericParam *node)
     printCommon(node);
     os << " " << node->name << ": ";
 
-    for (size_t i = 0; i < node->constraints.size(); i ++)
+    for (size_t i = 0; i < node->constraints.size(); i++)
     {
         const auto &c = node->constraints[i];
         os << c.name;
@@ -505,16 +505,16 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
     {
         for (auto &gparam : mf->genericParams)
             children.push_back(gparam.get());
-        
+
         if (mf->selfParam && *mf->selfParam)
             children.push_back(mf->selfParam->get());
-        
+
         for (auto &param : mf->params)
             children.push_back(param.get());
 
         if (mf->returnType && *mf->returnType)
             children.push_back(mf->returnType->get());
-        
+
         if (mf->body && mf->body.value())
             children.push_back(mf->body.value().get());
     }
@@ -527,13 +527,13 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
     {
         for (auto &gparam : fd->genericParams)
             children.push_back(gparam.get());
-        
+
         for (auto &param : fd->params)
             children.push_back(param.get());
-        
+
         if (fd->returnType && *fd->returnType)
             children.push_back(fd->returnType->get());
-        
+
         if (fd->body)
             children.push_back(fd->body.get());
     }

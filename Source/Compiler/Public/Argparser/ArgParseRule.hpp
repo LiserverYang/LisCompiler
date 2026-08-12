@@ -56,7 +56,7 @@ struct ArgParseRule
      * setAsValue:
      * Sets corresponding value to the subsequent argument,
      * which must not be an option argument
-     * 
+     *
      * Custom Behavior
      * You should define a function as a behavior, which the params are a `Argparser*` as the argparser and a `std::string` as the current param name
      * The return of your behavior function should be `int`, which how many args should be skip (contain the current param, so at least, if should be 1)

@@ -30,7 +30,6 @@ static HIRRawType toRaw(const TypeNode *n)
     return r;
 }
 
-
 // Convert AST GenericConstraints (with TypeNode args) to HIRGenericConstraints.
 static std::vector<HIRGenericConstraint> toHIRConstraints(const std::vector<GenericConstraint> &cs)
 {
@@ -563,7 +562,8 @@ void HIRBuilder::visit(ForStmt *node)
     std::string optName = "__opt_" + std::to_string(forLoopCtr_);
     forLoopCtr_++;
 
-    auto nameRef = [&](const std::string &name) {
+    auto nameRef = [&](const std::string &name)
+    {
         auto n = std::make_unique<HIRNameRef>();
         n->position = position;
         n->length = length;
@@ -571,7 +571,8 @@ void HIRBuilder::visit(ForStmt *node)
         return n;
     };
 
-    auto callNext = [&](const std::string &receiverName) {
+    auto callNext = [&](const std::string &receiverName)
+    {
         auto c = std::make_unique<HIRCall>();
         c->position = position;
         c->length = length;
@@ -581,7 +582,8 @@ void HIRBuilder::visit(ForStmt *node)
         return c;
     };
 
-    auto memberOf = [&](const std::string &objName, const std::string &field) {
+    auto memberOf = [&](const std::string &objName, const std::string &field)
+    {
         auto m = std::make_unique<HIRMemberAccess>();
         m->position = position;
         m->length = length;

@@ -25,10 +25,10 @@
  */
 enum class RefOrigin
 {
-    Local,   // points into this function's stack frame → dangles on return
-    Param,   // points into caller-owned memory (a reference-typed param / &self)
-    Global,  // points into static / global storage
-    Unknown  // cannot determine → treat as safe (conservative)
+    Local,  // points into this function's stack frame → dangles on return
+    Param,  // points into caller-owned memory (a reference-typed param / &self)
+    Global, // points into static / global storage
+    Unknown // cannot determine → treat as safe (conservative)
 };
 
 enum class SymbolKind

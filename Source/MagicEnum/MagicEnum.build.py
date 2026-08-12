@@ -12,3 +12,6 @@ class MagicEnumModule(BuildSystem.ModuleBase):
 
         self.AutoSkiped = True
         self.LinkThisModule = False
+        # Vendored header-only library: never reformat/check it with our
+        # clang-format (it would drift from upstream).
+        self.EnableFormatCheck = False

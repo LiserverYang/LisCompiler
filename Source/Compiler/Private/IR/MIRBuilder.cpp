@@ -171,12 +171,10 @@ void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
             if (pmIt != partiallyMovedFields_.end())
             {
                 pmIt->second.erase(
-                    std::remove_if(pmIt->second.begin(), pmIt->second.end(),
-                        [&](const std::vector<std::string> &existing)
+                    std::remove_if(pmIt->second.begin(), pmIt->second.end(), [&](const std::vector<std::string> &existing)
                         {
                             if (existing.size() < lhsPath.size()) return false;
-                            return std::equal(lhsPath.begin(), lhsPath.end(), existing.begin());
-                        }),
+                            return std::equal(lhsPath.begin(), lhsPath.end(), existing.begin()); }),
                     pmIt->second.end());
                 if (pmIt->second.empty())
                     partiallyMovedFields_.erase(pmIt);
@@ -542,7 +540,7 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     out.associatedStruct = fn->associatedStruct;
 
     out.name = mangleName(out);
-    
+
     for (auto &gParam : fn->gParams)
     {
         out.genericParams.push_back(gParam->getParamName());
@@ -562,12 +560,12 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
             for (auto &gp : (*ct)->getGenericParams())
             {
                 auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
-                if (std::find(out.genericParams.begin(), out.genericParams.end(),
-                              gpTy->getParamName()) == out.genericParams.end())
+                if (std::find(out.genericParams.begin(), out.genericParams.end(), gpTy->getParamName()) == out.genericParams.end())
                     structParams.push_back(gpTy->getParamName());
             }
             out.genericParams.insert(out.genericParams.begin(),
-                                     structParams.begin(), structParams.end());
+                structParams.begin(),
+                structParams.end());
         }
     }
 
@@ -734,7 +732,7 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
     auto fellThrough = [&]()
     {
         return std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator)
-            && currentBlock().label != "dead";
+               && currentBlock().label != "dead";
     };
 
     // 5. Lower then-branch.
@@ -817,7 +815,7 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
     auto fellThrough = [&]()
     {
         return std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator)
-            && currentBlock().label != "dead";
+               && currentBlock().label != "dead";
     };
 
     // Does any variant carry a non-Copy payload? (→ wildcard arms must release
@@ -825,7 +823,11 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
     bool enumHasNonCopy = false;
     for (const auto &v : variants)
         for (const auto &pt : v.payloadTypes)
-            if (!pt->isCopyable()) { enumHasNonCopy = true; break; }
+            if (!pt->isCopyable())
+            {
+                enumHasNonCopy = true;
+                break;
+            }
 
     BasicBlockId doneId = newBlock("match_done");
 
@@ -840,8 +842,16 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
             // Discriminant check: `if __m.__tag == variantIndex`.
             int64_t vi = -1;
             for (size_t i = 0; i < variants.size(); ++i)
-                if (variants[i].name == arm.variantName) { vi = (int64_t)i; break; }
-            if (vi < 0) { switchTo(doneId); continue; } // sema already errored
+                if (variants[i].name == arm.variantName)
+                {
+                    vi = (int64_t)i;
+                    break;
+                }
+            if (vi < 0)
+            {
+                switchTo(doneId);
+                continue;
+            } // sema already errored
 
             BasicBlockId bodyId = newBlock("match_arm" + std::to_string(armIdx));
             nextId = isLast ? doneId : newBlock("match_check" + std::to_string(armIdx + 1));
@@ -855,17 +865,17 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
             tagConst.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
             MIRPlace cond = makeTempPlace(context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL));
             emitAssign(cond, MIRRValueBinaryOp{
-                .op = MIRRValueBinaryOp::Op::Eq,
-                .left = MIROperand(MIRCopy{tagPlace}),
-                .right = MIROperand(tagConst),
-                .type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL),
-            });
+                                 .op = MIRRValueBinaryOp::Op::Eq,
+                                 .left = MIROperand(MIRCopy{tagPlace}),
+                                 .right = MIROperand(tagConst),
+                                 .type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL),
+                             });
 
             sealBlock(curBB_, MIRTermBranch{
-                .cond = MIROperand(MIRCopy{cond}),
-                .thenBlock = bodyId,
-                .elseBlock = nextId,
-            });
+                                  .cond = MIROperand(MIRCopy{cond}),
+                                  .thenBlock = bodyId,
+                                  .elseBlock = nextId,
+                              });
             switchTo(bodyId);
         }
         // A wildcard arm has no check — the current block flows into its body.
@@ -1376,8 +1386,7 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         .callee = std::move(calleeOp),
         .funcName = funcName,
         .args = std::move(args),
-        .genericParams = std::move(call->typedGenericParams)}
-    );
+        .genericParams = std::move(call->typedGenericParams)});
 
     return dest;
 }

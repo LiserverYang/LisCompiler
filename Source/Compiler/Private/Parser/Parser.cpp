@@ -21,11 +21,18 @@ void Parser::synchronize()
         case TokenCode::SEMI: advance(); return;
         case TokenCode::RBRACE: return;
         case TokenCode::LBRACE:
-        case TokenCode::IF: case TokenCode::LET: case TokenCode::WHILE:
-        case TokenCode::FOR: case TokenCode::RET: case TokenCode::BREAK:
+        case TokenCode::IF:
+        case TokenCode::LET:
+        case TokenCode::WHILE:
+        case TokenCode::FOR:
+        case TokenCode::RET:
+        case TokenCode::BREAK:
         case TokenCode::CONTINUE:
-        case TokenCode::FN: case TokenCode::STRUCT: case TokenCode::IMPL:
-        case TokenCode::TRAIT: case TokenCode::ENUM:
+        case TokenCode::FN:
+        case TokenCode::STRUCT:
+        case TokenCode::IMPL:
+        case TokenCode::TRAIT:
+        case TokenCode::ENUM:
             return;
         default: advance();
         }
@@ -1084,8 +1091,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         // (cross-file types like the stdlib's Option aren't in knownTypes). In a
         // for-loop iterable or an if/while condition the `{` is ambiguous with a
         // block/body, so there we require Name to be a known struct type.
-        if (check(TokenCode::LBRACE) && (knownTypes.count(identifier.value) > 0
-            || !(inForIterable_ || inControlFlowCondition_)))
+        if (check(TokenCode::LBRACE) && (knownTypes.count(identifier.value) > 0 || !(inForIterable_ || inControlFlowCondition_)))
         {
             match(TokenCode::LBRACE);
             auto expr = parseStructInitialization(identifier);

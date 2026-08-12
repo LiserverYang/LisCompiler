@@ -128,16 +128,19 @@ protected:
     void expectError(const std::string &source, const std::string &fragment)
     {
         std::string out = analyze(source);
-        EXPECT_GT(Logger::GetErrorCount(), 0) << "expected a borrow error, got none\n" << out;
+        EXPECT_GT(Logger::GetErrorCount(), 0) << "expected a borrow error, got none\n"
+                                              << out;
         EXPECT_NE(out.find(fragment), std::string::npos)
-            << "expected message containing '" << fragment << "', got:\n" << out;
+            << "expected message containing '" << fragment << "', got:\n"
+            << out;
     }
 
     /// The snippet must be accepted (no errors).
     void expectOk(const std::string &source)
     {
         std::string out = analyze(source);
-        EXPECT_EQ(Logger::GetErrorCount(), 0) << "expected clean compile, got errors:\n" << out;
+        EXPECT_EQ(Logger::GetErrorCount(), 0) << "expected clean compile, got errors:\n"
+                                              << out;
     }
 };
 

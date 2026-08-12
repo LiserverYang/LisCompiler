@@ -128,9 +128,11 @@ protected:
     {
         std::string diag;
         bool ok = compileCapture(source, diag);
-        EXPECT_FALSE(ok) << "expected a compile error, got clean compile for:\n" << source;
+        EXPECT_FALSE(ok) << "expected a compile error, got clean compile for:\n"
+                         << source;
         EXPECT_NE(diag.find(fragment), std::string::npos)
-            << "expected message containing '" << fragment << "', got:\n" << diag;
+            << "expected message containing '" << fragment << "', got:\n"
+            << diag;
     }
 
     /// Compile `source` through the full pipeline to objPath. Returns false on
@@ -149,21 +151,26 @@ protected:
             std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             context->filePath = entry.path().string();
             context->fileValue = content;
-            Lexer lexer(context); lexer.run();
-            Parser parser(context); parser.parseAll();
+            Lexer lexer(context);
+            lexer.run();
+            Parser parser(context);
+            parser.parseAll();
         }
 
         // Main source.
         context->filePath = "test.lis";
         context->fileValue = source;
-        Lexer lexer(context); lexer.run();
-        Parser parser(context); parser.parseAll();
+        Lexer lexer(context);
+        lexer.run();
+        Parser parser(context);
+        parser.parseAll();
         // Parse errors (incl. lexer errors the Parser gate sees) are now
         // recoverable — report them as a failed compile instead of exit(1)
         // killing the whole test process.
         if (Logger::GetErrorCount() > 0) return false;
 
-        HIRBuilder builder(context); builder.run();
+        HIRBuilder builder(context);
+        builder.run();
 
         // Gate on semantic errors — do NOT call sema.run() (it calls exit(1)).
         Logger::ResetErrorCount();
@@ -171,13 +178,17 @@ protected:
         sema.visit(context->hirProgram.get());
         if (Logger::GetErrorCount() > 0) return false;
 
-        MIRBuilder mir(context); mir.run();
-        MIRMonomorphization mono(context); mono.run();
-        LLVMIRBuilder llvm(context, context->llvmContext, "test.lis"); llvm.run();
+        MIRBuilder mir(context);
+        mir.run();
+        MIRMonomorphization mono(context);
+        mono.run();
+        LLVMIRBuilder llvm(context, context->llvmContext, "test.lis");
+        llvm.run();
 
         Emitter::Options opts;
         opts.outPath = objPath.string();
-        Emitter emitter(context, opts); emitter.run();
+        Emitter emitter(context, opts);
+        emitter.run();
         return true;
     }
 
@@ -249,39 +260,46 @@ protected:
     /// Compile, link, run and assert the process exit code.
     void expectRun(const std::string &source, int expectedExit)
     {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n" << source;
+        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
+                                     << source;
         int code = linkAndRun();
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n" << source;
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << source;
     }
 
     /// Compile, link, run, and assert both the exit code AND the captured stdout.
     void expectOutput(const std::string &source, const std::string &expectedOut, int expectedExit)
     {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n" << source;
+        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
+                                     << source;
         std::string out;
         int code = linkAndRun(&out);
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n" << source;
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << source;
         // Windows printf emits CRLF; normalize to LF so the comparison is
         // platform-independent.
         std::string normalized;
         for (char c : out)
             if (c != '\r') normalized += c;
-        EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n" << source;
+        EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n"
+                                           << source;
     }
 
     /// Compile, link, run feeding `input` to stdin, and assert exit code +
     /// captured stdout (CRLF-normalized).
-    void expectOutputWithInput(const std::string &source, const std::string &input,
-        const std::string &expectedOut, int expectedExit)
+    void expectOutputWithInput(const std::string &source, const std::string &input, const std::string &expectedOut, int expectedExit)
     {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n" << source;
+        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
+                                     << source;
         std::string out;
         int code = linkAndRun(&out, &input);
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n" << source;
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << source;
         std::string normalized;
         for (char c : out)
             if (c != '\r') normalized += c;
-        EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n" << source;
+        EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n"
+                                           << source;
     }
 };
 
@@ -302,9 +320,12 @@ TEST_F(RuntimeTest, HIRPrinterShowsMatchTailValue)
     ctx->fileValue =
         "enum Option<T> { Some(T), None } fn main() -> i32 {"
         " let o = Option::Some(1); let y = match o { Some(v) => v + 1, None => 0 }; ret y; }";
-    Lexer lexer(ctx); lexer.run();
-    Parser parser(ctx); parser.parseAll();
-    HIRBuilder builder(ctx); builder.run();
+    Lexer lexer(ctx);
+    lexer.run();
+    Parser parser(ctx);
+    parser.parseAll();
+    HIRBuilder builder(ctx);
+    builder.run();
 
     // printHIR writes to std::cout (C++ iostream), which does NOT follow the
     // C-stdio freopen/dup2 dance that compileCapture relies on for the
@@ -319,7 +340,8 @@ TEST_F(RuntimeTest, HIRPrinterShowsMatchTailValue)
     // The HIRPrinter labels the node `binary_op` (lowercase, see opKindToString),
     // so the assertion checks that exact label.
     EXPECT_NE(out.find("binary_op"), std::string::npos)
-        << "value-match arm tail expression missing from HIR dump:\n" << out;
+        << "value-match arm tail expression missing from HIR dump:\n"
+        << out;
 }
 
 // P1 regression: an integer literal too large for int64 used as a VALUE used to
@@ -603,19 +625,22 @@ TEST_F(RuntimeTest, PrintInt)
 TEST_F(RuntimeTest, PrintStringAndChar)
 {
     expectOutput("fn main() -> i32 { print_str(\"hi\"); print_char('!'); println(); ret 0; }",
-        "hi!\n", 0);
+        "hi!\n",
+        0);
 }
 
 TEST_F(RuntimeTest, PrintFloatAndBool)
 {
     expectOutput("fn main() -> i32 { print_float(3.5); println(); print_bool(true); println(); ret 0; }",
-        "3.500000\n1\n", 0);
+        "3.500000\n1\n",
+        0);
 }
 
 TEST_F(RuntimeTest, PrintMultiple)
 {
     expectOutput("fn main() -> i32 { print_str(\"x=\"); print_int(7); println(); ret 0; }",
-        "x=7\n", 0);
+        "x=7\n",
+        0);
 }
 
 // ── math helpers ───────────────────────────────────────────────────────────────
@@ -760,7 +785,8 @@ TEST_F(RuntimeTest, OptionHelpers)
               " fn main() -> i32 {"
               " let a = Option::Some(7);"
               " let x = unwrap_or(a, 0); let y = unwrap_or(mk_none(), 0);"
-              " ret x + y; }", 7);
+              " ret x + y; }",
+        7);
 }
 
 TEST_F(RuntimeTest, OptionIsSomeAndOr)
@@ -773,7 +799,8 @@ TEST_F(RuntimeTest, OptionIsSomeAndOr)
               " let o = unwrap_or(or(mk_none(), Option::Some(9)), 0);"
               " let mut flag = 0;"
               " if s && n { flag = 1; }"
-              " ret a + o + flag; }", 15);
+              " ret a + o + flag; }",
+        15);
 }
 
 TEST_F(RuntimeTest, MathGcdLcmIpow)
@@ -798,7 +825,8 @@ TEST_F(RuntimeTest, MathDegLerp)
     expectRun("fn main() -> i32 {"
               " if lerp(0.0, 10.0, 0.5) == 5.0 { ret 1; }"
               " if deg_to_rad(180.0) > 3.14 { ret 1; }"
-              " ret 0; }", 1);
+              " ret 0; }",
+        1);
 }
 
 TEST_F(RuntimeTest, CharClassification)
@@ -816,9 +844,9 @@ TEST_F(RuntimeTest, CharClassification)
 TEST_F(RuntimeTest, IteratorLastNthProduct)
 {
     expectRun("fn main() -> i32 {"
-              " let last_ = unwrap_or(last(range(1, 5)), 0);"   // 4
+              " let last_ = unwrap_or(last(range(1, 5)), 0);"    // 4
               " let nth_ = unwrap_or(nth(range(10, 20), 3), 0);" // 13
-              " let prod = product(range(1, 5));"               // 24
+              " let prod = product(range(1, 5));"                // 24
               " ret last_ + nth_ + prod; }",
         4 + 13 + 24);
 }
@@ -829,7 +857,9 @@ TEST_F(RuntimeTest, ReadInt)
 {
     expectOutputWithInput(
         "fn main() -> i32 { let n = read_int(); print_int(n); println(); ret 0; }",
-        "42\n", "42\n", 0);
+        "42\n",
+        "42\n",
+        0);
 }
 
 TEST_F(RuntimeTest, ReadLine)
@@ -837,14 +867,18 @@ TEST_F(RuntimeTest, ReadLine)
     // read_line strips the trailing newline.
     expectOutputWithInput(
         "fn main() -> i32 { let line = read_line(); print_str(line); println(); ret 0; }",
-        "hello\n", "hello\n", 0);
+        "hello\n",
+        "hello\n",
+        0);
 }
 
 TEST_F(RuntimeTest, ReadF64)
 {
     expectOutputWithInput(
         "fn main() -> i32 { let x = read_f64(); print_float(x); println(); ret 0; }",
-        "3.5\n", "3.500000\n", 0);
+        "3.5\n",
+        "3.500000\n",
+        0);
 }
 
 TEST_F(RuntimeTest, ReadIntThenLine)
@@ -853,7 +887,9 @@ TEST_F(RuntimeTest, ReadIntThenLine)
     expectOutputWithInput(
         "fn main() -> i32 { let n = read_int(); let line = read_line();"
         " print_int(n); print_char(','); print_str(line); println(); ret 0; }",
-        "42\nhello\n", "42,hello\n", 0);
+        "42\nhello\n",
+        "42,hello\n",
+        0);
 }
 
 // ── arrays / heap / String (Step 22) ─────────────────────────────────────────
@@ -879,7 +915,8 @@ TEST_F(RuntimeTest, ArrayOfCharsAndLoop)
 {
     expectRun("fn main() -> i32 { let mut a = [1, 2, 3, 4]; let mut s = 0;"
               " let mut i = 0; while i < 4 { s = s + a[i]; i = i + 1; }"
-              " a[3] = 40; ret s + a[3]; }", 50);
+              " a[3] = 40; ret s + a[3]; }",
+        50);
 }
 
 TEST_F(RuntimeTest, ArrayNonCopyElementRejected)
@@ -892,7 +929,8 @@ TEST_F(RuntimeTest, StringFromLitAndPrint)
 {
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hi\");"
                  " print_str(s.to_cstr()); println(); ret 0; }",
-        "hi\n", 0);
+        "hi\n",
+        0);
 }
 
 TEST_F(RuntimeTest, StringPushAndGrow)
@@ -901,15 +939,17 @@ TEST_F(RuntimeTest, StringPushAndGrow)
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\"); let mut t = s;"
                  " t.push_char(' '); t.push_str(\"world\");"
                  " print_str(t.to_cstr()); println(); ret t.len; }",
-        "hello world\n", 11);
+        "hello world\n",
+        11);
 }
 
 TEST_F(RuntimeTest, StringIndexOption)
 {
     expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\");"
               " let c = unwrap_or(s.index(0), '?');"
-              " let d = unwrap_or(s.index(9), '?');"   // out of bounds → None → '?'
-              " ret (c as i32) - (d as i32); }", 104 - 63);
+              " let d = unwrap_or(s.index(9), '?');" // out of bounds → None → '?'
+              " ret (c as i32) - (d as i32); }",
+        104 - 63);
 }
 
 TEST_F(RuntimeTest, StringIsEmpty)
@@ -920,7 +960,8 @@ TEST_F(RuntimeTest, StringIsEmpty)
               " if s.is_empty() { e = e + 1; }"
               " s.push_char('a');"
               " if s.is_empty() { ret e; } else { ret e + 1; }"
-              " }", 2);
+              " }",
+        2);
 }
 
 TEST_F(RuntimeTest, StringFreedExactlyOnce)
@@ -934,7 +975,8 @@ TEST_F(RuntimeTest, StringFreedExactlyOnce)
               " fn main() -> i32 {"
               "   let p = __alloc(4);"
               "   { let b = Buf { data: p, len: 0 }; let c = b; }" // b moved into c, c drops → frees 1
-              "   ret frees; }", 1);
+              "   ret frees; }",
+        1);
 }
 
 TEST_F(RuntimeTest, StringMoveTransfersOwnership)
@@ -950,13 +992,15 @@ TEST_F(RuntimeTest, ToStringBuiltins)
     expectOutput("fn main() -> i32 { let a = to_string_i32(42); print_str(a.to_cstr()); println();"
                  " let b = to_string_f64(3.5); print_str(b.to_cstr()); println();"
                  " let c = to_string_bool(true); print_str(c.to_cstr()); println(); ret 0; }",
-        "42\n3.500000\n1\n", 0);
+        "42\n3.500000\n1\n",
+        0);
 }
 
 TEST_F(RuntimeTest, HeapAllocFree)
 {
     expectRun("fn main() -> i32 { let p = __alloc(8); p[0] = 'x' as i8;"
-              " let c = p[0] as char; __free(p); ret c as i32; }", 120);
+              " let c = p[0] as char; __free(p); ret c as i32; }",
+        120);
 }
 
 // ── Step 23 robustness fixes ──────────────────────────────────────────────────
@@ -1058,14 +1102,16 @@ TEST_F(RuntimeTest, WriteThroughMutFieldIndex)
 {
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hi\"); s.data[0] = 'x' as i8;"
                  " print_str(s.to_cstr()); println(); ret 0; }",
-        "xi\n", 0);
+        "xi\n",
+        0);
 }
 
 // E2 (runtime): write through a &mut reference to an array is allowed.
 TEST_F(RuntimeTest, WriteThroughMutRefToArray)
 {
     expectRun("fn main() -> i32 { let mut a = [1, 2, 3]; let r = &mut a;"
-              " r[1] = 9; ret a[1]; }", 9);
+              " r[1] = 9; ret a[1]; }",
+        9);
 }
 
 // D1 (runtime): an out-of-bounds array index aborts the process.
@@ -1081,7 +1127,8 @@ TEST_F(RuntimeTest, ArrayOobAborts)
 TEST_F(RuntimeTest, ArrayInBoundsNoAbort)
 {
     expectRun("fn main() -> i32 { let a = [1, 2, 3]; let mut s = 0; let mut i = 0;"
-              " while i < 3 { s = s + a[i]; i = i + 1; } ret s; }", 6);
+              " while i < 3 { s = s + a[i]; i = i + 1; } ret s; }",
+        6);
 }
 
 // A2: %f of 1e100 is a ~108-char string — would overflow the old 64-byte
@@ -1102,5 +1149,6 @@ TEST_F(RuntimeTest, StringPushCharGrowsAtCap)
 {
     expectRun("fn main() -> i32 { let mut s = String::new();"
               " let mut i = 0; while i < 16 { s.push_char('a'); i = i + 1; }"
-              " ret s.len; }", 16);
+              " ret s.len; }",
+        16);
 }

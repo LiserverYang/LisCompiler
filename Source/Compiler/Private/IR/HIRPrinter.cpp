@@ -135,7 +135,7 @@ public:
         os << " <" << node->position.line << ":" << node->position.col
            << ":" << node->length << ">";
 
-           os << " " << "\033[38;5;3m" << address << "\033[0m";
+        os << " " << "\033[38;5;3m" << address << "\033[0m";
     }
 
     void visit(HIRProgram *node)

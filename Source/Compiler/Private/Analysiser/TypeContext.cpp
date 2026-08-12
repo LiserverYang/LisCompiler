@@ -572,8 +572,7 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
     return inst;
 }
 
-void TypeContext::reSyncFields(CustomType *inst, const std::shared_ptr<CustomType> &generic,
-    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
+void TypeContext::reSyncFields(CustomType *inst, const std::shared_ptr<CustomType> &generic, const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
 {
     if (generic->getFields().empty())
         return; // origin still an empty shell — nothing to sync yet
@@ -596,8 +595,7 @@ void TypeContext::reSyncFields(CustomType *inst, const std::shared_ptr<CustomTyp
     inst->setVariants(std::move(newVariants));
 }
 
-void TypeContext::reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic,
-    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
+void TypeContext::reSyncImplTrait(CustomType *inst, const std::shared_ptr<CustomType> &generic, const std::unordered_map<std::string, std::shared_ptr<Type>> &subst)
 {
     // Propagate trait conformance, substituting the struct's generic args into
     // the trait's use-site args — `impl<T> Iterator<T> for Range<T>` must yield

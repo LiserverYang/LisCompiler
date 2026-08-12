@@ -81,7 +81,8 @@ void LLVMIRBuilder::declareStructTypes(const MIRProgram &prog)
     std::vector<std::shared_ptr<CustomType>> toDeclare;
 
     auto scope = SymbolTable::getInstance().getCurrentScope();
-    while (scope && scope->getParent() != nullptr) scope = scope->getParent();
+    while (scope && scope->getParent() != nullptr)
+        scope = scope->getParent();
 
     for (const auto &[name, sym] : scope->getSymbols())
     {
@@ -434,8 +435,7 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         llvm::Type *retTy = fty->getReturnType();
         bool isVoid = retTy->isVoidTy();
         llvm::CallInst *call =
-            builder_->CreateCall(fty, indirectPtr, args,
-                isVoid ? "" : s.funcName + ".ret");
+            builder_->CreateCall(fty, indirectPtr, args, isVoid ? "" : s.funcName + ".ret");
 
         if (s.dest.has_value() && !isVoid)
             storePlace(fs, *s.dest, call);
@@ -1010,7 +1010,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclarePrintf()
         return fn;
     llvm::FunctionType *fty = llvm::FunctionType::get(
         llvm::Type::getInt32Ty(ctx_),
-        { llvm::PointerType::getUnqual(ctx_) }, // const char* fmt
+        {llvm::PointerType::getUnqual(ctx_)}, // const char* fmt
         /*isVarArg=*/true);
     return llvm::Function::Create(fty,
         llvm::GlobalValue::ExternalLinkage,
@@ -1018,11 +1018,11 @@ llvm::Function *LLVMIRBuilder::getOrDeclarePrintf()
         context->module.get());
 }
 
-void LLVMIRBuilder::emitPrintCall(FunctionState &fs, const MIRStmtCall &s,
-    const std::vector<llvm::Value *> &args)
+void LLVMIRBuilder::emitPrintCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
 {
     llvm::Function *printf = getOrDeclarePrintf();
-    auto format = [&](const char *fmt) {
+    auto format = [&](const char *fmt)
+    {
         return builder_->CreateGlobalStringPtr(fmt, ".fmt");
     };
 
@@ -1080,8 +1080,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFgets()
     return getOrDeclareLibcFunction("fgets",
         llvm::FunctionType::get(
             llvm::PointerType::getUnqual(ctx_), // returns char*
-            { llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt32Ty(ctx_),
-              llvm::PointerType::getUnqual(ctx_) },
+            {llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt32Ty(ctx_), llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1091,7 +1090,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareStrCspn()
     return getOrDeclareLibcFunction("strcspn",
         llvm::FunctionType::get(
             llvm::Type::getInt64Ty(ctx_),
-            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1101,7 +1100,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareAtoi()
     return getOrDeclareLibcFunction("atoi",
         llvm::FunctionType::get(
             llvm::Type::getInt32Ty(ctx_),
-            { llvm::PointerType::getUnqual(ctx_) },
+            {llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1111,7 +1110,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareStrtod()
     return getOrDeclareLibcFunction("strtod",
         llvm::FunctionType::get(
             llvm::Type::getDoubleTy(ctx_),
-            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1122,10 +1121,12 @@ llvm::Function *LLVMIRBuilder::getOrDeclareAcrtIobFunc()
     // FILE* __acrt_iob_func(unsigned int fd)  [MinGW UCRT's stdin macro]
     llvm::FunctionType *fty = llvm::FunctionType::get(
         llvm::PointerType::getUnqual(ctx_),
-        { llvm::Type::getInt32Ty(ctx_) },
+        {llvm::Type::getInt32Ty(ctx_)},
         /*isVarArg=*/false);
     return llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage, "__acrt_iob_func", context->module.get());
+        llvm::GlobalValue::ExternalLinkage,
+        "__acrt_iob_func",
+        context->module.get());
 }
 
 llvm::GlobalVariable *LLVMIRBuilder::getOrDeclareStdin()
@@ -1135,8 +1136,11 @@ llvm::GlobalVariable *LLVMIRBuilder::getOrDeclareStdin()
     // FILE* stdin — an external global holding a FILE* (glibc & friends; NOT
     // MinGW, where stdin is a macro → see getOrDeclareAcrtIobFunc).
     return new llvm::GlobalVariable(*context->module,
-        llvm::PointerType::getUnqual(ctx_), /*isConstant=*/false,
-        llvm::GlobalValue::ExternalLinkage, nullptr, "stdin");
+        llvm::PointerType::getUnqual(ctx_),
+        /*isConstant=*/false,
+        llvm::GlobalValue::ExternalLinkage,
+        nullptr,
+        "stdin");
 }
 
 llvm::GlobalVariable *LLVMIRBuilder::getOrCreateInputBuf()
@@ -1144,13 +1148,10 @@ llvm::GlobalVariable *LLVMIRBuilder::getOrCreateInputBuf()
     if (auto *g = context->module->getNamedGlobal("__lis_input_buf"))
         return g;
     auto *arrTy = llvm::ArrayType::get(llvm::Type::getInt8Ty(ctx_), 256);
-    return new llvm::GlobalVariable(*context->module, arrTy, /*isConstant=*/false,
-        llvm::GlobalValue::PrivateLinkage,
-        llvm::Constant::getNullValue(arrTy), "__lis_input_buf");
+    return new llvm::GlobalVariable(*context->module, arrTy, /*isConstant=*/false, llvm::GlobalValue::PrivateLinkage, llvm::Constant::getNullValue(arrTy), "__lis_input_buf");
 }
 
-void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s,
-    const std::vector<llvm::Value *> &args)
+void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
 {
     llvm::GlobalVariable *buf = getOrCreateInputBuf();
     llvm::Value *bufPtr = buf; // globals are pointer values
@@ -1161,22 +1162,22 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s,
     llvm::Value *stdinVal;
 #ifdef _WIN32
     stdinVal = builder_->CreateCall(getOrDeclareAcrtIobFunc()->getFunctionType(),
-        getOrDeclareAcrtIobFunc(), { llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0) });
+        getOrDeclareAcrtIobFunc(),
+        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
 #else
     llvm::GlobalVariable *stdinGlob = getOrDeclareStdin();
     stdinVal = builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), stdinGlob);
 #endif
 
     // fgets(buf, 256, stdin)
-    builder_->CreateCall(fgets->getFunctionType(), fgets,
-        { bufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 256), stdinVal });
+    builder_->CreateCall(fgets->getFunctionType(), fgets, {bufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 256), stdinVal});
 
     if (s.funcName == "read_line")
     {
         // Strip trailing \r\n: idx = strcspn(buf, "\r\n"); buf[idx] = 0.
         llvm::Function *strcspn = getOrDeclareStrCspn();
         llvm::Value *reject = builder_->CreateGlobalStringPtr("\r\n", ".rstr");
-        llvm::Value *idx = builder_->CreateCall(strcspn->getFunctionType(), strcspn, { bufPtr, reject });
+        llvm::Value *idx = builder_->CreateCall(strcspn->getFunctionType(), strcspn, {bufPtr, reject});
         llvm::Value *end = builder_->CreateInBoundsGEP(llvm::Type::getInt8Ty(ctx_), bufPtr, idx);
         builder_->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), 0), end);
         if (s.dest.has_value())
@@ -1185,7 +1186,7 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s,
     else if (s.funcName == "read_int")
     {
         llvm::Function *atoi = getOrDeclareAtoi();
-        llvm::Value *val = builder_->CreateCall(atoi->getFunctionType(), atoi, { bufPtr });
+        llvm::Value *val = builder_->CreateCall(atoi->getFunctionType(), atoi, {bufPtr});
         if (s.dest.has_value())
             storePlace(fs, *s.dest, val);
     }
@@ -1193,7 +1194,7 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s,
     {
         llvm::Function *strtod = getOrDeclareStrtod();
         llvm::Value *endptr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_));
-        llvm::Value *val = builder_->CreateCall(strtod->getFunctionType(), strtod, { bufPtr, endptr });
+        llvm::Value *val = builder_->CreateCall(strtod->getFunctionType(), strtod, {bufPtr, endptr});
         if (s.dest.has_value())
             storePlace(fs, *s.dest, val);
     }
@@ -1211,7 +1212,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareMalloc()
     // void* malloc(size_t n)  (n passed as i32, widened at the call site)
     return getOrDeclareLibcFunction("malloc",
         llvm::FunctionType::get(
-            llvm::PointerType::getUnqual(ctx_), { llvm::Type::getInt64Ty(ctx_) },
+            llvm::PointerType::getUnqual(ctx_), {llvm::Type::getInt64Ty(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1220,7 +1221,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFree()
     // void free(void* ptr)
     return getOrDeclareLibcFunction("free",
         llvm::FunctionType::get(
-            llvm::Type::getVoidTy(ctx_), { llvm::PointerType::getUnqual(ctx_) },
+            llvm::Type::getVoidTy(ctx_), {llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1230,8 +1231,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareMemcpy()
     return getOrDeclareLibcFunction("memcpy",
         llvm::FunctionType::get(
             llvm::PointerType::getUnqual(ctx_),
-            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_),
-              llvm::Type::getInt64Ty(ctx_) },
+            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt64Ty(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1240,39 +1240,37 @@ llvm::Function *LLVMIRBuilder::getOrDeclareStrlen()
     // size_t strlen(const char* s)
     return getOrDeclareLibcFunction("strlen",
         llvm::FunctionType::get(
-            llvm::Type::getInt64Ty(ctx_), { llvm::PointerType::getUnqual(ctx_) },
+            llvm::Type::getInt64Ty(ctx_), {llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
-void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s,
-    const std::vector<llvm::Value *> &args)
+void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
 {
     if (s.funcName == "__alloc")
     {
         llvm::Function *mallocFn = getOrDeclareMalloc();
         llvm::Value *size = builder_->CreateSExt(args[0], llvm::Type::getInt64Ty(ctx_));
-        llvm::Value *ptr = builder_->CreateCall(mallocFn->getFunctionType(), mallocFn, { size });
+        llvm::Value *ptr = builder_->CreateCall(mallocFn->getFunctionType(), mallocFn, {size});
         if (s.dest.has_value())
             storePlace(fs, *s.dest, ptr);
     }
     else if (s.funcName == "__free")
     {
         llvm::Function *freeFn = getOrDeclareFree();
-        builder_->CreateCall(freeFn->getFunctionType(), freeFn, { args[0] });
+        builder_->CreateCall(freeFn->getFunctionType(), freeFn, {args[0]});
     }
     else if (s.funcName == "__memcpy")
     {
         llvm::Function *memcpyFn = getOrDeclareMemcpy();
         llvm::Value *n = builder_->CreateSExt(args[2], llvm::Type::getInt64Ty(ctx_));
-        llvm::Value *res = builder_->CreateCall(memcpyFn->getFunctionType(), memcpyFn,
-            { args[0], args[1], n });
+        llvm::Value *res = builder_->CreateCall(memcpyFn->getFunctionType(), memcpyFn, {args[0], args[1], n});
         if (s.dest.has_value())
             storePlace(fs, *s.dest, res);
     }
     else if (s.funcName == "__strlen")
     {
         llvm::Function *strlenFn = getOrDeclareStrlen();
-        llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, { args[0] });
+        llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, {args[0]});
         llvm::Value *len32 = builder_->CreateTrunc(len, llvm::Type::getInt32Ty(ctx_));
         if (s.dest.has_value())
             storePlace(fs, *s.dest, len32);
@@ -1292,7 +1290,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareSprintf()
     return getOrDeclareLibcFunction("sprintf",
         llvm::FunctionType::get(
             llvm::Type::getInt32Ty(ctx_),
-            { llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_) },
+            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/true));
 }
 
@@ -1303,7 +1301,8 @@ llvm::Function *LLVMIRBuilder::getOrDeclareAbort()
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareLibcFunction(
-    const std::string &name, llvm::FunctionType *fty)
+    const std::string &name,
+    llvm::FunctionType *fty)
 {
     if (auto *fn = context->module->getFunction(name))
     {
@@ -1317,41 +1316,57 @@ llvm::Function *LLVMIRBuilder::getOrDeclareLibcFunction(
         return fn;
     }
     return llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage, name, context->module.get());
+        llvm::GlobalValue::ExternalLinkage,
+        name,
+        context->module.get());
 }
 
-void LLVMIRBuilder::emitToStringCall(FunctionState &fs, const MIRStmtCall &s,
-    const std::vector<llvm::Value *> &args)
+void LLVMIRBuilder::emitToStringCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
 {
     // Allocate a fixed TO_STRING_BUF_CAP-byte scratch buffer for the formatted
     // digits (see the constant in LLVMIRBuilder.hpp: a large double like 1e100
     // overflows a 64-byte buffer).
     llvm::Function *mallocFn = getOrDeclareMalloc();
-    llvm::Value *buf = builder_->CreateCall(mallocFn->getFunctionType(), mallocFn,
-        { llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), TO_STRING_BUF_CAP) });
+    llvm::Value *buf = builder_->CreateCall(mallocFn->getFunctionType(), mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), TO_STRING_BUF_CAP)});
 
     llvm::Function *sprintfFn = getOrDeclareSprintf();
     llvm::Function *strlenFn = getOrDeclareStrlen();
 
     const char *fmt = "%d";
     std::vector<llvm::Value *> callArgs;
-    if (s.funcName == "to_string_i32") { fmt = "%d"; callArgs = args; }
-    else if (s.funcName == "to_string_i64") { fmt = "%lld"; callArgs = args; }
-    else if (s.funcName == "to_string_f64") { fmt = "%f"; callArgs = args; }
+    if (s.funcName == "to_string_i32")
+    {
+        fmt = "%d";
+        callArgs = args;
+    }
+    else if (s.funcName == "to_string_i64")
+    {
+        fmt = "%lld";
+        callArgs = args;
+    }
+    else if (s.funcName == "to_string_f64")
+    {
+        fmt = "%f";
+        callArgs = args;
+    }
     else if (s.funcName == "to_string_bool")
     {
         fmt = "%d";
         if (!args.empty())
             callArgs.push_back(builder_->CreateZExt(args[0], builder_->getInt32Ty()));
     }
-    else if (s.funcName == "to_string_char") { fmt = "%c"; callArgs = args; }
+    else if (s.funcName == "to_string_char")
+    {
+        fmt = "%c";
+        callArgs = args;
+    }
 
     llvm::Value *fmtPtr = builder_->CreateGlobalStringPtr(fmt, ".fmt");
     std::vector<llvm::Value *> sprintfArgs{buf, fmtPtr};
     sprintfArgs.insert(sprintfArgs.end(), callArgs.begin(), callArgs.end());
     builder_->CreateCall(sprintfFn->getFunctionType(), sprintfFn, sprintfArgs);
 
-    llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, { buf });
+    llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, {buf});
     llvm::Value *len32 = builder_->CreateTrunc(len, llvm::Type::getInt32Ty(ctx_));
 
     // Build the String struct { data, len, cap } and store it into the dest.
@@ -1377,11 +1392,11 @@ void LLVMIRBuilder::emitToStringCall(FunctionState &fs, const MIRStmtCall &s,
         }
         llvm::StructType *st = sit->second;
         llvm::Value *agg = llvm::UndefValue::get(st);
-        agg = builder_->CreateInsertValue(agg, buf, { fit->second["data"] });
-        agg = builder_->CreateInsertValue(agg, len32, { fit->second["len"] });
+        agg = builder_->CreateInsertValue(agg, buf, {fit->second["data"]});
+        agg = builder_->CreateInsertValue(agg, len32, {fit->second["len"]});
         agg = builder_->CreateInsertValue(agg,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), TO_STRING_BUF_CAP),
-            { fit->second["cap"] });
+            {fit->second["cap"]});
         storePlace(fs, *s.dest, agg);
     }
 }
