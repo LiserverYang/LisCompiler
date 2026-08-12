@@ -522,6 +522,10 @@ Token Lexer::lexOperatorOrDelimiter()
         {
             token.code = TokenCode::AND;
         }
+        else if (twoChars == "#[")
+        {
+            token.code = TokenCode::ATTRIBUTE_START;
+        }
         else
             goto single_char; // not multi-character operator
 

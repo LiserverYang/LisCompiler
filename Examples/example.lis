@@ -76,9 +76,11 @@ fn main() -> i32
 
     y.add(x, 2);
 
-    // i64 -> i32 error: high-to-low type translating
-    // but you can use #[i_know = "high-to-low type translating can cause data overflow and other undefined behaviors"] before the statement
-    // to avoid compiler error(still have warning)
+    // i64 -> i32 is an ERROR: high-to-low type translating (data may truncate).
+    // #[i_know = "message"] before the statement turns the error into a warning.
+    let big: i64 = 2147483647 as i64;
+    #[i_know = "high-to-low type translating can cause data overflow and other undefined behaviors"]
+    let truncated: i32 = big as i32;
 
     // y is used (borrowed by &mut self) BEFORE it is moved below.
     {

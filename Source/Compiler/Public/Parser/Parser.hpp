@@ -54,6 +54,16 @@ protected:
      *  iterables). */
     bool inControlFlowCondition_ = false;
 
+    /** Set while parsing `#[i_know = "..."]`; applied to the next statement
+     *  (marks every CastExpr in its expression tree, relaxing the
+     *  integer-narrowing ERROR to a warning). */
+    bool pendingIKnow_ = false;
+
+    /** Consume a `#[...]` attribute; currently only `#[i_know]` is defined. */
+    void parseAttribute();
+    /** Mark every CastExpr in *expr* (and its children) with iKnow. */
+    void applyIKnow(Expr *expr);
+
     std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char", "void"};
     std::unordered_set<std::string> knownTraits = {};
     // Enum type names live on the shared context (see Context::knownEnums) so a

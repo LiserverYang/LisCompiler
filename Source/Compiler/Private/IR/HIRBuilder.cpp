@@ -1099,6 +1099,7 @@ void HIRBuilder::visit(CastExpr *node)
     result->position = node->position;
     result->length = node->length;
     result->rawTargetType = toRaw(node->targetType.get());
+    result->iKnow = node->iKnow; // #[i_know] statement attribute
 
     node->expression->accept(this);
     result->expr.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));

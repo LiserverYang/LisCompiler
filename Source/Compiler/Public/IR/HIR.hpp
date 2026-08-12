@@ -200,6 +200,9 @@ public:
     std::unique_ptr<HIRExpr> expr;
     HIRRawType rawTargetType;         // set by HIRBuilder
     std::shared_ptr<Type> targetType; // filled by HIRSemanticAnalyzer
+    // 2026-08-12: set by the `#[i_know]` statement attribute — relaxes the
+    // integer-narrowing cast ERROR to a warning.
+    bool iKnow = false;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);

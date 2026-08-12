@@ -1152,3 +1152,39 @@ TEST_F(RuntimeTest, StringPushCharGrowsAtCap)
               " ret s.len; }",
         16);
 }
+
+// ── 2026-08-12 spec decisions ────────────────────────────────────────────
+// 1. Default parameter values (`a: i32 = 5`) were dead syntax (parsed then
+//    ignored by every later pass) — removed; must now be a parse error.
+TEST_F(RuntimeTest, DefaultParameterValuesRejected)
+{
+    expectCompileFail("fn f(a: i32 = 5) -> i32 { ret a; } fn main() -> i32 { ret f(1); }",
+        "default parameter values are not supported");
+}
+
+// 2. #[i_know] statement attribute: relaxes the integer-narrowing cast ERROR
+//    to a warning (data may still truncate — the user takes responsibility).
+TEST_F(RuntimeTest, IKnowAttributeAllowsNarrowingCast)
+{
+    expectRun("fn main() -> i32 { let big: i64 = 1 as i64;"
+              " #[i_know = \"i know what I'm doing\"] let t: i32 = big as i32;"
+              " ret t; }",
+        1);
+}
+
+// Same, but the attribute in front of an ASSIGNMENT statement.
+TEST_F(RuntimeTest, IKnowAttributeOnAssignment)
+{
+    expectRun("fn main() -> i32 { let big: i64 = 5 as i64; let mut t: i32 = 0;"
+              " #[i_know] t = big as i32;"
+              " ret t; }",
+        5);
+}
+
+// Without #[i_know], i64 -> i32 narrowing stays a hard error (regression).
+TEST_F(RuntimeTest, NarrowingCastWithoutIKnowRejected)
+{
+    expectCompileFail("fn main() -> i32 { let big: i64 = 1 as i64;"
+                      " let t: i32 = big as i32; ret t; }",
+        "cannot cast integer to a smaller integer type");
+}

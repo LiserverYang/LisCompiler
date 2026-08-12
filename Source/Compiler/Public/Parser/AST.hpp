@@ -196,7 +196,6 @@ class Param : public ASTNode
 public:
     std::string name;
     std::optional<std::unique_ptr<TypeNode>> type;
-    std::optional<std::unique_ptr<Expr>> defaultValue;
     std::shared_ptr<Type> semanticType;
 
     void accept(ASTVisitor *visitor) override
@@ -615,6 +614,9 @@ class CastExpr : public Expr
 public:
     std::unique_ptr<TypeNode> targetType;
     std::unique_ptr<Expr> expression;
+    // 2026-08-12: set by `#[i_know = "..."]` (statement attribute). A marked
+    // cast bypasses the integer-narrowing ERROR (still emits a warning).
+    bool iKnow = false;
 
     void accept(ASTVisitor *visitor) override
     {

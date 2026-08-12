@@ -100,6 +100,7 @@ enum class TokenCode
     REFERENCE,    // &
     LBRACKET,     // "["
     RBRACKET,     // "]"
+    ATTRIBUTE_START, // "#[" (attributes, e.g. #[i_know = "..."])
 };
 
 // The length of all keywords

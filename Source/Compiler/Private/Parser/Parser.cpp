@@ -625,9 +625,13 @@ std::unique_ptr<Param> Parser::parseParameter()
 
     param->type = parseType();
 
+    // 2026-08-12 (spec decision): default parameter values (`a: i32 = 5`) were
+    // parsed then silently IGNORED by every later pass — dead syntax. Removed:
+    // a trailing `= expr` is now a clean parse error instead.
     if (match(TokenCode::ASSIGN))
     {
-        param->defaultValue = parseExpression();
+        logError(currentToken(), "default parameter values are not supported", E_ExpectType);
+        synchronize();
     }
 
     return param;
@@ -664,8 +668,124 @@ std::unique_ptr<CompoundStmt> Parser::parseCompoundStatement()
     return block;
 }
 
+void Parser::parseAttribute()
+{
+    consume(TokenCode::ATTRIBUTE_START, "expected '#['", E_ExpectALBRACE);
+
+    // Only `#[i_know = "..."]` is defined (2026-08-12 spec decision): it
+    // relaxes integer-narrowing cast errors on the next statement to warnings.
+    if (check(TokenCode::IDENTIFIER) && currentToken().value == "i_know")
+    {
+        advance();
+        pendingIKnow_ = true;
+        if (match(TokenCode::ASSIGN))
+        {
+            if (!check(TokenCode::STRING_LITERAL))
+            {
+                logError(currentToken(), "expected a string message in #[i_know = \"...\"]", E_ExpectedExpression);
+            }
+            else
+            {
+                advance(); // message content is informational only
+            }
+        }
+    }
+    else
+    {
+        logError(currentToken(), "unknown attribute; only #[i_know] is supported", E_UndefinedIdentifier);
+    }
+
+    consume(TokenCode::RBRACKET, "expected ']' to close attribute", E_ExpectARBRACE);
+}
+
+void Parser::applyIKnow(Expr *expr)
+{
+    if (!expr)
+        return;
+
+    if (auto cast = dynamic_cast<CastExpr *>(expr))
+    {
+        cast->iKnow = true;
+        applyIKnow(cast->expression.get());
+        return;
+    }
+    if (auto bin = dynamic_cast<BinaryOp *>(expr))
+    {
+        applyIKnow(bin->left.get());
+        applyIKnow(bin->right.get());
+        return;
+    }
+    if (auto paren = dynamic_cast<ParenExpr *>(expr))
+    {
+        applyIKnow(paren->expression.get());
+        return;
+    }
+    if (auto call = dynamic_cast<FunctionCall *>(expr))
+    {
+        applyIKnow(call->function.get());
+        for (auto &arg : call->arguments)
+            applyIKnow(arg.get());
+        return;
+    }
+    if (auto method = dynamic_cast<MemberFunctionCall *>(expr))
+    {
+        applyIKnow(method->object.get());
+        for (auto &arg : method->arguments)
+            applyIKnow(arg.get());
+        return;
+    }
+    if (auto access = dynamic_cast<MemberAccess *>(expr))
+    {
+        applyIKnow(access->object.get());
+        return;
+    }
+    if (auto index = dynamic_cast<IndexAccess *>(expr))
+    {
+        applyIKnow(index->object.get());
+        applyIKnow(index->index.get());
+        return;
+    }
+    if (auto init = dynamic_cast<StructInitExpr *>(expr))
+    {
+        for (auto &field : init->memberInits)
+            applyIKnow(field.second.get());
+        return;
+    }
+    if (auto arr = dynamic_cast<ArrayLiteral *>(expr))
+    {
+        for (auto &elem : arr->elements)
+            applyIKnow(elem.get());
+        return;
+    }
+    if (auto variant = dynamic_cast<VariantInitExpr *>(expr))
+    {
+        for (auto &arg : variant->arguments)
+            applyIKnow(arg.get());
+        return;
+    }
+}
+
 std::unique_ptr<Stmt> Parser::parseStatement()
 {
+    // Attributes (`#[i_know = "..."]`) attach to the FOLLOWING statement:
+    // parse the attribute, recurse for the statement, then mark its casts.
+    if (check(TokenCode::ATTRIBUTE_START))
+    {
+        parseAttribute();
+        auto stmt = parseStatement();
+        if (pendingIKnow_)
+        {
+            pendingIKnow_ = false;
+            if (auto exprStmt = dynamic_cast<ExprStmt *>(stmt.get()))
+                applyIKnow(exprStmt->expression.get());
+            else if (auto assign = dynamic_cast<AssignStmt *>(stmt.get()))
+                applyIKnow(assign->value.get());
+            else if (auto decl = dynamic_cast<DeclStmt *>(stmt.get()))
+                applyIKnow(decl->initValue ? decl->initValue->get() : nullptr);
+        }
+        return stmt;
+    }
+
     if (check(TokenCode::LBRACE))
     {
         return parseCompoundStatement();

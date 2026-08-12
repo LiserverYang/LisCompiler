@@ -3125,7 +3125,15 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
             if (tType->getPrimKind() == PrimitiveType::PrimKind::CHAR)
             {
                 if (rType->integerBitWidth() > 32)
-                    log(*node, "cannot cast integer to a smaller integer type.");
+                {
+                    // #[i_know] (2026-08-12): the statement attribute turns the
+                    // narrowing ERROR into a warning — the data may truncate.
+                    if (node->iKnow)
+                        log(*node, "high-to-low cast suppressed by #[i_know]; data may overflow.",
+                            E_SemanticError, Logger::LogLevel::WARNING);
+                    else
+                        log(*node, "cannot cast integer to a smaller integer type.");
+                }
                 break;
             }
             if (!tType->isFloat() && !tType->isInteger())
@@ -3139,7 +3147,15 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
             // enum entry would silently change which casts are considered
             // narrowing. integerBitWidth() states the widths explicitly.
             if (tType->isInteger() && rType->integerBitWidth() > tType->integerBitWidth())
-                log(*node, "cannot cast integer to a smaller integer type.");
+            {
+                // #[i_know] (2026-08-12): turns the narrowing ERROR into a
+                // warning (see the CHAR case above).
+                if (node->iKnow)
+                    log(*node, "high-to-low cast suppressed by #[i_know]; data may overflow.",
+                        E_SemanticError, Logger::LogLevel::WARNING);
+                else
+                    log(*node, "cannot cast integer to a smaller integer type.");
+            }
             break;
         }
         case PrimitiveType::PrimKind::F32:
