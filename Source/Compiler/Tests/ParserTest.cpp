@@ -901,3 +901,274 @@ TEST_F(ParserTest, StructInitHasMembers)
     ASSERT_NE(initStruct, nullptr);
     EXPECT_EQ(initStruct->memberInits.size(), 2);
 }
+
+// ── D2: more valid structures ──────────────────────────────────────────────────
+
+TEST_F(ParserTest, ValidStructWithReferenceField)
+{
+    parseSource("struct S { p: &i32 } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidArrayOfArraysType)
+{
+    parseSource("fn main() -> i32 { let a = [[1, 2], [3, 4]]; ret a[0][0]; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidReturnNoValue)
+{
+    parseSource("fn f() { ret; } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidBareReturnInVoid)
+{
+    parseSource("fn main() { ret; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidGenericTraitImpl)
+{
+    parseSource("trait T<T> { fn get(self: &Self) -> T; }"
+                " struct S { v: i32 } impl T<i32> for S { fn get(self: &S) -> i32 { ret self.v; } }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidCallGenericSyntax)
+{
+    parseSource("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 { ret id(5); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidDeepMemberChain)
+{
+    parseSource("struct A { x: i32 } struct B { a: A } fn main() -> i32 {"
+                " let b = B { a: A { x: 1 } }; ret b.a.x; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidConditionalBorrowExpression)
+{
+    parseSource("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 };"
+                " let r = &s; ret r.v; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidMutBorrowExpression)
+{
+    parseSource("struct S { v: i32 } fn main() -> i32 { let mut s = S { v: 1 };"
+                " let r = &mut s; r.v = 2; ret r.v; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidMultipleGlobalsAndFunctions)
+{
+    parseSource("let a = 1; let b = 2; fn f() -> i32 { ret a + b; }"
+                " fn main() -> i32 { ret f(); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidDerefViaIndex)
+{
+    parseSource("fn main() -> i32 { let a = [1, 2]; let r = &a; ret r[1]; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+// ── D2: more malformed structures ──────────────────────────────────────────────
+
+TEST_F(ParserTest, UnclosedEnumToleratedAtEof)
+{
+    // An unclosed enum auto-closes at EOF (like an unclosed struct) — no parse
+    // error; the sema is responsible for rejecting a half-defined enum.
+    parseSource("enum E { A ");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingStructName)
+{
+    parseSource("struct { a: i32 }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingEnumVariantName)
+{
+    parseSource("enum E { , B }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingFunctionReturnArrow)
+{
+    parseSource("fn f() i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingIfCondition
+)
+{
+    parseSource("fn main() -> i32 { if { ret 1; } ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingLoopVariable
+)
+{
+    parseSource("fn main() -> i32 { for in range(1, 5) { ret 0; } }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingInKeyword
+)
+{
+    parseSource("fn main() -> i32 { for x range(1, 5) { ret 0; } }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, StructSelfReferenceNoParseError
+)
+{
+    // A recursive struct field parses fine; the sema rejects it later.
+    parseSource("struct S { next: S } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, EnumIncompletePayload
+)
+{
+    parseSource("enum E { A(i32, ) }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MissingGlobalInit
+)
+{
+    parseSource("let g; fn main() -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, TwoTypesForParam
+)
+{
+    parseSource("fn f(x: i32 i32) -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, EmptyParensParam
+)
+{
+    parseSource("fn f(()) -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, TrailingCommaInArgs
+)
+{
+    parseSource("fn main() -> i32 { ret f(1, 2,); }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+// ── D2: more AST structure ─────────────────────────────────────────────────────
+
+TEST_F(ParserTest, EnumVariantPayloadCount)
+{
+    parseSource("enum E { A, B(i32), C(i32, i32, i32) }");
+    auto def = dynamic_cast<EnumDef *>(context->program.globalStatements[0].get());
+    ASSERT_NE(def, nullptr);
+    EXPECT_EQ(def->variants[0]->payloadTypes.size(), 0);
+    EXPECT_EQ(def->variants[1]->payloadTypes.size(), 1);
+    EXPECT_EQ(def->variants[2]->payloadTypes.size(), 3);
+}
+
+TEST_F(ParserTest, StructImplHasMethods
+)
+{
+    parseSource("struct S { v: i32 } impl S { fn a(self: &S) -> i32 { ret 0; }"
+                " fn b(self: &S) -> i32 { ret 0; } }");
+    auto impl = dynamic_cast<StructImpl *>(context->program.globalStatements[1].get());
+    ASSERT_NE(impl, nullptr);
+    EXPECT_EQ(impl->methods.size(), 2);
+}
+
+TEST_F(ParserTest, FunctionGenericParamsCount
+)
+{
+    parseSource("fn f<T, U>(a: T, b: U) -> T { ret a; }");
+    auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
+    ASSERT_NE(func, nullptr);
+    EXPECT_EQ(func->genericParams.size(), 2);
+}
+
+TEST_F(ParserTest, MatchArmBindingCount
+)
+{
+    parseSource("enum E { P(i32, i32) } fn main() -> i32 { let e = E::P(1, 2);"
+                " let y = match e { P(a, b) => a + b }; ret y; }");
+    auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[1].get());
+    auto body = dynamic_cast<CompoundStmt *>(func->body.get());
+    auto decl = dynamic_cast<DeclStmt *>(body->statements[1].get());
+    auto init = decl->initValue.value().get();
+    auto matchExpr = dynamic_cast<MatchExpr *>(init);
+    ASSERT_NE(matchExpr, nullptr);
+    EXPECT_EQ(matchExpr->arms[0]->pattern->bindings.size(), 2);
+}
+
+TEST_F(ParserTest, ArrayLiteralElementCount
+)
+{
+    parseSource("fn main() -> i32 { let a = [1, 2, 3, 4]; ret 0; }");
+    auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
+    auto body = dynamic_cast<CompoundStmt *>(func->body.get());
+    auto decl = dynamic_cast<DeclStmt *>(body->statements[0].get());
+    auto init = decl->initValue.value().get();
+    auto arr = dynamic_cast<ArrayLiteral *>(init);
+    ASSERT_NE(arr, nullptr);
+    EXPECT_EQ(arr->elements.size(), 4);
+}
+
+TEST_F(ParserTest, ReturnStatementHasValue
+)
+{
+    parseSource("fn main() -> i32 { ret 42; }");
+    auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
+    auto body = dynamic_cast<CompoundStmt *>(func->body.get());
+    auto ret = dynamic_cast<ReturnStmt *>(body->statements[0].get());
+    ASSERT_NE(ret, nullptr);
+    EXPECT_TRUE(ret->returnValue.has_value());
+}
+
+TEST_F(ParserTest, ReturnStatementNoValue
+)
+{
+    parseSource("fn main() { ret; }");
+    auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
+    auto body = dynamic_cast<CompoundStmt *>(func->body.get());
+    auto ret = dynamic_cast<ReturnStmt *>(body->statements[0].get());
+    ASSERT_NE(ret, nullptr);
+    EXPECT_FALSE(ret->returnValue.has_value());
+}
+
+TEST_F(ParserTest, AssignStatementTarget
+)
+{
+    parseSource("fn main() -> i32 { x = 5; ret 0; }");
+    auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
+    auto body = dynamic_cast<CompoundStmt *>(func->body.get());
+    auto assign = dynamic_cast<AssignStmt *>(body->statements[0].get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_NE(assign->target, nullptr);
+    EXPECT_NE(assign->value, nullptr);
+}
+
+TEST_F(ParserTest, BreakContinueInLoopsParse
+)
+{
+    parseSource("fn main() -> i32 { while true { break; continue; } ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, NestedStructLiteralInInit
+)
+{
+    parseSource("struct A { x: i32 } fn main() -> i32 { let a = A { x: A { x: 1 }.x }; ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
