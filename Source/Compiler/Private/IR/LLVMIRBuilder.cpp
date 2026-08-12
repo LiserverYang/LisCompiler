@@ -686,7 +686,16 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
                 unsigned srcBits  = src->getIntegerBitWidth();
                 unsigned destBits = dest->getIntegerBitWidth();
                 if (destBits > srcBits)
-                    return builder_->CreateSExt(val, dest);   // sign-extend
+                {
+                    // A 1-bit source is a bool — zero-extend: bool is unsigned,
+                    // and sign-extending an i1 `true` yields -1 (all bits set),
+                    // not 1. Other integer widths are signed and sign-extend.
+                    // (`print_bool`/`to_string_bool` already ZExt for the same
+                    // reason; the language has no other 1-bit integer type, so
+                    // srcBits == 1 ⟺ bool.)
+                    return srcBits == 1 ? builder_->CreateZExt(val, dest)
+                                        : builder_->CreateSExt(val, dest);
+                }
                 if (destBits < srcBits)
                     return builder_->CreateTrunc(val, dest);
                 return val; // same width, no-op

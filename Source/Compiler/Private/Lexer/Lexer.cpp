@@ -165,8 +165,13 @@ void Lexer::skipBlockComment()
     }
 
     // Reached EOF without a closing "*/" — report it instead of failing silently.
-    Logger::Log(Logger::LogLevel::ERROR,
-        {&source, context->filePath, "Unclosed block comment", line, column - 1, 1, lineStart, E_UnclosedBlockComment});
+    // P17: recoverable (exit=false) — see the unknown-char site for why.
+    {
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed block comment",
+                                line, column - 1, 1, lineStart, E_UnclosedBlockComment};
+        info.exit = false;
+        Logger::Log(Logger::LogLevel::ERROR, info);
+    }
 }
 
 // tokenizes string literals ("...")
@@ -241,8 +246,14 @@ Token Lexer::lexStringLiteral()
         index++;
     }
 
-    // handle unclosed string error
-    Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed string literal", line, column - 1, 1, lineStart, E_UnClosedStringLiteral});
+    // handle unclosed string error (P17: recoverable, exit=false — see the
+    // unknown-char site for why an exit=true lexer error kills Debug builds).
+    {
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed string literal",
+                                line, column - 1, 1, lineStart, E_UnClosedStringLiteral};
+        info.exit = false;
+        Logger::Log(Logger::LogLevel::ERROR, info);
+    }
 
     return token; // return partial token on error
 }
@@ -317,10 +328,14 @@ Token Lexer::lexCharLiteral()
     index++;
     column++;
 
-    // verify closing quote exists
+    // verify closing quote exists (P17: recoverable, exit=false — see the
+    // unknown-char site for why an exit=true lexer error kills Debug builds).
     if (index >= source.size() || source[index] != '\'')
     {
-        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral});
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed char literal",
+                                line, column - 1, 1, lineStart, E_UnclosedCharLiteral};
+        info.exit = false;
+        Logger::Log(Logger::LogLevel::ERROR, info);
     }
 
     // skip closing quote
@@ -562,7 +577,19 @@ single_char:
     case '[': token.code = TokenCode::LBRACKET; break;
     case ']': token.code = TokenCode::RBRACKET; break;
     default: // unknown character
-        Logger::Log(Logger::LogLevel::ERROR, {&source, context->filePath, "Unknown character '" + std::string(1, current) + "'", line, column, 1, lineStart, E_UnknownCharacter});
+        // P17: a lexer error must be RECOVERABLE (exit=false), not exit=true.
+        // LogInfo::exit defaults to true, and in Debug builds an exit=true error
+        // hits DEBUG_POINT() (int 3) and KILLS the process — so any source with
+        // an unknown character (`@`, `$`, ...) crashed the compiler instead of
+        // surfacing the error and letting the Parser gate stop the build. Same
+        // rule as the P1/P10 lexer-error fixes: report and continue lexing.
+        {
+            Logger::LogInfo info = {&source, context->filePath,
+                "Unknown character '" + std::string(1, current) + "'",
+                line, column, 1, lineStart, E_UnknownCharacter};
+            info.exit = false;
+            Logger::Log(Logger::LogLevel::ERROR, info);
+        }
     }
 
     token.value = std::string(1, current);

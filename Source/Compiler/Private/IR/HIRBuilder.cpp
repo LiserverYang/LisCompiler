@@ -371,16 +371,33 @@ void HIRBuilder::visit(IfStmt *node)
     result->cond.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
     nodeStack.pop();
 
+    // A branch may be a BARE statement rather than a block: `if a if b {...}`
+    // (then is an IfStmt) and `else if ...` (else is an IfStmt) both reach here
+    // with a non-HIRBlock on the stack. The old code did a blind
+    // dynamic_cast<HIRBlock*>, producing a null block, and MIRBuilder's
+    // buildBlock(nullptr) SEGFAULTED on the else-if chain. Wrap any non-block
+    // branch in a synthetic block (a bare-if branch IS "a block containing that
+    // one statement"), so thenBlock/elseBlock are always real blocks.
+    auto asBranchBlock = [&](Stmt *branchNode) -> std::unique_ptr<HIRBlock>
+    {
+        HIRNode *top = nodeStack.top().release();
+        nodeStack.pop();
+        if (auto *blk = dynamic_cast<HIRBlock *>(top))
+            return std::unique_ptr<HIRBlock>(blk);
+        auto blk = std::make_unique<HIRBlock>();
+        blk->position = branchNode->position;
+        blk->length = branchNode->length;
+        blk->stmts.emplace_back(static_cast<HIRStmt *>(top));
+        return blk;
+    };
+
     node->thenBranch->accept(this);
-    result->thenBlock.reset(dynamic_cast<HIRBlock *>(nodeStack.top().release()));
-    nodeStack.pop();
+    result->thenBlock = asBranchBlock(node->thenBranch.get());
 
     if (node->elseBranch.has_value())
     {
         node->elseBranch.value()->accept(this);
-        result->elseBlock = std::unique_ptr<HIRBlock>(
-            dynamic_cast<HIRBlock *>(nodeStack.top().release()));
-        nodeStack.pop();
+        result->elseBlock = asBranchBlock(node->elseBranch.value().get());
     }
 
     nodeStack.push(std::move(result));
