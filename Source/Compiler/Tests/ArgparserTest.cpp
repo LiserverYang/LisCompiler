@@ -228,3 +228,125 @@ TEST_F(ArgparserTest, HandlesMultipleNamesForRule)
 
     parser.release();
 }
+
+// ── G: argparser expansion ─────────────────────────────────────────────────────
+
+TEST_F(ArgparserTest, DefaultValueUsedWhenFlagAbsent)
+{
+    ArgParseRule verboseRule = createBoolRule("--verbose", setAsTrue);
+
+    std::vector<const char *> argv{"app"};
+    auto parser = createParser(argv, true, {verboseRule});
+    parser->run();
+
+    EXPECT_EQ(args->getArg("verbose"), "false") << "absent flag keeps its default";
+
+    parser.release();
+}
+
+TEST_F(ArgparserTest, ValueRuleWithDefault)
+{
+    ArgParseRule outRule = createValueRule("--out", "default.o");
+
+    std::vector<const char *> argv{"app"};
+    auto parser = createParser(argv, true, {outRule});
+    parser->run();
+
+    EXPECT_EQ(args->getArg("out"), "default.o");
+
+    parser.release();
+}
+
+TEST_F(ArgparserTest, ValueRuleOverridesDefault)
+{
+    ArgParseRule outRule = createValueRule("--out", "default.o");
+
+    std::vector<const char *> argv{"app", "--out", "custom.o"};
+    auto parser = createParser(argv, true, {outRule});
+    parser->run();
+
+    EXPECT_EQ(args->getArg("out"), "custom.o");
+
+    parser.release();
+}
+
+TEST_F(ArgparserTest, RepeatedFlagLastWins)
+{
+    ArgParseRule modeRule = createValueRule("--mode");
+
+    std::vector<const char *> argv{"app", "--mode", "a", "--mode", "b"};
+    auto parser = createParser(argv, true, {modeRule});
+    parser->run();
+
+    EXPECT_EQ(args->getArg("mode"), "b") << "last occurrence wins";
+
+    parser.release();
+}
+
+TEST_F(ArgparserTest, BoolAndValueFlagsMixed)
+{
+    ArgParseRule verboseRule = createBoolRule("--verbose", setAsTrue);
+    ArgParseRule levelRule = createValueRule("--level");
+
+    std::vector<const char *> argv{"app", "--verbose", "--level", "3"};
+    auto parser = createParser(argv, true, {verboseRule, levelRule});
+    parser->run();
+
+    EXPECT_EQ(args->getArg("verbose"), "true");
+    EXPECT_EQ(args->getArg("level"), "3");
+
+    parser.release();
+}
+
+TEST_F(ArgparserTest, EmptyArgvWithNoRules)
+{
+    std::vector<const char *> argv{"app"};
+    auto parser = createParser(argv, true);
+    parser->run(); // must not throw
+    parser.release();
+}
+
+TEST_F(ArgparserTest, PositionalRuleAcceptsValue)
+{
+    ArgParseRule posRule = createPositionalRule("file");
+
+    std::vector<const char *> argv{"app", "input.lis"};
+    auto parser = createParser(argv, true, {posRule});
+    parser->run();
+
+    EXPECT_EQ(args->getArg("file"), "input.lis");
+
+    parser.release();
+}
+
+TEST_F(ArgparserTest, MissingValueForValueRuleThrows)
+{
+    ArgParseRule outRule = createValueRule("--out");
+
+    std::vector<const char *> argv{"app", "--out"};
+    auto parser = createParser(argv, true, {outRule});
+    EXPECT_THROW(parser->run(), std::runtime_error);
+    parser.release();
+}
+
+TEST_F(ArgparserTest, UnknownFlagAmongValidThrows)
+{
+    ArgParseRule verboseRule = createBoolRule("--verbose", setAsTrue);
+
+    std::vector<const char *> argv{"app", "--verbose", "--nope"};
+    auto parser = createParser(argv, true, {verboseRule});
+    EXPECT_THROW(parser->run(), std::runtime_error);
+    parser.release();
+}
+
+TEST_F(ArgparserTest, SetAsTrueExplicitValueRejected)
+{
+    ArgParseRule verboseRule = createBoolRule("--verbose", setAsTrue);
+
+    std::vector<const char *> argv{"app", "--verbose", "extra"};
+    auto parser = createParser(argv, true, {verboseRule});
+    // A setAsTrue flag does not consume the next token — "extra" has no
+    // positional rule, so the parser rejects it as an unexpected argument.
+    EXPECT_THROW(parser->run(), std::runtime_error);
+    parser.release();
+}

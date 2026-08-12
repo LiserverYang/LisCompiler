@@ -283,6 +283,19 @@ protected:
             if (c != '\r') normalized += c;
         EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n" << source;
     }
+
+    /// Compile, link and run `Examples/<name>.lis` (located via the exe path),
+    /// asserting the baseline exit code. Guards the canonical examples against
+    /// silent rot.
+    void expectExample(const std::string &name, int expectedExit)
+    {
+        fs::path root = stdLibDir.parent_path().parent_path().parent_path(); // .../Build/Binaries/lstdlib → repo root
+        fs::path ex = root / "Examples" / (name + ".lis");
+        std::ifstream f(ex);
+        ASSERT_TRUE(f.good()) << "cannot open " << ex;
+        std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        expectRun(src, expectedExit);
+    }
 };
 
 // ── basic codegen ──────────────────────────────────────────────────────────────
@@ -2062,4 +2075,557 @@ TEST_F(RuntimeTest, OpOverloadOnGeneric)
     expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
               " fn main() -> i32 { let r = sum(V { x: 2 }, V { x: 5 }); ret r.x; }", 7);
+}
+
+// ── E: option.lis ──────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, OptionIsSomeOnSome)
+{
+    expectRun("fn main() -> i32 { let o = Option::Some(7); if is_some(o) { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, OptionIsSomeOnNone)
+{
+    // `Option::None` standalone can't infer T — pin it via a return-type helper.
+    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
+              " fn main() -> i32 { let o = none_i(); if is_some(o) { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, OptionIsNoneOnNone)
+{
+    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
+              " fn main() -> i32 { let o = none_i(); if is_none(o) { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, OptionIsNoneOnSome)
+{
+    expectRun("fn main() -> i32 { let o = Option::Some(3); if is_none(o) { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, OptionUnwrapOrSome)
+{
+    expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(7), 0); }", 7);
+}
+
+TEST_F(RuntimeTest, OptionUnwrapOrNone)
+{
+    expectRun("fn main() -> i32 { ret unwrap_or(Option::None, 0); }", 0);
+}
+
+TEST_F(RuntimeTest, OptionUnwrapOrFallbackUsed)
+{
+    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
+              " fn main() -> i32 { let o = none_i(); ret unwrap_or(o, 42); }", 42);
+}
+
+TEST_F(RuntimeTest, OptionAndSomeSome)
+{
+    // and(Some(1), Some(5)) → Some(5).
+    expectRun("fn main() -> i32 { let a = and(Option::Some(1), Option::Some(5));"
+              " match a { Some(v) => { ret v; }, None => { ret 0; } } }", 5);
+}
+
+TEST_F(RuntimeTest, OptionAndNoneSome)
+{
+    // and(None, Some(5)) → None.
+    expectRun("fn main() -> i32 { let a = and(Option::None, Option::Some(5));"
+              " match a { Some(v) => { ret 1; }, None => { ret 0; } } }", 0);
+}
+
+TEST_F(RuntimeTest, OptionOrSomeNone)
+{
+    // or(Some(1), Some(9)) → Some(1) — first Some wins.
+    expectRun("fn main() -> i32 { let a = or(Option::Some(1), Option::Some(9));"
+              " match a { Some(v) => { ret v; }, None => { ret 0; } } }", 1);
+}
+
+TEST_F(RuntimeTest, OptionOrNoneSome)
+{
+    // or(None, Some(9)) → Some(9).
+    expectRun("fn main() -> i32 { let a = or(Option::None, Option::Some(9));"
+              " match a { Some(v) => { ret v; }, None => { ret 0; } } }", 9);
+}
+
+TEST_F(RuntimeTest, OptionOrNoneNone)
+{
+    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
+              " fn main() -> i32 { let a = or(none_i(), none_i());"
+              " match a { Some(v) => { ret 1; }, None => { ret 0; } } }", 0);
+}
+
+TEST_F(RuntimeTest, OptionFunctionsChain)
+{
+    expectRun("fn main() -> i32 { let o = Option::Some(3);"
+              " let u = unwrap_or(o, 100); let s = is_some(Option::Some(u));"
+              " if s { ret u; } ret 0; }", 3);
+}
+
+// ── E: math.lis — min/max/clamp/abs ───────────────────────────────────────────
+
+TEST_F(RuntimeTest, MathMinBasic)
+{
+    expectRun("fn main() -> i32 { ret min(3, 7); }", 3);
+}
+
+TEST_F(RuntimeTest, MathMinEqual)
+{
+    expectRun("fn main() -> i32 { ret min(5, 5); }", 5);
+}
+
+TEST_F(RuntimeTest, MathMinNegative)
+{
+    // min(-7, 3): -7 < 3 → -7. Take the magnitude to keep the exit code clean.
+    expectRun("fn main() -> i32 { let m = min(0 - 7, 3); if m < 0 { ret 0 - m; } ret m; }", 7);
+}
+
+TEST_F(RuntimeTest, MathMaxBasic)
+{
+    expectRun("fn main() -> i32 { ret max(3, 7); }", 7);
+}
+
+TEST_F(RuntimeTest, MathMaxEqual)
+{
+    expectRun("fn main() -> i32 { ret max(9, 9); }", 9);
+}
+
+TEST_F(RuntimeTest, MathMaxNegative)
+{
+    expectRun("fn main() -> i32 { ret max(0 - 5, 2); }", 2);
+}
+
+TEST_F(RuntimeTest, MathClampWithin)
+{
+    expectRun("fn main() -> i32 { ret clamp(5, 0, 10); }", 5);
+}
+
+TEST_F(RuntimeTest, MathClampBelow)
+{
+    expectRun("fn main() -> i32 { ret clamp(0 - 1, 0, 10); }", 0);
+}
+
+TEST_F(RuntimeTest, MathClampAbove)
+{
+    expectRun("fn main() -> i32 { ret clamp(11, 0, 10); }", 10);
+}
+
+TEST_F(RuntimeTest, MathClampEqual)
+{
+    expectRun("fn main() -> i32 { ret clamp(10, 0, 10); }", 10);
+}
+
+TEST_F(RuntimeTest, MathAbsPositive)
+{
+    expectRun("fn main() -> i32 { ret abs(7); }", 7);
+}
+
+TEST_F(RuntimeTest, MathAbsNegative)
+{
+    expectRun("fn main() -> i32 { ret abs(0 - 7); }", 7);
+}
+
+TEST_F(RuntimeTest, MathAbsZero)
+{
+    expectRun("fn main() -> i32 { ret abs(0); }", 0);
+}
+
+TEST_F(RuntimeTest, MathFabsNegative)
+{
+    expectOutput("fn main() -> i32 { print_float(fabs(0.0 - 3.5)); println(); ret 0; }",
+        "3.500000\n", 0);
+}
+
+TEST_F(RuntimeTest, MathFabsPositive)
+{
+    expectOutput("fn main() -> i32 { print_float(fabs(2.25)); println(); ret 0; }",
+        "2.250000\n", 0);
+}
+
+// ── E: math.lis — gcd/lcm/ipow ─────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, MathGcdBasic)
+{
+    expectRun("fn main() -> i32 { ret gcd(12, 18); }", 6);
+}
+
+TEST_F(RuntimeTest, MathGcdCoprime)
+{
+    expectRun("fn main() -> i32 { ret gcd(7, 13); }", 1);
+}
+
+TEST_F(RuntimeTest, MathGcdWithZero)
+{
+    // gcd(0, b) == b.
+    expectRun("fn main() -> i32 { ret gcd(0, 5); }", 5);
+}
+
+TEST_F(RuntimeTest, MathGcdSame)
+{
+    expectRun("fn main() -> i32 { ret gcd(6, 6); }", 6);
+}
+
+TEST_F(RuntimeTest, MathGcdOneIsOne)
+{
+    expectRun("fn main() -> i32 { ret gcd(1, 100); }", 1);
+}
+
+TEST_F(RuntimeTest, MathLcmBasic)
+{
+    expectRun("fn main() -> i32 { ret lcm(4, 6); }", 12);
+}
+
+TEST_F(RuntimeTest, MathLcmCoprime)
+{
+    expectRun("fn main() -> i32 { ret lcm(3, 5); }", 15);
+}
+
+TEST_F(RuntimeTest, MathLcmWithZero)
+{
+    expectRun("fn main() -> i32 { ret lcm(0, 5); }", 0);
+}
+
+TEST_F(RuntimeTest, MathLcmSame)
+{
+    expectRun("fn main() -> i32 { ret lcm(7, 7); }", 7);
+}
+
+TEST_F(RuntimeTest, MathIpowBasic)
+{
+    expectRun("fn main() -> i32 { ret ipow(2, 10); }", 1024);
+}
+
+TEST_F(RuntimeTest, MathIpowZeroExponent)
+{
+    expectRun("fn main() -> i32 { ret ipow(5, 0); }", 1);
+}
+
+TEST_F(RuntimeTest, MathIpowOneExponent)
+{
+    expectRun("fn main() -> i32 { ret ipow(9, 1); }", 9);
+}
+
+TEST_F(RuntimeTest, MathIpowSmallBase)
+{
+    expectRun("fn main() -> i32 { ret ipow(3, 3); }", 27);
+}
+
+// ── E: math.lis — is_even/is_odd/sign ──────────────────────────────────────────
+
+TEST_F(RuntimeTest, MathIsEvenTrue)
+{
+    expectRun("fn main() -> i32 { if is_even(10) { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, MathIsEvenFalse)
+{
+    expectRun("fn main() -> i32 { if is_even(7) { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, MathIsEvenNegative)
+{
+    expectRun("fn main() -> i32 { if is_even(0 - 4) { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, MathIsOddTrue)
+{
+    expectRun("fn main() -> i32 { if is_odd(7) { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, MathIsOddFalse)
+{
+    expectRun("fn main() -> i32 { if is_odd(10) { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, MathIsOddNegative)
+{
+    // (0-5) % 2 = -1 != 0 → odd.
+    expectRun("fn main() -> i32 { if is_odd(0 - 5) { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, MathSignPositive)
+{
+    expectRun("fn main() -> i32 { ret sign(5); }", 1);
+}
+
+TEST_F(RuntimeTest, MathSignNegative)
+{
+    // sign(-5) = -1.
+    expectRun("fn main() -> i32 { let s = sign(0 - 5); if s < 0 { ret 0 - s; } ret s; }", 1);
+}
+
+TEST_F(RuntimeTest, MathSignZero)
+{
+    expectRun("fn main() -> i32 { ret sign(0); }", 0);
+}
+
+// ── E: math.lis — float helpers ────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, MathDegToRadHalfPi)
+{
+    // deg_to_rad(90) = π/2 ≈ 1.5707963...
+    expectOutput("fn main() -> i32 { let r = deg_to_rad(90.0);"
+                 " print_float(r); println(); ret 0; }", "1.570796\n", 0);
+}
+
+TEST_F(RuntimeTest, MathRadToDegFullCircle)
+{
+    // rad_to_deg(6.28318530718) ≈ 360.
+    expectOutput("fn main() -> i32 { let d = rad_to_deg(6.28318530718);"
+                 " print_float(d); println(); ret 0; }", "360.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, MathLerpMidpoint)
+{
+    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 0.5)); println(); ret 0; }",
+        "5.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, MathLerpStart)
+{
+    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 0.0)); println(); ret 0; }",
+        "0.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, MathLerpEnd)
+{
+    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 1.0)); println(); ret 0; }",
+        "10.000000\n", 0);
+}
+
+TEST_F(RuntimeTest, MathLerpBeyondRange)
+{
+    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 2.0)); println(); ret 0; }",
+        "20.000000\n", 0);
+}
+
+// ── E: char.lis ────────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, CharIsDigitTrue)
+{
+    expectRun("fn main() -> i32 { if is_digit('5') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsDigitFalse)
+{
+    expectRun("fn main() -> i32 { if is_digit('a') { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, CharIsAlphaLower)
+{
+    expectRun("fn main() -> i32 { if is_alpha('a') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsAlphaUpper)
+{
+    expectRun("fn main() -> i32 { if is_alpha('Z') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsAlphaNonLetter)
+{
+    expectRun("fn main() -> i32 { if is_alpha('1') { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, CharIsAlphanumericDigit)
+{
+    expectRun("fn main() -> i32 { if is_alphanumeric('7') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsAlphanumericLetter)
+{
+    expectRun("fn main() -> i32 { if is_alphanumeric('x') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsAlphanumericPunct)
+{
+    expectRun("fn main() -> i32 { if is_alphanumeric('!') { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, CharIsWhitespaceSpace)
+{
+    expectRun("fn main() -> i32 { if is_whitespace(' ') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsWhitespaceTab)
+{
+    expectRun("fn main() -> i32 { if is_whitespace('\\t') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsWhitespaceNewline)
+{
+    expectRun("fn main() -> i32 { if is_whitespace('\\n') { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, CharIsWhitespaceLetter)
+{
+    expectRun("fn main() -> i32 { if is_whitespace('a') { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, CharDigitToInt)
+{
+    expectRun("fn main() -> i32 { ret digit_to_int('7'); }", 7);
+}
+
+TEST_F(RuntimeTest, CharDigitToIntZero)
+{
+    expectRun("fn main() -> i32 { ret digit_to_int('0'); }", 0);
+}
+
+TEST_F(RuntimeTest, CharDigitToIntNonDigit)
+{
+    expectRun("fn main() -> i32 { ret digit_to_int('x'); }", 0);
+}
+
+TEST_F(RuntimeTest, CharDigitToIntNine)
+{
+    expectRun("fn main() -> i32 { ret digit_to_int('9'); }", 9);
+}
+
+// ── E: iterator.lis ────────────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, IteratorRangeSum1To5)
+{
+    expectRun("fn main() -> i32 { ret sum(range(1, 5)); }", 10);
+}
+
+TEST_F(RuntimeTest, IteratorRangeSumSingle)
+{
+    expectRun("fn main() -> i32 { ret sum(range(4, 5)); }", 4);
+}
+
+TEST_F(RuntimeTest, IteratorRangeSumEmpty)
+{
+    expectRun("fn main() -> i32 { ret sum(range(5, 5)); }", 0);
+}
+
+TEST_F(RuntimeTest, IteratorRangeCount)
+{
+    expectRun("fn main() -> i32 { ret count(range(1, 5)); }", 4);
+}
+
+TEST_F(RuntimeTest, IteratorRangeCountEmpty)
+{
+    expectRun("fn main() -> i32 { ret count(range(3, 3)); }", 0);
+}
+
+TEST_F(RuntimeTest, IteratorFirstSome)
+{
+    expectRun("fn main() -> i32 { let f = first(range(1, 5));"
+              " match f { Some(v) => { ret v; }, None => { ret 0; } } }", 1);
+}
+
+TEST_F(RuntimeTest, IteratorFirstEmpty)
+{
+    expectRun("fn main() -> i32 { let f = first(range(5, 5));"
+              " match f { Some(v) => { ret 1; }, None => { ret 0; } } }", 0);
+}
+
+TEST_F(RuntimeTest, IteratorLastSome)
+{
+    expectRun("fn main() -> i32 { let l = last(range(1, 5));"
+              " match l { Some(v) => { ret v; }, None => { ret 0; } } }", 4);
+}
+
+TEST_F(RuntimeTest, IteratorLastEmpty)
+{
+    expectRun("fn main() -> i32 { let l = last(range(2, 2));"
+              " match l { Some(v) => { ret 1; }, None => { ret 0; } } }", 0);
+}
+
+TEST_F(RuntimeTest, IteratorNthValid)
+{
+    expectRun("fn main() -> i32 { let n = nth(range(10, 20), 3);"
+              " match n { Some(v) => { ret v; }, None => { ret 0; } } }", 13);
+}
+
+TEST_F(RuntimeTest, IteratorNthOutOfBounds)
+{
+    expectRun("fn main() -> i32 { let n = nth(range(10, 20), 99);"
+              " match n { Some(v) => { ret 1; }, None => { ret 0; } } }", 0);
+}
+
+TEST_F(RuntimeTest, IteratorNthZero)
+{
+    expectRun("fn main() -> i32 { let n = nth(range(5, 10), 0);"
+              " match n { Some(v) => { ret v; }, None => { ret 0; } } }", 5);
+}
+
+TEST_F(RuntimeTest, IteratorProductRange)
+{
+    expectRun("fn main() -> i32 { ret product(range(1, 5)); }", 24);
+}
+
+TEST_F(RuntimeTest, IteratorProductEmpty)
+{
+    expectRun("fn main() -> i32 { ret product(range(3, 3)); }", 1);
+}
+
+TEST_F(RuntimeTest, IteratorSumThenCount)
+{
+    expectRun("fn main() -> i32 { let s = sum(range(1, 6)); let c = count(range(1, 6));"
+              " ret s + c; }", 20);
+}
+
+// ── F: Examples regression ─────────────────────────────────────────────────────
+// Every Examples/*.lis must keep compiling and producing its baseline exit code
+// (the documented outputs: borrow 55 / iterator 23 / match 8 / method_ref 10 /
+// operator 41 / ...). Prevents silent rot of the canonical examples.
+
+TEST_F(RuntimeTest, ExampleBorrow)
+{
+    expectExample("borrow", 55);
+}
+
+TEST_F(RuntimeTest, ExampleDrop)
+{
+    expectExample("drop", 0);
+}
+
+TEST_F(RuntimeTest, ExampleExample)
+{
+    expectExample("example", 0);
+}
+
+TEST_F(RuntimeTest, ExampleGenericType)
+{
+    expectExample("generic_type", 0);
+}
+
+TEST_F(RuntimeTest, ExampleIo)
+{
+    // io.lis reads from stdin; the baseline run with empty input exits 0.
+    expectExample("io", 0);
+}
+
+TEST_F(RuntimeTest, ExampleIterator)
+{
+    expectExample("iterator", 23);
+}
+
+TEST_F(RuntimeTest, ExampleMatch)
+{
+    expectExample("match", 8);
+}
+
+TEST_F(RuntimeTest, ExampleMethodRef)
+{
+    expectExample("method_ref", 10);
+}
+
+TEST_F(RuntimeTest, ExampleOperator)
+{
+    expectExample("operator", 41);
+}
+
+TEST_F(RuntimeTest, ExampleOwnership)
+{
+    expectExample("ownership", 0);
+}
+
+TEST_F(RuntimeTest, ExamplePrint)
+{
+    expectExample("print", 0);
+}
+
+TEST_F(RuntimeTest, ExampleString)
+{
+    expectExample("string", 0);
 }
