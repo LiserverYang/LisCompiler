@@ -52,7 +52,7 @@
 |---|---|
 | 3001 | Semantic error（通用） |
 | 3002 | Type mismatch |
-| 3003 | Undefined identifier |
+| 3003 | Undefined identifier（模块错误也归此码：cannot find module 'x' / circular import: module 'x' / module 'x' has no member 'y' / selective import of 'y' conflicts with an existing name） |
 | 3004 | cannot assign to immutable variable 'x'（及字段/元素/共享引用变体） |
 | 3005 | use of moved value: 'x'（含 partially moved / moved inside loop 变体） |
 | 3006 | Arg mismatch |

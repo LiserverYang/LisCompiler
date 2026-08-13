@@ -11,21 +11,21 @@
 
 ## 关键字
 
-Lis 共有 33 个关键字：
+Lis 共有 32 个关键字：
 
 | 类别 | 关键字 |
 |---|---|
-| 声明 | `struct` `enum` `trait` `impl` `fn` `let` `pub` |
+| 声明 | `struct` `enum` `trait` `impl` `fn` `let` `pub` `impt` |
 | 控制流 | `if` `else` `while` `for` `in` `match` `ret` `break` `continue` |
 | 引用/借用 | `self` `mut` `as` `move` |
 | 类型关键字 | `i8` `i16` `i32` `i64` `f32` `f64` `bool` `char` `void` |
 | 布尔字面量 | `true` `false` |
-| 保留（未实现） | `impt` |
 
 说明：
 
 - 返回关键字是 **`ret`**（非 `return`）。
-- `impt`（import）已作为关键字保留，但导入功能**未实现**；使用它会被拒绝。
+- `impt`（import）导入模块，见[模块与导入](./declarations.md)。注意 `char` 既是
+  类型关键字也是标准库模块名 —— `impt char { is_digit };` 合法（模块名接受关键字）。
 - `move` 关键字的设计语义为「每次使用时在使用处移动构建」（类似 Rust 的相关语法），
   **未实现**；当前全局 `let move x = ...` 可解析但无效果，见[已知限制](./limitations.md)。
 - 无 `const` 关键字；无 `^`/`<<`/`>>` 运算符 token（见[运算符](./operators.md)）。

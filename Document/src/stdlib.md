@@ -1,9 +1,21 @@
 # 标准库
 
-<!-- grammar_name: stdlib, search_name: 标准库,Option,Iterator,String,math,char,Range -->
+<!-- grammar_name: stdlib, search_name: 标准库,Option,Iterator,String,math,char,Range,import -->
 
-标准库是纯 Lis 源码（`Source/Std/*.lis`），编译时**自动预加载**（无 import 语句），
-构建时复制到 `Build/Binaries/lstdlib`。类型名大写开头（2026-08 命名规范）。
+标准库是纯 Lis 源码（`Source/Std/*.lis`），构建时复制到 `Build/Binaries/lstdlib`，
+作为可导入的模块提供：**不再自动预加载**，用到的模块要显式 `impt`
+（见[声明](./declarations.md)的模块与导入节）。类型名大写开头（2026-08 命名规范）。
+
+```lis
+impt math { max, abs };
+impt option { Option, unwrap_or };
+impt string { String };
+```
+
+六个模块：`drop`（Drop trait）、`option`（Option<T>）、`iterator`（Iterator/Range/for
+协议）、`math`（Numeric/算子 trait + 数值函数）、`char`（字符分类）、`string`
+（String 堆字符串）。模块间依赖已显式声明（iterator 导入 option；string 导入
+drop 与 option）—— 只需导入你直接使用的模块。
 
 ## Drop
 
@@ -79,7 +91,9 @@ struct String
 `is_digit` `is_alpha` `is_alphanumeric` `is_whitespace` `digit_to_int`——
 只用比较与 `as i32`（char 无算术）。
 
-## 作用域限制
+## 作用域与撞名
 
-标准库与主文件合并进同一作用域：用户全局名若与标准库内部名（局部/参数）撞名会误报
-「already exists」。这是已知设计限制（见[已知限制](./limitations.md)）。
+模块系统（2026-08-13）根治了旧的「单作用域合并」限制：标准库各模块有独立命名空间，
+用户全局名不再与标准库内部名撞。若用户**显式选择性导入**的名字与自己的定义同名，
+会报「selective import conflicts with an existing name」—— 这是冲突提示而非误报
+（自己定义的名字优先，去掉该 import 即可）。

@@ -1,9 +1,38 @@
 # 声明
 
-<!-- grammar_name: declarations, search_name: 声明,struct,enum,trait,impl,fn -->
+<!-- grammar_name: declarations, search_name: 声明,struct,enum,trait,impl,fn,import,模块 -->
 
-程序由全局声明组成：`struct`、`enum`、`trait`、`impl`、`fn`、全局 `let`。
-类型名（struct/enum/trait）全局唯一，重复定义是编译错误（E2003/E2017）。
+程序由全局声明组成：`impt`、`struct`、`enum`、`trait`、`impl`、`fn`、全局 `let`。
+类型名（struct/enum/trait）在**同一模块内**唯一，重复定义是编译错误（E2003/E2017）。
+
+## 模块与导入 impt
+
+每个源文件是一个模块。模块隔离命名空间：模块 A 的顶层名字对模块 B 不可见，
+除非 B 显式导入。标准库**不再自动预加载** —— 用到的每个标准库模块都要显式
+`impt`（`math`、`option`、`iterator`、`string`、`char`、`drop`）。
+
+<grammar>
+import_statement = "impt" module_path ["as" identifier | "{" identifier_list "}"] ";"
+module_path = identifier { "." identifier }
+</grammar>
+
+```lis
+impt math;                  // 全导入:math::max(...) 可用(裸名 max 不可见)
+impt math as m;             // 别名:m::max(...)
+impt math { max, min };     // 选择性导入:max(...) / min(...) 裸名可用
+```
+
+- 模块路径是点分路径（`impt lib.nums;` 绑定最后一段 `nums`），文件查找按搜索路径
+  依次尝试 `<dir>/lib/nums.lis`。搜索路径顺序：**标准库目录优先** → `-I` 目录 →
+  主文件目录（用户文件不能遮蔽同名标准库模块）。
+- 全导入/别名导入不提升裸名 —— 成员只能经 `alias::member` 访问。
+- 选择性导入把列出的名字提升为**当前模块的裸名**；与当前模块已有定义同名时报错
+  （模块自己的定义优先于静默覆盖 —— 冲突是显式错误）。
+- 循环导入（a 导入 b、b 导入 a）是编译错误；找不到模块文件报「cannot find module」。
+- 模块内声明互相可见（无须导入）；内置函数（`print_*`/`read_*`/`__alloc` 等）与
+  libc 保留名在所有模块裸名可用，且用户 `fn` 同名仍被拒绝。
+- 导入模块的内部符号名带模块前缀（如 `math$max`），仅影响诊断与 codegen，
+  源码中不可见。
 
 ## 结构体 struct
 
