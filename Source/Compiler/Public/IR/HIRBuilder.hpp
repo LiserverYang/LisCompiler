@@ -42,12 +42,10 @@ public:
     }
 
 public:
-    // TODO: 目前先不实现模块有关的东西
-
     virtual void visit(Program *node) override;
     virtual void visit(ModulePath *node) {}
     virtual void visit(TypeNode *node) override;
-    virtual void visit(ImportStmt *node) {}
+    virtual void visit(ImportStmt *node) override;
     virtual void visit(MemberVarDef *node) override;
     virtual void visit(StructDef *node) override;
     virtual void visit(EnumVariant *node) override;

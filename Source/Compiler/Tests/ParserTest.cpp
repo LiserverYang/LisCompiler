@@ -115,15 +115,62 @@ TEST_F(ParserTest, MethodSelfParamPosition)
     EXPECT_EQ(selfParam->isMut, false);
 }
 
-// ── P15: `impt` (import) is lexed but NOT implemented ──────────────────────────
-// The keyword token exists in the lexer's table, but no parser path consumes it,
-// so an import statement is an "illegal global statement". This pins that
-// behavior — the test would flag (by crashing/erroring differently) if someone
-// added partial import parsing. Deliberate limitation, not a bug.
-TEST_F(ParserTest, ImptStatementRejected)
+// ── P15: `impt` (import) syntax ───────────────────────────────────────────────
+// The three `impt` forms (whole-module, alias, selective) must parse into an
+// ImportStmt AST node. Module LOADING is a later phase (ParserTest has no
+// searchPaths), so only the syntax is exercised here.
+TEST_F(ParserTest, ImptThreeFormsParse)
 {
-    parseSource("impt foo.bar;");
-    EXPECT_GT(Logger::GetErrorCount(), 0) << "import statements must be rejected (not implemented)";
+    parseSource("impt foo.bar;\n"
+                "impt baz.qux as b;\n"
+                "impt math { max, min };");
+    EXPECT_EQ(Logger::GetErrorCount(), 0) << "all three impt forms must parse cleanly";
+
+    auto &globalStmts = context->program.globalStatements;
+    ASSERT_EQ(globalStmts.size(), 3);
+
+    // impt foo.bar; — whole module, no alias, no symbols
+    auto *i1 = dynamic_cast<ImportStmt *>(globalStmts[0].get());
+    ASSERT_NE(i1, nullptr);
+    ASSERT_NE(i1->modulePath, nullptr);
+    ASSERT_EQ(i1->modulePath->pathSegments.size(), 2);
+    EXPECT_EQ(i1->modulePath->pathSegments[0], "foo");
+    EXPECT_EQ(i1->modulePath->pathSegments[1], "bar");
+    EXPECT_FALSE(i1->alias.has_value());
+    EXPECT_FALSE(i1->symbols.has_value());
+
+    // impt baz.qux as b; — alias
+    auto *i2 = dynamic_cast<ImportStmt *>(globalStmts[1].get());
+    ASSERT_NE(i2, nullptr);
+    ASSERT_NE(i2->modulePath, nullptr);
+    ASSERT_EQ(i2->modulePath->pathSegments.size(), 2);
+    EXPECT_EQ(i2->modulePath->pathSegments[0], "baz");
+    EXPECT_EQ(i2->modulePath->pathSegments[1], "qux");
+    ASSERT_TRUE(i2->alias.has_value());
+    EXPECT_EQ(*i2->alias, "b");
+
+    // impt math { max, min }; — selective
+    auto *i3 = dynamic_cast<ImportStmt *>(globalStmts[2].get());
+    ASSERT_NE(i3, nullptr);
+    ASSERT_NE(i3->modulePath, nullptr);
+    ASSERT_EQ(i3->modulePath->pathSegments.size(), 1);
+    EXPECT_EQ(i3->modulePath->pathSegments[0], "math");
+    ASSERT_TRUE(i3->symbols.has_value());
+    ASSERT_EQ(i3->symbols->size(), 2);
+    EXPECT_EQ((*i3->symbols)[0], "max");
+    EXPECT_EQ((*i3->symbols)[1], "min");
+}
+
+TEST_F(ParserTest, ImptTrailingJunkRejected)
+{
+    // Missing semicolon.
+    parseSource("impt foo.bar");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "impt requires a terminating ';'";
+
+    context = std::make_shared<Context>();
+    // Empty selective list.
+    parseSource("impt math { };");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "selective import needs at least one symbol";
 }
 
 TEST_F(ParserTest, GlobalVarDefPosition)

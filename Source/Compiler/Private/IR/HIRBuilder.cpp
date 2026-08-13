@@ -63,6 +63,21 @@ void HIRBuilder::visit(Program *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRBuilder::visit(ImportStmt *node)
+{
+    auto result = std::make_unique<HIRImport>();
+    result->position = node->position;
+    result->length = node->length;
+    if (node->modulePath)
+    {
+        for (auto &seg : node->modulePath->pathSegments)
+            result->path.push_back(seg);
+    }
+    result->symbols = node->symbols;
+    result->alias = node->alias;
+    nodeStack.push(std::move(result));
+}
+
 void HIRBuilder::visit(TypeNode *node) {} // nothing to push — callers use toRaw()
 
 void HIRBuilder::visit(MemberVarDef *node) {}

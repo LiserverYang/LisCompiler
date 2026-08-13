@@ -33,6 +33,7 @@ void Parser::synchronize()
         case TokenCode::IMPL:
         case TokenCode::TRAIT:
         case TokenCode::ENUM:
+        case TokenCode::IMPT:
             return;
         default: advance();
         }
@@ -114,6 +115,10 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     {
         return parseEnumDefinition();
     }
+    else if (check(TokenCode::IMPT))
+    {
+        return parseImptStatement();
+    }
     else
     {
         logError(currentToken(), "illegal global statement");
@@ -121,6 +126,54 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     }
 
     return nullptr;
+}
+
+std::unique_ptr<ModulePath> Parser::parseModulePath()
+{
+    auto path = std::make_unique<ModulePath>();
+    PositionRecorder recorder(this, path.get());
+
+    do
+    {
+        path->pathSegments.push_back(consume(TokenCode::IDENTIFIER, "expected module name", E_ExpectAnIdentifier).value);
+    } while (match(TokenCode::DOT));
+
+    return path;
+}
+
+std::unique_ptr<ImportStmt> Parser::parseImptStatement()
+{
+    auto stmt = std::make_unique<ImportStmt>();
+    PositionRecorder recorder(this, stmt.get());
+
+    match(TokenCode::IMPT);
+
+    stmt->modulePath = parseModulePath();
+
+    // `impt foo.bar;`                → import whole module (alias = last segment)
+    // `impt foo.bar as f;`           → import under alias f
+    // `impt foo.bar { a, b };`       → selective import (bare names into scope)
+    if (match(TokenCode::AS))
+    {
+        stmt->alias = consume(TokenCode::IDENTIFIER, "expected alias name after 'as'", E_ExpectAnIdentifier).value;
+    }
+    else if (match(TokenCode::LBRACE))
+    {
+        std::vector<std::string> symbols;
+        while (!check(TokenCode::RBRACE))
+        {
+            symbols.push_back(consume(TokenCode::IDENTIFIER, "expected symbol name", E_ExpectAnIdentifier).value);
+            if (!match(TokenCode::COMMA))
+                break;
+        }
+        consume(TokenCode::RBRACE, "expected '}' after import symbols", E_ExpectARBRACE);
+        if (symbols.empty())
+            logError(currentToken(), "selective import needs at least one symbol", E_ExpectedExpression);
+        stmt->symbols = std::move(symbols);
+    }
+
+    consume(TokenCode::SEMI, "expected ';' after import statement", E_ExpectASEMI);
+    return stmt;
 }
 
 std::unique_ptr<StructDef> Parser::parseStructDefinition()

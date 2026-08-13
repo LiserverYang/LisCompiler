@@ -601,7 +601,10 @@ public:
     std::vector<std::string> path;
     std::optional<std::vector<std::string>> symbols;
     std::optional<std::string> alias;
-    void accept(HIRVisitor *visitor) override {} // no-op for now
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
 void printHIR(HIRNode *node);

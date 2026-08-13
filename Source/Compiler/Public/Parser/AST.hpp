@@ -78,6 +78,11 @@ class ModulePath : public ASTNode
 {
 public:
     std::vector<std::string> pathSegments;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
 };
 
 class TypeNode : public ASTNode

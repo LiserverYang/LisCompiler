@@ -235,14 +235,14 @@ protected:
     /* Parser functions */
     std::vector<std::unique_ptr<Param>> parseParameterList();
     std::unique_ptr<ASTNode> parseGlobalStatement();
-    // std::unique_ptr<ImportStmt> parseImptStatement();
+    std::unique_ptr<ImportStmt> parseImptStatement();
+    std::unique_ptr<ModulePath> parseModulePath();
     std::unique_ptr<StructDef> parseStructDefinition();
     std::unique_ptr<EnumDef> parseEnumDefinition();
     std::unique_ptr<EnumVariant> parseEnumVariant();
     std::unique_ptr<StructImpl> parseStructImplementation();
     std::unique_ptr<FunctionDef> parseFunctionDefinition();
     std::unique_ptr<GlobalVarDef> parseGlobalVariableDefinition();
-    // std::unique_ptr<ModulePath> parseModulePath();
     std::unique_ptr<MemberVarDef> parseMemberVariableDefinition();
     std::unique_ptr<TypeNode> parseType();
     std::unique_ptr<MemberFunctionDef> parseMemberFunctionDefinition();
