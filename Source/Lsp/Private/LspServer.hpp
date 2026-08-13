@@ -43,21 +43,27 @@ public:
     llvm::json::Value completion();
 
 private:
-    /// One indexable top-level definition (rebuilt after every compile).
+    /// One indexable symbol (rebuilt after every compile).
     struct DefEntry
     {
-        std::string name;   // display name (module prefix stripped)
-        std::string uri;    // definition's file
+        std::string name;   // pretty (module prefix stripped) name
+        std::string uri;    // symbol's file
         size_t line, col;   // 1-based, from HIR position
         size_t length;
-        std::string typeStr; // for hover
-        std::string kindStr; // "function" / "struct" / "enum" / ...
+        std::string typeStr; // pretty type, for hover
+        std::string kindStr; // "function"/"struct"/"enum"/"trait"/"variable"/"method"/"use"
     };
 
     void rebuildIndex();
+    /// Recursively walk a statement block collecting vars/uses/methods.
+    void walkBlock(HIRBlock *block, const std::string &uri);
+    void walkStmt(HIRStmt *stmt, const std::string &uri);
+    void walkExpr(HIRExpr *expr, const std::string &uri);
     /// The word at (line, character) in `text` (identifier chars).
     static std::string wordAt(const std::string &text, size_t line, size_t character);
     static llvm::json::Object makeRange(size_t line, size_t col, size_t length);
+    /// Strip module prefixes ("math$max" → "max") from every token in `s`.
+    static std::string prettyName(const std::string &s);
 
     std::string stdLibDir_;
     std::map<std::string, std::string> documents_; // uri -> text
