@@ -13,6 +13,8 @@ npm run compile
 
 1. 确认 `lisls.exe` 在 PATH,或在 VSCode 设置 `lis-lang.lislsPath` 指向它
    (LisCompiler 构建产物 `Build/Binaries/lisls.exe`,其旁需有 `lstdlib/`)。
+   **Windows 注意**:lisls.exe 由 MinGW 编译,依赖 MinGW 运行时 DLL ——
+   `C:\MinGW\bin` 需在 VSCode 进程的 PATH 中(系统环境变量)。
 2. 打开本目录,按 F5 启动扩展开发宿主,或
    `npx vsce package` 打包 .vsix 后 `code --install-extension lis-lang-0.1.0.vsix`。
 
