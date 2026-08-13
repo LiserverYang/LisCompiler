@@ -39,7 +39,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--print-mir"}, setAsTrue, "false", "Print the parsed MIR."});
     argParser->registRule(ArgParseRule{{"--print-llvmir"}, setAsTrue, "false", "Print the parsed LLVM IR."});
     argParser->registRule(ArgParseRule{{"-o"}, setAsValue, "2", "The optimise level(0-3), default is 2."});
-    argParser->registRule(ArgParseRule{{"-I"}, setAsValue, "", "Add a module search path (repeatable)."});
+    argParser->registRule(ArgParseRule{{"-I"}, setAsValue, "", "Add module search path(s), ';'-separated (lisbuild packs include_dirs here)."});
 
     // The standard library is NOT auto-preloaded anymore — user code imports
     // the modules it needs (`impt math;`). The stdlib directory is added to
@@ -52,8 +52,21 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         std::runtime_error("could not find the standard library, please check the binary_path/lstdlib!");
     }
     context->searchPaths.push_back(stdLibDir.string());
-    if (!context->args->getArg("I").empty())
-        context->searchPaths.push_back(context->args->getArg("I"));
+    // `-I` may carry several dirs separated by ';' (the argparser keeps only the
+    // last value of a repeated flag, so lisbuild packs its include_dirs into one
+    // `-I<dir>;<dir>` argument).
+    std::string includeArg = context->args->getArg("I");
+    size_t start = 0;
+    while (start <= includeArg.size())
+    {
+        size_t semi = includeArg.find(';', start);
+        std::string dir = includeArg.substr(start, semi == std::string::npos ? std::string::npos : semi - start);
+        if (!dir.empty())
+            context->searchPaths.push_back(dir);
+        if (semi == std::string::npos)
+            break;
+        start = semi + 1;
+    }
 
     passes.emplace_back(argParser.release());
     passes.emplace_back(std::make_unique<LambdaPass>(context, [](std::shared_ptr<Context> ctx)

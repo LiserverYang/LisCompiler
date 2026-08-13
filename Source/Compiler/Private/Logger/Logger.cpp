@@ -62,8 +62,14 @@ void LogCode(Logger::LogInfo &info, const std::string &color)
     // Extract the full line
     std::string line = code.substr(lineStart, lineEnd - lineStart);
 
-    // Calculate error position within the line
+    // Calculate error position within the line. Clamp errorStart to the line
+    // length: a diagnostic may carry a column from a DIFFERENT file than the
+    // code buffer it is rendered against (multi-file compilation — a module's
+    // token logged while the main file's buffer is current), and a column past
+    // the end of the actual line would throw in substr().
     size_t errorStart = info.col > 0 ? (info.col - 1) : 0;
+    if (errorStart > line.size())
+        errorStart = line.size();
     size_t errorEnd = std::min(errorStart + info.length, line.length());
 
     // Build colored line
