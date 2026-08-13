@@ -148,7 +148,22 @@ std::unique_ptr<ModulePath> Parser::parseModulePath()
 
     do
     {
-        path->pathSegments.push_back(consume(TokenCode::IDENTIFIER, "expected module name", E_ExpectAnIdentifier).value);
+        // A module segment may be an identifier OR a keyword (the stdlib's
+        // char.lis module is spelled `impt char;` — `char` lexes as the CHAR
+        // type keyword, not an IDENTIFIER). Accept any name-like token.
+        Token seg = currentToken();
+        bool nameLike = seg.code == TokenCode::IDENTIFIER
+            || ((size_t)seg.code >= TYPE_KEYWORD_BEGIN && (size_t)seg.code <= TYPE_KEYWORD_END)
+            || ((size_t)seg.code >= (size_t)TokenCode::IMPT && (size_t)seg.code <= (size_t)TokenCode::BOOLEAN_FALSE);
+        if (nameLike)
+        {
+            path->pathSegments.push_back(seg.value);
+            advance();
+        }
+        else
+        {
+            path->pathSegments.push_back(consume(TokenCode::IDENTIFIER, "expected module name", E_ExpectAnIdentifier).value);
+        }
     } while (match(TokenCode::DOT));
 
     return path;
@@ -215,6 +230,21 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
     moduleImports_[boundName] = canonical;
 
     loadModule(canonical);
+
+    // Promote selective-import names into THIS parser's name sets, so bare
+    // `Option::Some` / `String { .. }` references dispatch correctly. Enum
+    // promotion goes through the shared knownEnums (keyed by the importing
+    // module's internal name); type names join promotedTypes (separate from
+    // knownTypes — the module's own definition must not trip mutidefined).
+    if (binding.selective)
+    {
+        for (const auto &symName : binding.symbols)
+        {
+            if (context->knownEnums.count(internalName(canonical, symName)))
+                context->knownEnums.insert(internalName(currentModule_, symName));
+            promotedTypes.insert(internalName(currentModule_, symName));
+        }
+    }
 
     return stmt;
 }
@@ -508,7 +538,8 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     recorder.bindNode(impl.get());
 
-    if (knownTypes.count(internalName(currentModule_, impl->structName)) == 0)
+    if (knownTypes.count(internalName(currentModule_, impl->structName)) == 0
+        && promotedTypes.count(internalName(currentModule_, impl->structName)) == 0)
     {
         consume(TokenCode::UNDEFINED, "undefined struct '" + impl->structName + "'", E_UndefinedStruct);
     }
@@ -1391,7 +1422,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         // (cross-file types like the stdlib's Option aren't in knownTypes). In a
         // for-loop iterable or an if/while condition the `{` is ambiguous with a
         // block/body, so there we require Name to be a known struct type.
-        if (check(TokenCode::LBRACE) && (knownTypes.count(internalName(currentModule_, identifier.value)) > 0 || !(inForIterable_ || inControlFlowCondition_)))
+        if (check(TokenCode::LBRACE) && ((knownTypes.count(internalName(currentModule_, identifier.value)) > 0 || promotedTypes.count(internalName(currentModule_, identifier.value)) > 0) || !(inForIterable_ || inControlFlowCondition_)))
         {
             match(TokenCode::LBRACE);
             auto expr = parseStructInitialization(identifier);

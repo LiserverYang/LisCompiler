@@ -52,6 +52,22 @@ namespace
 {
 std::atomic<int> g_rtCounter{0};
 
+/// Import prologue prepended to every RuntimeTest snippet. The stdlib is no
+/// longer auto-preloaded — selective imports promote the public API's bare
+/// names (the internal names stay `math$max` etc.).
+static const char *kStdlibPrologue =
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
+    "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
+    "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
+    "impt string { String };\n"
+    "impt char { is_digit, is_alpha, is_alphanumeric, is_whitespace, digit_to_int };\n"
+    "impt drop { Drop };\n";
+
+/// Math-only prologue for snippets that DEFINE their own `fn sum` (which would
+/// clash with the iterator module's promoted `sum`).
+static const char *kMathPrologue =
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
+
 /// Locate the preloaded stdlib (`Build/Binaries/lstdlib`). test.exe lives at
 /// `Build/Intermediate/`, so it is the exe dir's parent + `Binaries/lstdlib`.
 fs::path findStdlibDir()
@@ -137,29 +153,20 @@ protected:
 
     /// Compile `source` through the full pipeline to objPath. Returns false on
     /// any semantic error (diagnostics are logged to stdout by the Logger).
-    bool compile(const std::string &source)
+    /// The stdlib is NOT auto-preloaded; a prologue imports its public API
+    /// (selective imports promote the bare names the snippets use). Snippets
+    /// that DEFINE their own stdlib-named types (e.g. their own `enum Option`)
+    /// pass an empty or reduced prologue to avoid the (correct) import clash.
+    bool compile(const std::string &source, const std::string &prologue = kStdlibPrologue)
     {
         auto context = std::make_shared<Context>();
         context->args->setArg("o", "2");
         context->args->setArg("filePath", "test.lis");
+        context->searchPaths.push_back(stdLibDir.string());
 
-        // Preload the stdlib (Lexer + Parser only, mirroring CompilePipeline).
-        for (auto &entry : fs::directory_iterator(stdLibDir))
-        {
-            if (entry.path().extension() != ".lis") continue;
-            std::ifstream file(entry.path());
-            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            context->filePath = entry.path().string();
-            context->fileValue = content;
-            Lexer lexer(context);
-            lexer.run();
-            Parser parser(context);
-            parser.parseAll();
-        }
-
-        // Main source.
+        // Main source (stdlib imports prepended).
         context->filePath = "test.lis";
-        context->fileValue = source;
+        context->fileValue = prologue + source;
         Lexer lexer(context);
         lexer.run();
         Parser parser(context);
@@ -225,24 +232,11 @@ protected:
             f << src;
         }
         context->searchPaths.push_back(modDir.string());
+        context->searchPaths.push_back(stdLibDir.string());
 
-        // Preload the stdlib (Lexer + Parser only, mirroring CompilePipeline).
-        for (auto &entry : fs::directory_iterator(stdLibDir))
-        {
-            if (entry.path().extension() != ".lis") continue;
-            std::ifstream file(entry.path());
-            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            context->filePath = entry.path().string();
-            context->fileValue = content;
-            Lexer lexer(context);
-            lexer.run();
-            Parser parser(context);
-            parser.parseAll();
-        }
-
-        // Main source.
+        // Main source (stdlib imports prepended).
         context->filePath = "test.lis";
-        context->fileValue = source;
+        context->fileValue = std::string(kStdlibPrologue) + source;
         Lexer lexer(context);
         lexer.run();
         Parser parser(context);
@@ -349,6 +343,17 @@ protected:
                                       << source;
     }
 
+    /// Like expectRun but with a custom (or empty) stdlib prologue — for
+    /// snippets that define their own stdlib-named types (`enum Option`).
+    void expectRunWithPrologue(const std::string &source, const std::string &prologue, int expectedExit)
+    {
+        ASSERT_TRUE(compile(source, prologue)) << "compilation failed:\n"
+                                               << source;
+        int code = linkAndRun();
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << source;
+    }
+
     /// Compile, link, run, and assert both the exit code AND the captured stdout.
     void expectOutput(const std::string &source, const std::string &expectedOut, int expectedExit)
     {
@@ -394,7 +399,13 @@ protected:
         std::ifstream f(ex);
         ASSERT_TRUE(f.good()) << "cannot open " << ex;
         std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        expectRun(src, expectedExit);
+        // Examples carry their own `impt` statements (no auto-prologue — the
+        // examples' legacy names like `max`/`Option`/`sum` would clash).
+        ASSERT_TRUE(compile(src, "")) << "compilation failed:\n"
+                                      << src;
+        int code = linkAndRun();
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << src;
     }
 };
 
@@ -644,20 +655,18 @@ TEST_F(RuntimeTest, EnumMatchUnitVariant)
 
 TEST_F(RuntimeTest, EnumMatchPayloadBinding)
 {
-    expectRun("enum Option<T> { Some(T), None } fn main() -> i32 {"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
               " let o = Option::Some(7);"
               " match o { Some(v) => { ret v; }, None => { ret 0; }, }"
-              " }",
-        7);
+              " }", "", 7);
 }
 
 TEST_F(RuntimeTest, EnumMatchWildcard)
 {
-    expectRun("enum Option<T> { Some(T), None } fn main() -> i32 {"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
               " let o = Option::Some(3);"
               " match o { Some(v) => { ret v; }, _ => { ret 99; }, }"
-              " }",
-        3);
+              " }", "", 3);
 }
 
 TEST_F(RuntimeTest, EnumMatchUnitVariantWildcard)
@@ -672,42 +681,38 @@ TEST_F(RuntimeTest, EnumMatchUnitVariantWildcard)
 TEST_F(RuntimeTest, EnumVariantIsMoved)
 {
     // After matching, the original enum binding should be "moved".
-    expectRun("enum Option<T> { Some(T), None } fn main() -> i32 {"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
               " let o = Option::Some(5);"
               " match o { Some(v) => { ret v; }, None => { ret 0; }, }"
-              " }",
-        5);
+              " }", "", 5);
 }
 
 TEST_F(RuntimeTest, EnumMatchNonCopyPayload)
 {
     // A non-Copy payload is MOVED into the binding; reading it works.
-    expectRun("enum Option<T> { Some(T), None } struct Inner { v: i32 }"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { v: i32 }"
               " fn main() -> i32 { let o = Option::Some(Inner{v: 5}); let mut got = 0;"
               " match o { Some(x) => { got = x.v; }, None => { got = 99; }, }"
-              " ret got; }",
-        5);
+              " ret got; }", "", 5);
 }
 
 TEST_F(RuntimeTest, EnumMatchNonCopyNoDoubleFree)
 {
     // The moved payload is dropped exactly once (drop glue counter).
-    expectRun("enum Option<T> { Some(T), None } struct Inner { v: i32 }"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { v: i32 }"
               " let ctr = 0; impl Drop for Inner { fn drop(self) { ctr = ctr + 1; } }"
               " fn main() -> i32 { { let o = Option::Some(Inner{v: 5});"
               " match o { Some(x) => { }, None => { }, } }"
-              " ret ctr; }",
-        1);
+              " ret ctr; }", "impt drop { Drop };\n", 1);
 }
 
 TEST_F(RuntimeTest, EnumMatchExpression)
 {
     // `let y = match ...` — a value match with tail expressions.
-    expectRun("enum Option<T> { Some(T), None } fn main() -> i32 {"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
               " let o = Option::Some(7);"
               " let y = match o { Some(v) => v + 1, None => 0 };"
-              " ret y; }",
-        8);
+              " ret y; }", "", 8);
 }
 
 // ── print builtins ─────────────────────────────────────────────────────────────
@@ -833,22 +838,20 @@ TEST_F(RuntimeTest, OperatorOverloadComparison)
 TEST_F(RuntimeTest, GenericOperatorFunctionStruct)
 {
     // A generic `fn sum<T: Add>` monomorphized over a struct implementing Add.
-    expectRun("struct Vec2 { pub x: i32, pub y: i32 }"
+    expectRunWithPrologue("struct Vec2 { pub x: i32, pub y: i32 }"
               " impl Add for Vec2 { fn add(self, other: Self) -> Vec2 {"
               "   ret Vec2 { x: self.x + other.x, y: self.y + other.y }; } }"
               " fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
               " fn main() -> i32 { let v = sum(Vec2{x:1,y:2}, Vec2{x:3,y:4});"
-              " ret v.x + v.y; }",
-        10);
+              " ret v.x + v.y; }", kMathPrologue, 10);
 }
 
 TEST_F(RuntimeTest, GenericOperatorFunctionPrimitive)
 {
     // The same generic `sum<T: Add>` monomorphized over i32 — the generic body's
     // `+` falls back to a direct binary op (primitives have no `add` method).
-    expectRun("fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
-              " fn main() -> i32 { ret sum(2, 3) + sum(4, 5); }",
-        14);
+    expectRunWithPrologue("fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
+              " fn main() -> i32 { ret sum(2, 3) + sum(4, 5); }", kMathPrologue, 14);
 }
 
 TEST_F(RuntimeTest, OperatorOverloadChained)
@@ -2238,9 +2241,9 @@ TEST_F(RuntimeTest, OpOverloadLessThan)
 
 TEST_F(RuntimeTest, OpOverloadOnGeneric)
 {
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRunWithPrologue("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
-              " fn main() -> i32 { let r = sum(V { x: 2 }, V { x: 5 }); ret r.x; }", 7);
+              " fn main() -> i32 { let r = sum(V { x: 2 }, V { x: 5 }); ret r.x; }", kMathPrologue, 7);
 }
 
 // ── E: option.lis ──────────────────────────────────────────────────────────────

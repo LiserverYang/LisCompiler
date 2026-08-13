@@ -39,48 +39,34 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--print-mir"}, setAsTrue, "false", "Print the parsed MIR."});
     argParser->registRule(ArgParseRule{{"--print-llvmir"}, setAsTrue, "false", "Print the parsed LLVM IR."});
     argParser->registRule(ArgParseRule{{"-o"}, setAsValue, "2", "The optimise level(0-3), default is 2."});
+    argParser->registRule(ArgParseRule{{"-I"}, setAsValue, "", "Add a module search path (repeatable)."});
 
-    // here we load the standard library definations
-    // the standard library will export into %binary_path%/lstdlib/*.lis
-
+    // The standard library is NOT auto-preloaded anymore — user code imports
+    // the modules it needs (`impt math;`). The stdlib directory is added to
+    // the search paths so `impt math;` finds <lstdlib>/math.lis.
     namespace fs = std::filesystem;
 
     fs::path stdLibDir = fs::path(argv[0]).parent_path() / "lstdlib";
-
     if (!fs::exists(stdLibDir))
     {
         std::runtime_error("could not find the standard library, please check the binary_path/lstdlib!");
     }
-
-    std::string originalFilePath = context->filePath;
-    std::string originalFileValue = context->fileValue;
-
-    for (auto &entry : fs::directory_iterator(stdLibDir))
-    {
-        if (entry.path().extension() == ".lis")
-        {
-            std::ifstream file(entry.path());
-            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-            context->filePath = entry.path().string();
-            context->fileValue = content;
-
-            Lexer lexer(context);
-            Parser parser(context);
-            lexer.run();
-            parser.run();
-        }
-    }
-
-    context->filePath = originalFilePath;
-    context->fileValue = originalFileValue;
+    context->searchPaths.push_back(stdLibDir.string());
+    if (!context->args->getArg("I").empty())
+        context->searchPaths.push_back(context->args->getArg("I"));
 
     passes.emplace_back(argParser.release());
     passes.emplace_back(std::make_unique<LambdaPass>(context, [](std::shared_ptr<Context> ctx)
         {
             // this pass is to read file
             ctx->filePath = ctx->args->getArg("filePath");
-            ctx->fileValue = (std::stringstream{} << std::ifstream{ctx->filePath, std::ios::binary}.rdbuf()).str(); }));
+            ctx->fileValue = (std::stringstream{} << std::ifstream{ctx->filePath, std::ios::binary}.rdbuf()).str();
+            // The main file's directory is appended AFTER the stdlib dir: the
+            // stdlib modules always win over same-named user files (e.g. an
+            // Examples/iterator.lis must not shadow the stdlib's iterator).
+            fs::path mainDir = fs::path(ctx->filePath).parent_path();
+            if (mainDir.empty()) mainDir = ".";
+            ctx->searchPaths.push_back(mainDir.string()); }));
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
     passes.emplace_back(std::make_unique<HIRBuilder>(context));

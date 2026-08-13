@@ -1,3 +1,6 @@
+impt drop { Drop };
+impt iterator { first };
+impt math { min };
 // Copyright 2026, LiserverYang. All rights reserved.
 // MIT License.
 

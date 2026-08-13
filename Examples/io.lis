@@ -1,3 +1,5 @@
+impt math { gcd };
+impt char { is_digit };
 // Copyright 2026, LiserverYang. All rights reserved.
 // MIT License.
 //

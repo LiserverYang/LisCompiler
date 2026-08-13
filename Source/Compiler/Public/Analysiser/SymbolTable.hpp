@@ -47,7 +47,12 @@ public:
     }
     Symbol *lookupSymbol(const std::string &name)
     {
-        return currentScope_->lookup(name);
+        // Selective-import alias symbols forward to their target (module
+        // system): every lookup site transparently sees the target symbol.
+        Symbol *sym = currentScope_->lookup(name);
+        while (sym && sym->aliasTarget)
+            sym = sym->aliasTarget;
+        return sym;
     }
 
     // 获取当前作用域

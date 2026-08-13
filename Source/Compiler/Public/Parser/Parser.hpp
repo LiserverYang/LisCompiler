@@ -68,6 +68,11 @@ protected:
 
     std::unordered_set<std::string> knownTypes = {"i8", "i16", "i32", "i64", "f32", "f64", "bool", "char", "void"};
     std::unordered_set<std::string> knownTraits = {};
+    /// Names promoted into this module by selective imports (`impt math { max }`).
+    /// Kept SEPARATE from knownTypes so a module defining its own same-named
+    /// struct/enum/trait does not trip the mutidefined check — the module's own
+    /// definition wins over the import (sema reports the clash instead).
+    std::unordered_set<std::string> promotedTypes;
     // Enum type names live on the shared context (see Context::knownEnums) so a
     // parser instance sees enums registered by EARLIER files in the same unit.
 

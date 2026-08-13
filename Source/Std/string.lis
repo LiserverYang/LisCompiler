@@ -23,6 +23,11 @@
 // has no error handling, so an allocation failure aborts inside the runtime
 // (memset/deref of a null buffer). Do not rely on graceful recovery.
 
+// Drop (for `impl Drop for String`) and Option (for `index`) come from their
+// modules — no auto-preload, explicit imports.
+impt drop { Drop };
+impt option { Option };
+
 struct String
 {
     pub data: &mut i8,   // heap buffer (C-string, null-terminated)

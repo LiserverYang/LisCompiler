@@ -174,13 +174,22 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
             {
                 // Module-aware custom-type lookup: a `$`-prefixed name is already
                 // internal; a bare name resolves in the current module first,
-                // then the root module.
+                // then the root module; a selective-import alias symbol (pass 1d)
+                // forwards to the module's internal type.
                 std::string typeName = raw.name;
                 auto custom = context->typeContext->getCustom(typeName);
                 if (!custom.has_value() && !isInternalName(typeName) && !currentModule_.empty())
                 {
                     typeName = internalName(currentModule_, raw.name);
                     custom = context->typeContext->getCustom(typeName);
+                }
+                if (!custom.has_value())
+                {
+                    if (auto *sym = lookupModuleAware(raw.name))
+                    {
+                        if (sym->type && sym->type->getKind() == Type::Kind::Custom)
+                            custom = std::static_pointer_cast<CustomType>(sym->type);
+                    }
                 }
                 if (!custom.has_value())
                 {
@@ -668,7 +677,7 @@ std::shared_ptr<TraitType> HIRSemanticAnalyzer::resolveTraitConstraint(
     HIRNode &errNode,
     bool silent)
 {
-    auto *traitSym = SymbolTable::getInstance().lookupSymbol(con.traitName);
+    auto *traitSym = lookupModuleAware(con.traitName);
     if (!traitSym)
     {
         if (!silent)
@@ -811,6 +820,51 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
                 {
                     sym->type = context->typeContext->createCustomShell(e->name);
                 }
+            }
+        }
+    }
+
+    // Pass 1d: promote selective imports (`impt math { max }`). Each promoted
+    // bare name gets a FORWARDING alias symbol in the importing module's
+    // namespace (aliasTarget → the internal-name symbol), so bare-name lookups
+    // and resolveType resolve `max` → `math$max`. Runs before trait/struct
+    // type building so signatures like `fn next() -> Option<T>` resolve the
+    // promoted type; forwarding keeps the alias's type current.
+    for (auto &[mod, bindings] : context->importsByModule)
+    {
+        for (auto &b : bindings)
+        {
+            if (!b.selective) continue;
+            for (auto &symName : b.symbols)
+            {
+                std::string target = internalName(b.canonicalModule, symName);
+                Symbol *targetSym = SymbolTable::getInstance().lookupSymbol(target);
+                if (!targetSym)
+                {
+                    Logger::Log(Logger::LogLevel::ERROR,
+                        Logger::LogInfo{&context->fileValue, context->filePath,
+                            "module '" + b.canonicalModule + "' has no member '" + symName + "'.",
+                            0, 0, 0, 0, E_UndefinedIdentifier, false, false, 1});
+                    continue;
+                }
+                std::string aliasKey = internalName(mod, symName);
+                if (SymbolTable::getInstance().lookupSymbol(aliasKey))
+                {
+                    // The importing module defines its own `symName` — a real
+                    // name clash. Strict: report it (an explicit selective
+                    // import must not silently lose to an unrelated definition).
+                    Logger::Log(Logger::LogLevel::ERROR,
+                        Logger::LogInfo{&context->fileValue, context->filePath,
+                            "selective import of '" + symName + "' conflicts with an existing name in this module.",
+                            0, 0, 0, 0, E_UndefinedIdentifier, false, false, 1});
+                    continue;
+                }
+                auto aliasSym = std::make_unique<Symbol>();
+                aliasSym->kind = targetSym->kind;
+                aliasSym->name = aliasKey; // slot name; lookups forward to target
+                aliasSym->type = targetSym->type;
+                aliasSym->aliasTarget = targetSym;
+                SymbolTable::getInstance().insertSymbol(aliasKey, std::move(aliasSym));
             }
         }
     }
@@ -1178,16 +1232,16 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
     //   Add Sub Mul Div Rem : ints + floats (returns Self)
     //   PartialEq PartialOrd : ints + floats + char + bool (returns bool)
     //   BitAnd ... Shr : ints only
-    if (node->name == "Numeric" || node->name == "Integer" || isOperatorTrait(node->name))
+    if (displayName(node->name) == "Numeric" || displayName(node->name) == "Integer" || isOperatorTrait(displayName(node->name)))
     {
         auto traitTy = std::static_pointer_cast<TraitType>(sym->type);
         auto seed = [&](PrimitiveType::PrimKind k)
         {
             auto p = context->typeContext->getPrimitive(k);
-            if (!p->implementsTrait(node->name))
+            if (!p->implementsTrait(displayName(node->name)))
                 p->implTrait.push_back(traitTy);
         };
-        const std::string &n = node->name;
+        const std::string n = displayName(node->name);
         bool isNumeric = (n == "Numeric");
         bool isInteger = (n == "Integer");
         bool isCmp = (n == "PartialEq" || n == "PartialOrd");
@@ -1222,7 +1276,7 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRImpl *node)
 {
-    auto *structSym = SymbolTable::getInstance().lookupSymbol(node->structName);
+    auto *structSym = lookupModuleAware(node->structName);
     if (!structSym)
     {
         log(*node, "cannot find struct '" + node->structName + "'.");
@@ -1276,14 +1330,14 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
         // bound, but the generic body's `>` still monomorphizes to an ICmp on
         // the struct → LLVM crash. Operator overloading must go through the
         // per-operator traits (Add/Sub/PartialOrd/...), which ARE implementable.
-        if (tn == "Numeric" || tn == "Integer")
+        if (displayName(tn) == "Numeric" || displayName(tn) == "Integer")
         {
-            log(*node, "builtin marker trait '" + tn + "' is primitives-only and cannot be implemented by a struct; implement the operator traits (Add, Sub, ...) instead (operator overloading).");
+            log(*node, "builtin marker trait '" + displayName(tn) + "' is primitives-only and cannot be implemented by a struct; implement the operator traits (Add, Sub, ...) instead (operator overloading).");
             currentStructType = nullptr;
             structGParams.clear();
             return;
         }
-        auto *traitSym = SymbolTable::getInstance().lookupSymbol(tn);
+        auto *traitSym = lookupModuleAware(tn);
         if (!traitSym || traitSym->kind != SymbolKind::Trait)
         {
             log(*node, "cannot find trait '" + tn + "'.");
@@ -2746,31 +2800,43 @@ Symbol *HIRSemanticAnalyzer::lookupModuleAware(const std::string &name)
 {
     auto &table = SymbolTable::getInstance();
 
+    Symbol *sym = nullptr;
+
     // A `$`-prefixed name is already internal (baked by the Parser for `m::x`).
     if (isInternalName(name))
-        return table.lookupSymbol(name);
-
-    // 1. Bare name through the LOCAL scope chain only (params/locals are bare;
-    //    stop at the global scope, which is the only scope with no parent).
-    for (auto scope = table.getCurrentScope(); scope && scope->getParent(); scope = scope->getParent())
     {
-        const auto &syms = scope->getSymbols();
-        auto it = syms.find(name);
-        if (it != syms.end())
-            return it->second.get();
+        sym = table.lookupSymbol(name);
+    }
+    else
+    {
+        // 1. Bare name through the LOCAL scope chain only (params/locals are
+        //    bare; stop at the global scope, the only scope with no parent).
+        for (auto scope = table.getCurrentScope(); scope && scope->getParent(); scope = scope->getParent())
+        {
+            const auto &syms = scope->getSymbols();
+            auto it = syms.find(name);
+            if (it != syms.end())
+            {
+                sym = it->second.get();
+                break;
+            }
+        }
+
+        // 2. The current module's top-level name (internal).
+        if (!sym && !currentModule_.empty())
+            sym = table.lookupSymbol(internalName(currentModule_, name));
+
+        // 3. Root-module bare name (global-scope fallback; step 1 already
+        //    excluded locals, so a hit here is a top-level symbol — including
+        //    selective-import alias symbols promoted by pass 1d).
+        if (!sym)
+            sym = table.lookupSymbol(name);
     }
 
-    // 2. The current module's top-level name (internal).
-    if (!currentModule_.empty())
-    {
-        Symbol *sym = table.lookupSymbol(internalName(currentModule_, name));
-        if (sym)
-            return sym;
-    }
-
-    // 3. Root-module bare name (global-scope fallback; step 1 already excluded
-    //    locals, so a hit here is a root-module top-level symbol).
-    return table.lookupSymbol(name);
+    // Selective-import aliases forward to their target symbol.
+    while (sym && sym->aliasTarget)
+        sym = sym->aliasTarget;
+    return sym;
 }
 
 // ---------------------------------------------------------------------------
@@ -2877,7 +2943,8 @@ bool HIRSemanticAnalyzer::isOperatorTrait(const std::string &name)
 {
     static const std::unordered_set<std::string> ops = {
         "Add", "Sub", "Mul", "Div", "Rem", "PartialEq", "PartialOrd", "BitAnd", "BitOr", "BitXor", "Shl", "Shr"};
-    return ops.count(name) != 0;
+    // Callers may pass the trait's module-prefixed internal name.
+    return ops.count(displayName(name)) != 0;
 }
 
 bool HIRSemanticAnalyzer::resolveOperatorMethod(HIRBinaryOp *node,
@@ -2938,10 +3005,11 @@ bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
     const char *opMethod,
     const char *opTrait)
 {
-    // Find the operator trait among the generic param's bounds.
+    // Find the operator trait among the generic param's bounds. Constraint
+    // trait names carry the module prefix ("math$Add") — compare bare names.
     std::shared_ptr<TraitType> matchedTrait = nullptr;
     for (const auto &traitTy : gp->getConstraints())
-        if (traitTy->getName() == opTrait)
+        if (displayName(traitTy->getName()) == opTrait)
         {
             matchedTrait = traitTy;
             break;
@@ -3552,11 +3620,12 @@ bool HIRSemanticAnalyzer::handleToStringBuiltin(HIRCall *node, const std::string
     else
         return false; // not a to_string builtin
 
-    // The return type is the stdlib String struct (preloaded before user code).
-    auto strOpt = context->typeContext->getCustom("String");
+    // The return type is the stdlib String struct (its module-prefixed internal
+    // name — the `string` module must be imported for the type to exist).
+    auto strOpt = context->typeContext->getCustom("string$String");
     if (!strOpt.has_value())
     {
-        log(*node, "builtin '" + name + "' requires the stdlib 'String' type, which was not found.");
+        log(*node, "builtin '" + name + "' requires the stdlib 'String' type (add `impt string;`).");
         return false;
     }
 
@@ -3964,7 +4033,19 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
     // ---- Static method call  Type::method(args) -------------------------
     case HIRCall::CallKind::Static:
     {
+        // Module-aware type lookup: bare name → selective-import alias symbol
+        // (forwarding to the module's internal type) → current module prefix.
         auto custom = context->typeContext->getCustom(node->staticTypeName);
+        if (!custom.has_value() && !isInternalName(node->staticTypeName) && !currentModule_.empty())
+            custom = context->typeContext->getCustom(internalName(currentModule_, node->staticTypeName));
+        if (!custom.has_value())
+        {
+            if (auto *sym = lookupModuleAware(node->staticTypeName))
+            {
+                if (sym->type && sym->type->getKind() == Type::Kind::Custom)
+                    custom = std::static_pointer_cast<CustomType>(sym->type);
+            }
+        }
         if (!custom.has_value())
         {
             log(*node, "cannot find type '" + node->staticTypeName + "'.");
@@ -3991,7 +4072,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             return;
         }
 
-        std::string funcName = node->staticTypeName + "::" + node->methodName;
+        // The method symbol is keyed by the type's INTERNAL name (e.g.
+        // `string$String::from_lit`), not the source spelling.
+        std::string funcName = customTy->getName() + "::" + node->methodName;
         Symbol *symbol = SymbolTable::getInstance().lookupSymbol(funcName);
         if (!symbol)
         {
@@ -4216,7 +4299,7 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRStructInit *node)
 {
-    auto *sym = SymbolTable::getInstance().lookupSymbol(node->structName);
+    auto *sym = lookupModuleAware(node->structName);
     if (!sym || sym->kind != SymbolKind::Struct)
     {
         log(*node, "unknown struct '" + node->structName + "'.");
@@ -4317,7 +4400,7 @@ void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
 {
     auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
-    auto *sym = SymbolTable::getInstance().lookupSymbol(node->enumName);
+    auto *sym = lookupModuleAware(node->enumName);
     if (!sym || sym->kind != SymbolKind::Struct)
     {
         log(*node, "unknown enum '" + node->enumName + "'", E_UnknownVariant);

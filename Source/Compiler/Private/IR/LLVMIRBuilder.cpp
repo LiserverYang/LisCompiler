@@ -1381,7 +1381,7 @@ void LLVMIRBuilder::emitToStringCall(FunctionState &fs, const MIRStmtCall &s, co
     // Build the String struct { data, len, cap } and store it into the dest.
     if (s.dest.has_value())
     {
-        const std::string structName = "String";
+        const std::string structName = "string$String";
         // Defensive: a stale stdlib or a renamed field must not crash codegen
         // with an uncaught out_of_range. sema verifies the type exists, so this
         // is only reachable through an internal inconsistency — report it

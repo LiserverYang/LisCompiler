@@ -31,6 +31,11 @@ private:
     /// Context::stmtAttributions); top-level declaration names get this prefix.
     std::string currentModule_;
 
+    /// Resolve a name reference: `$`-prefixed (module-qualified) names pass
+    /// through; a bare name promoted by a selective import maps to the source
+    /// module's internal name; otherwise the current module's prefix applies.
+    std::string resolveModuleRef(const std::string &name) const;
+
 public:
     HIRBuilder() = default;
     HIRBuilder(std::shared_ptr<Context> cnt)

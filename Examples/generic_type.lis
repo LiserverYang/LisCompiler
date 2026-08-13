@@ -1,3 +1,7 @@
+// The stdlib is not auto-preloaded: import what this file uses. It DEFINES its
+// own `max`, so the selective import deliberately omits math's `max`.
+impt math { Numeric };
+
 struct Box<T>
 {
     pub a: T

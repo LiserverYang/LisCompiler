@@ -88,4 +88,9 @@ struct Symbol
 
     std::vector<std::string> implementedTraits;   // 结构体实现的Trait列表
     std::vector<std::string> structsImplementing; // 实现该Trait的结构体列表
+
+    /// A selective-import alias symbol (`impt math { max }` promotes `max` in
+    /// the importing module). It forwards everything (type/kind/name) to the
+    /// target symbol so lookups always see the target's latest state.
+    Symbol *aliasTarget = nullptr;
 };

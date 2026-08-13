@@ -4,6 +4,7 @@
  */
 
 #include "Analysiser/Type.hpp"
+#include "Core/ModuleUtils.hpp"
 
 #include <cassert>
 #include <unordered_map>
@@ -22,8 +23,13 @@ Type::Type(Kind kind) : kind(kind) {}
 
 bool Type::implementsTrait(const std::string &name) const
 {
+    // Compare BARE trait names: implTrait entries carry the trait's module
+    // prefix (e.g. "math$Numeric"), while callers query by the language-level
+    // name ("Numeric"). displayName strips the module prefix; a generic-trait
+    // instantiation ("Iterator$i32") would strip wrongly, but those never
+    // collide with the fixed names queried here (Drop/Numeric/operator traits).
     for (const auto &t : implTrait)
-        if (t->getName() == name) return true;
+        if (displayName(t->getName()) == name) return true;
     return false;
 }
 

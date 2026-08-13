@@ -503,7 +503,8 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
         // The Drop trait's `drop(self)` takes self BY VALUE; the drop glue
         // calls X::drop itself. Dropping `self` again at function exit would
         // infinite-recurse (X::drop → __drop_X → X::drop → ...).
-        if (fn->associatedTrait == "Drop" && pname == "self")
+        // associatedTrait carries the module prefix (`drop$Drop`).
+        if (displayName(fn->associatedTrait) == "Drop" && pname == "self")
             continue;
         ownedLocalsStack_.back().push_back(localPlace(varMap_[pname]));
     }

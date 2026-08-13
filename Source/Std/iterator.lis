@@ -22,6 +22,10 @@
 
 // The iterator protocol: `next()` returns the next element, or `Option::None`
 // once exhausted. Implement it to make a type usable in a `for x in it` loop.
+
+// Option comes from the `option` module (no auto-preload — explicit import).
+impt option { Option };
+
 trait Iterator<T>
 {
     fn next(self: &mut Self) -> Option<T>;
