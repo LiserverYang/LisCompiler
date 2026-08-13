@@ -35,5 +35,8 @@ BuildSystem.sys.dont_write_bytecode = True
 # Just build
 BuildSystem.BuildApp(
     BuildSystem.FileIO(os.path.join(_ROOT, "Source")),
-    [os.path.join(_ROOT, "Source", "lisc.target.py")],
+    [
+        os.path.join(_ROOT, "Source", "lisc.target.py"),
+        os.path.join(_ROOT, "Source", "lisls.target.py"),
+    ],
 )

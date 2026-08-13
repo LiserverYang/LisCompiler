@@ -15,6 +15,10 @@ class liscTarget(BuildSystem.TargetBase):
         self.TargetType = BuildSystem.TargetTypeEnum.Program
         self.bBuildAllmodules = True
         self.ModulesSubFolder = [""]
+        # The Lsp module is an EntryPoint too, but it belongs to the lisls
+        # target (its own executable) — excluded here so it doesn't clash
+        # with Main's lisc.exe.
+        self.ModulesExclude = ["Lsp"]
         self.ArgumentsAdded = ["-std=c++20", "-Wno-deprecated-declarations", "-Wno-deprecated-enum-enum-conversion", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-DUNICODE", "-fdiagnostics-color=always"]
 
         match BuildSystem.BuildContext.BuildType:
