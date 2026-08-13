@@ -50,6 +50,11 @@ private:
     /// Context::stmtAttributions). Reference-side lookups use it to resolve
     /// bare names to the module's internal names.
     std::string currentModule_;
+    /// Source FILE of the top-level item currently being analyzed (same
+    /// attribution). Diagnostics attach to this path — Context::filePath is
+    /// the main file by the time sema runs, so module items would otherwise
+    /// report the wrong file.
+    std::string currentFilePath_;
 
     /** Module-aware symbol lookup: bare names resolve against (1) the local
      *  scope chain (locals/params are always bare), (2) the current module's
@@ -181,7 +186,9 @@ private:
     void log(HIRNode &node, const std::string &msg, size_t errorId = E_SemanticError, Logger::LogLevel level = Logger::LogLevel::ERROR, bool exit = false)
     {
         Logger::LogInfo info{};
-        info.codePath = context->filePath;
+        // currentFilePath_ carries the ITEM's source file (module items keep
+        // their own path); context->filePath is the main file by now.
+        info.codePath = currentFilePath_.empty() ? context->filePath : currentFilePath_;
         info.code = &context->fileValue;
         info.col = node.position.col;
         info.line = node.position.line;

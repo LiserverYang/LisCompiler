@@ -111,10 +111,43 @@ void Logger::SetErrorCount(int count)
     gErrorCount = count;
 }
 
+// ── capture mode (LSP) ─────────────────────────────────────────────────────
+
+static bool gCaptureEnabled = false;
+static std::vector<Logger::Captured> gCaptured;
+
+void Logger::BeginCapture()
+{
+    gCaptureEnabled = true;
+    gCaptured.clear();
+}
+
+std::vector<Logger::Captured> Logger::EndCapture()
+{
+    gCaptureEnabled = false;
+    return std::move(gCaptured);
+}
+
 void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
 {
     if (level == LogLevel::ERROR)
         gErrorCount++;
+
+    // Capture mode: record and return — never print, never exit (the LSP
+    // server turns these into publishDiagnostics notifications).
+    if (gCaptureEnabled)
+    {
+        Captured c;
+        c.level = level;
+        c.codePath = info.codePath;
+        c.msg = info.msg;
+        c.line = info.line;
+        c.col = info.col;
+        c.length = info.length;
+        c.errorId = info.errorId;
+        gCaptured.push_back(std::move(c));
+        return;
+    }
 
     printf("\033[1m%s:%d:%d:\033[0m", info.codePath.c_str(), info.line, info.col);
 

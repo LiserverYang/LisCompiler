@@ -38,6 +38,18 @@ public:
         int exitCode = 1;        // the exit code (if `exit` is `true`)
     };
 
+    /** A captured diagnostic (capture mode, for the LSP server): the fields an
+     *  LSP publisher needs. `logCode`/`exit` are stripped — capture never
+     *  prints and never exits the process. */
+    struct Captured
+    {
+        LogLevel level;
+        std::string codePath;
+        std::string msg;
+        size_t line, col, length;
+        size_t errorId;
+    };
+
 public:
     static void Log(LogLevel level, LogInfo info);
     static void Log(LogLevel level, const std::vector<LogInfo> &info);
@@ -48,4 +60,11 @@ public:
     static void ResetErrorCount();
     /** Set the error counter (restore after a nested module lex resets it). */
     static void SetErrorCount(int count);
+
+    // ── capture mode (LSP) ─────────────────────────────────────────────────
+    /** Enter capture mode: diagnostics are recorded instead of printed. The
+     *  error counter still increments (pass gates keep working). */
+    static void BeginCapture();
+    /** Exit capture mode and return the diagnostics captured since Begin. */
+    static std::vector<Captured> EndCapture();
 };

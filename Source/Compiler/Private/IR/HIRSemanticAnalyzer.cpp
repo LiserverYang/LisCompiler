@@ -761,6 +761,9 @@ void HIRSemanticAnalyzer::setModuleForItem(size_t index)
     currentModule_ = (index < context->stmtAttributions.size())
                          ? context->stmtAttributions[index].modulePath
                          : std::string();
+    currentFilePath_ = (index < context->stmtAttributions.size())
+                           ? context->stmtAttributions[index].filePath
+                           : std::string();
 }
 
 void HIRSemanticAnalyzer::visit(HIRProgram *node)
@@ -1759,7 +1762,7 @@ bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
 void HIRSemanticAnalyzer::logAtPosition(const SourcePosition &pos, size_t length, const std::string &msg, size_t errorId)
 {
     Logger::LogInfo info{};
-    info.codePath = context->filePath;
+    info.codePath = currentFilePath_.empty() ? context->filePath : currentFilePath_;
     info.code = &context->fileValue;
     info.col = pos.col;
     info.line = pos.line;
