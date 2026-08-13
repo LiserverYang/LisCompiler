@@ -27,6 +27,10 @@ private:
      */
     size_t forLoopCtr_ = 0;
 
+    /// Module path of the top-level statement currently being built (from
+    /// Context::stmtAttributions); top-level declaration names get this prefix.
+    std::string currentModule_;
+
 public:
     HIRBuilder() = default;
     HIRBuilder(std::shared_ptr<Context> cnt)

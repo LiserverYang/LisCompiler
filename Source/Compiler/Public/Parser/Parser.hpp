@@ -5,12 +5,14 @@
 
 #pragma once
 
+#include "Core/ModuleUtils.hpp"
 #include "Core/Pass.hpp"
 #include "Logger/ErrorID.hpp"
 #include "Logger/Logger.hpp"
 #include "Parser/AST.hpp"
 
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 
 /**
@@ -69,6 +71,27 @@ protected:
     // Enum type names live on the shared context (see Context::knownEnums) so a
     // parser instance sees enums registered by EARLIER files in the same unit.
 
+    // ── module state ──────────────────────────────────────────────────────
+    /// Module path of the file this Parser instance is parsing ("" = root/main).
+    std::string currentModule_;
+    /// Import bindings visible in the current module: alias/last-segment → canonical
+    /// module path (for `alias::sym` resolution).
+    std::unordered_map<std::string, std::string> moduleImports_;
+
+    /// Set this Parser's module path (used when recursively loading a module).
+    void setCurrentModule(const std::string &mod)
+    {
+        currentModule_ = mod;
+    }
+
+    /** Load the module at `canonical` (dot-separated path) and parse its file,
+     *  recursively loading its own imports. Idempotent; detects cycles. */
+    void loadModule(const std::string &canonical);
+
+    /** Resolve a `alias::sym` — the alias must be a bound import in the current
+     *  module. Returns the canonical module path, or empty if `alias` is unknown. */
+    std::string resolveModuleAlias(const std::string &alias) const;
+
     /* Helper functions */
 
     inline void advance()
@@ -89,12 +112,15 @@ protected:
                 return eofToken_; // empty stream — nothing to log against
             Logger::LogInfo logInfo;
             // Guard against currentPos == 0: currentPos - 1 would wrap to SIZE_MAX.
+            // A failed consume() can push currentPos PAST the end (size+1), so
+            // clamp anchor to the last valid token — at(size()) throws.
             size_t anchor = currentPos > 0 ? currentPos - 1 : 0;
+            if (anchor >= tokenStream->size())
+                anchor = tokenStream->size() - 1;
             initLogInfo(tokenStream->at(anchor), logInfo, "Unexpeced finish", E_UnexpectFinish);
             logInfo.exit = false;
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
-            // Clamp to the last valid token instead of at(size()) (which throws).
             return tokenStream->at(anchor);
         }
 
@@ -109,12 +135,15 @@ protected:
                 return eofToken_; // empty stream — nothing to log against
             Logger::LogInfo logInfo;
             // Guard against currentPos == 0: currentPos - 1 would wrap to SIZE_MAX.
+            // A failed consume() can push currentPos PAST the end (size+1), so
+            // clamp anchor to the last valid token — at(size()) throws.
             size_t anchor = currentPos > 0 ? currentPos - 1 : 0;
+            if (anchor >= tokenStream->size())
+                anchor = tokenStream->size() - 1;
             initLogInfo(tokenStream->at(anchor), logInfo, "Unexpect finish", E_UnexpectFinish);
             logInfo.exit = false;
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
-            // Clamp to the last valid token instead of at(size()) (which throws).
             return tokenStream->at(anchor);
         }
 
@@ -268,6 +297,7 @@ protected:
     std::unique_ptr<CastExpr> parseCastExpression(std::unique_ptr<Expr> expr);
     std::unique_ptr<StructInitExpr> parseStructInitialization(Token typeName);
     std::unique_ptr<VariantInitExpr> parseVariantInitialization(Token enumName);
+    std::unique_ptr<Expr> parseModuleQualified(Token aliasToken);
     std::unique_ptr<Expr> parseFunctionCall(Token name);
     std::unique_ptr<Expr> parseMemberAccessChain(std::unique_ptr<Expr> left);
     std::unique_ptr<TraitDef> parseTraitDefinition();

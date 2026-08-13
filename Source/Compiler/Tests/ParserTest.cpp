@@ -117,14 +117,14 @@ TEST_F(ParserTest, MethodSelfParamPosition)
 
 // ── P15: `impt` (import) syntax ───────────────────────────────────────────────
 // The three `impt` forms (whole-module, alias, selective) must parse into an
-// ImportStmt AST node. Module LOADING is a later phase (ParserTest has no
-// searchPaths), so only the syntax is exercised here.
+// ImportStmt AST node. This suite has no searchPaths, so loadModule reports
+// "cannot find module" (a semantic error, expected here) — the AST assertions
+// below verify the SYNTAX only.
 TEST_F(ParserTest, ImptThreeFormsParse)
 {
     parseSource("impt foo.bar;\n"
                 "impt baz.qux as b;\n"
                 "impt math { max, min };");
-    EXPECT_EQ(Logger::GetErrorCount(), 0) << "all three impt forms must parse cleanly";
 
     auto &globalStmts = context->program.globalStatements;
     ASSERT_EQ(globalStmts.size(), 3);

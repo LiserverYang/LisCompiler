@@ -47,6 +47,9 @@ struct Context
     /// Canonical module paths that have been fully loaded (dedup / cycle-free).
     std::unordered_set<std::string> loadedModules;
 
+    /// Module paths currently being parsed (for circular-import detection).
+    std::unordered_set<std::string> loadingModules;
+
     /// Directories searched for `impt foo.bar;` → `<dir>/foo/bar.lis`.
     /// Order: main-file directory, then -I dirs, then the stdlib dir.
     std::vector<std::string> searchPaths;

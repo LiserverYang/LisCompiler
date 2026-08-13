@@ -3,8 +3,13 @@
  */
 
 #include "Parser/Parser.hpp"
+#include "Lexer/Lexer.hpp"
 #include "Lexer/Token.hpp"
 #include "Parser/ASTPrinter.hpp"
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 Token Parser::eofToken_;
 
@@ -75,7 +80,15 @@ void Parser::parseAll()
         auto node = parseGlobalStatement();
 
         if (node)
+        {
             program.globalStatements.push_back(std::move(node));
+            // Record which module/file this top-level statement belongs to, in
+            // parallel with globalStatements (HIRBuilder/sema read it).
+            StmtAttribution attr;
+            attr.modulePath = currentModule_;
+            attr.filePath = context->filePath;
+            context->stmtAttributions.push_back(std::move(attr));
+        }
 
         // Guarantee forward progress even when a construct failed without
         // consuming a token (avoids an infinite loop on malformed input).
@@ -173,7 +186,106 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
     }
 
     consume(TokenCode::SEMI, "expected ';' after import statement", E_ExpectASEMI);
+
+    // ── module-system side effect: bind the import and load the file ──────
+    // Join the dot-path into a canonical module path ("foo.bar") and record the
+    // binding (alias or last segment) in this module's import table. Then load
+    // the module's file, recursively parsing its own imports.
+    std::string canonical;
+    if (stmt->modulePath)
+    {
+        for (size_t i = 0; i < stmt->modulePath->pathSegments.size(); ++i)
+        {
+            if (i > 0) canonical += ".";
+            canonical += stmt->modulePath->pathSegments[i];
+        }
+    }
+    if (canonical.empty())
+        return stmt;
+
+    std::string boundName = stmt->alias.value_or(canonical.substr(canonical.find_last_of('.') == std::string::npos ? 0 : canonical.find_last_of('.') + 1));
+
+    ImportBinding binding;
+    binding.canonicalModule = canonical;
+    binding.boundName = boundName;
+    binding.selective = stmt->symbols.has_value();
+    if (binding.selective)
+        binding.symbols = *stmt->symbols;
+    context->importsByModule[currentModule_].push_back(binding);
+    moduleImports_[boundName] = canonical;
+
+    loadModule(canonical);
+
     return stmt;
+}
+
+std::string Parser::resolveModuleAlias(const std::string &alias) const
+{
+    auto it = moduleImports_.find(alias);
+    return it != moduleImports_.end() ? it->second : std::string();
+}
+
+void Parser::loadModule(const std::string &canonical)
+{
+    // Circular import: this module is already being parsed somewhere up the stack.
+    if (context->loadingModules.count(canonical))
+    {
+        logError(currentToken(), "circular import: module '" + canonical + "'", E_UndefinedIdentifier);
+        return;
+    }
+    // Already fully loaded — only (re)bind, don't re-parse.
+    if (context->loadedModules.count(canonical))
+        return;
+
+    context->loadingModules.insert(canonical);
+
+    // Resolve the module path to a file: <searchPath>/foo/bar.lis.
+    namespace fs = std::filesystem;
+    std::string relative = canonical;
+    for (auto &c : relative)
+        if (c == '.') c = '/';
+    relative += ".lis";
+
+    std::string foundPath;
+    for (const auto &dir : context->searchPaths)
+    {
+        fs::path candidate = fs::path(dir) / fs::path(relative);
+        if (fs::exists(candidate))
+        {
+            foundPath = candidate.string();
+            break;
+        }
+    }
+
+    if (foundPath.empty())
+    {
+        context->loadingModules.erase(canonical);
+        logError(currentToken(), "cannot find module '" + canonical + "'", E_UndefinedIdentifier);
+        return;
+    }
+
+    // Save/restore the single-slot file fields (mirrors CompilePipeline's
+    // stdlib preload), then recursively lex + parse the module file.
+    std::string savedFilePath = context->filePath;
+    std::string savedFileValue = context->fileValue;
+
+    std::ifstream file(foundPath);
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    context->filePath = foundPath;
+    context->fileValue = content;
+    context->fileContents[foundPath] = content;
+
+    Lexer lexer(context);
+    lexer.run();
+    Parser parser(context);
+    parser.setCurrentModule(canonical);
+    parser.parseAll(); // gate-free: parse errors are non-fatal and counted
+
+    context->filePath = savedFilePath;
+    context->fileValue = savedFileValue;
+
+    context->loadingModules.erase(canonical);
+    context->loadedModules.insert(canonical);
 }
 
 std::unique_ptr<StructDef> Parser::parseStructDefinition()
@@ -196,7 +308,7 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
         structDef->genericParams = std::move(parseGenericParams());
     }
 
-    if (knownTypes.count(structDef->name) > 0)
+    if (knownTypes.count(internalName(currentModule_, structDef->name)) > 0)
     {
         backToSnapshot();
         consume(TokenCode::UNDEFINED, "mutidefined struct '" + structDef->name + "'", E_MutidefinedStruct);
@@ -217,7 +329,7 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
             synchronize();
     }
 
-    knownTypes.insert(structDef->name);
+    knownTypes.insert(internalName(currentModule_, structDef->name));
     return structDef;
 }
 
@@ -236,7 +348,7 @@ std::unique_ptr<EnumDef> Parser::parseEnumDefinition()
     if (check(TokenCode::LT))
         enumDef->genericParams = std::move(parseGenericParams());
 
-    if (knownTypes.count(enumDef->name) > 0)
+    if (knownTypes.count(internalName(currentModule_, enumDef->name)) > 0)
     {
         backToSnapshot();
         consume(TokenCode::UNDEFINED, "mutidefined enum '" + enumDef->name + "'", E_MutidefinedStruct);
@@ -258,8 +370,8 @@ std::unique_ptr<EnumDef> Parser::parseEnumDefinition()
         if (match(TokenCode::COMMA)) continue; // variants are comma-separated
     }
 
-    knownTypes.insert(enumDef->name);
-    context->knownEnums.insert(enumDef->name);
+    knownTypes.insert(internalName(currentModule_, enumDef->name));
+    context->knownEnums.insert(internalName(currentModule_, enumDef->name));
     return enumDef;
 }
 
@@ -314,7 +426,7 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
     // so parsing them here too would be redundant — parseGenericParams() is
     // pure token consumption with no side effects, and the single parse below
     // keeps the stream aligned for BOTH the clean and the recovered path.
-    if (knownTraits.count(traitDef->name) > 0 || knownTypes.count(traitDef->name) > 0)
+    if (knownTraits.count(internalName(currentModule_, traitDef->name)) > 0 || knownTypes.count(internalName(currentModule_, traitDef->name)) > 0)
     {
         backToSnapshot();
         consume(TokenCode::UNDEFINED, "mutidefined trait '" + traitDef->name + "'", E_MutidefinedTrait);
@@ -344,11 +456,11 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
             synchronize();
     }
 
-    knownTypes.insert(traitDef->name);
+    knownTypes.insert(internalName(currentModule_, traitDef->name));
     // P3: actually register the trait name so a later trait/struct/enum with the
     // same name is caught (previously this set was never written, making the
     // mutidefined check above a no-op).
-    knownTraits.insert(traitDef->name);
+    knownTraits.insert(internalName(currentModule_, traitDef->name));
     return traitDef;
 }
 
@@ -391,7 +503,7 @@ std::unique_ptr<StructImpl> Parser::parseStructImplementation()
 
     recorder.bindNode(impl.get());
 
-    if (knownTypes.count(impl->structName) == 0)
+    if (knownTypes.count(internalName(currentModule_, impl->structName)) == 0)
     {
         consume(TokenCode::UNDEFINED, "undefined struct '" + impl->structName + "'", E_UndefinedStruct);
     }
@@ -551,6 +663,15 @@ std::unique_ptr<TypeNode> Parser::parseType()
         type->typeName = currentToken().value;
 
         advance();
+
+        // Module-qualified type: `m::Vec2` / `m::Option<i32>` where `m` is a
+        // bound module alias. Bake the internal name into typeName.
+        if (check(TokenCode::DOUBLE_COLON) && !resolveModuleAlias(type->typeName).empty())
+        {
+            std::string canonical = resolveModuleAlias(type->typeName);
+            Token inner = consume(TokenCode::IDENTIFIER, "expected type name after '::'", E_ExpectAnIdentifier);
+            type->typeName = internalName(canonical, inner.value);
+        }
 
         if (match(TokenCode::LT))
         {
@@ -1264,7 +1385,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         // (cross-file types like the stdlib's Option aren't in knownTypes). In a
         // for-loop iterable or an if/while condition the `{` is ambiguous with a
         // block/body, so there we require Name to be a known struct type.
-        if (check(TokenCode::LBRACE) && (knownTypes.count(identifier.value) > 0 || !(inForIterable_ || inControlFlowCondition_)))
+        if (check(TokenCode::LBRACE) && (knownTypes.count(internalName(currentModule_, identifier.value)) > 0 || !(inForIterable_ || inControlFlowCondition_)))
         {
             match(TokenCode::LBRACE);
             auto expr = parseStructInitialization(identifier);
@@ -1287,6 +1408,16 @@ std::unique_ptr<Expr> Parser::parsePrimary()
                 id->name = identifier.value;
                 return parseMemberAccessChain(std::move(id));
             }
+        }
+
+        // `m::X` where `m` is a bound module alias → module-qualified access.
+        // This takes priority over enum-variant / static-call `::` so `m::Some`
+        // (a variant in module m) and `m::Type::method` resolve against module m.
+        if (check(TokenCode::DOUBLE_COLON) && moduleImports_.count(identifier.value))
+        {
+            auto expr = parseModuleQualified(identifier);
+            recorder.bindNode(expr.get());
+            return expr;
         }
 
         // `Name::X[(args)]` — parsed as a variant construction; HIRBuilder
@@ -1444,6 +1575,50 @@ std::unique_ptr<StructInitExpr> Parser::parseStructInitialization(Token typeName
     }
 
     return init;
+}
+
+std::unique_ptr<Expr> Parser::parseModuleQualified(Token aliasToken)
+{
+    std::string canonical = resolveModuleAlias(aliasToken.value);
+    match(TokenCode::DOUBLE_COLON);
+    Token nameToken = consume(TokenCode::IDENTIFIER, "expected name after '::'", E_ExpectAnIdentifier);
+
+    // Bake the module prefix into the name NOW (alias → canonical → internal).
+    // The `$` rule guarantees this is never re-prefixed downstream.
+    std::string internal = internalName(canonical, nameToken.value);
+    Token internalToken = nameToken;
+    internalToken.value = internal;
+
+    // `m::A::B` — variant construction (`m::Option::Some`) or a static method
+    // (`m::Type::method`). parseVariantInitialization reads A as the enum/type
+    // and B as variant/method; HIRBuilder dispatches by knownEnums.
+    if (check(TokenCode::DOUBLE_COLON))
+        return parseVariantInitialization(internalToken);
+
+    // `m::f<T>(...)` — generic function call (turbofish).
+    if (check(TokenCode::LT) && looksLikeCallGenericParams())
+        return parseFunctionCall(internalToken);
+
+    // `m::f(...)` — function call.
+    if (check(TokenCode::LPAREN))
+    {
+        match(TokenCode::LPAREN);
+        return parseFunctionCall(internalToken);
+    }
+
+    // `m::Vec2 { ... }` — module-qualified struct literal.
+    if (check(TokenCode::LBRACE))
+    {
+        match(TokenCode::LBRACE);
+        return parseStructInitialization(internalToken);
+    }
+
+    // `m::GLOBAL` / `m::fn_ref` — a module symbol (global var / function value).
+    auto id = std::make_unique<IdentifierExpr>();
+    id->name = internal;
+    id->position = nameToken.position;
+    id->length = nameToken.value.length();
+    return parseMemberAccessChain(std::move(id));
 }
 
 std::unique_ptr<VariantInitExpr> Parser::parseVariantInitialization(Token enumName)

@@ -172,7 +172,16 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
             }
             else
             {
-                auto custom = context->typeContext->getCustom(raw.name);
+                // Module-aware custom-type lookup: a `$`-prefixed name is already
+                // internal; a bare name resolves in the current module first,
+                // then the root module.
+                std::string typeName = raw.name;
+                auto custom = context->typeContext->getCustom(typeName);
+                if (!custom.has_value() && !isInternalName(typeName) && !currentModule_.empty())
+                {
+                    typeName = internalName(currentModule_, raw.name);
+                    custom = context->typeContext->getCustom(typeName);
+                }
                 if (!custom.has_value())
                 {
                     if (!suppressTypeErrors_)
@@ -388,9 +397,11 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
         // A user/`stdlib` `fn` named like a builtin or a libc symbol would be
         // silently shadowed by the compiler's call-site interception (builtins)
         // or collide with codegen's external declaration (libc). Reject it.
-        if (isReservedFunctionName(f->name))
+        // `f->name` carries the module prefix — strip it: `foo$strlen` is still
+        // a redefinition of the reserved libc name.
+        if (isReservedFunctionName(displayName(f->name)))
         {
-            log(*f, "function name '" + f->name + "' is reserved by the compiler.");
+            log(*f, "function name '" + displayName(f->name) + "' is reserved by the compiler.");
             return;
         }
         if (SymbolTable::getInstance().lookupSymbol(f->name)) return;
@@ -736,13 +747,23 @@ void HIRSemanticAnalyzer::preRegisterImplTrait(HIRImpl *node)
 //  Program
 // ============================================================
 
+void HIRSemanticAnalyzer::setModuleForItem(size_t index)
+{
+    currentModule_ = (index < context->stmtAttributions.size())
+        ? context->stmtAttributions[index].modulePath
+        : std::string();
+}
+
 void HIRSemanticAnalyzer::visit(HIRProgram *node)
 {
     if (!node) return;
 
     // Pass 1: register all top-level names so forward references work.
-    for (auto &item : node->items)
-        preRegister(item.get());
+    for (size_t i = 0; i < node->items.size(); ++i)
+    {
+        setModuleForItem(i);
+        preRegister(node->items[i].get());
+    }
 
     // Pre-registration type-building is best-effort; the full analysis pass is
     // authoritative, so suppress its diagnostics.
@@ -752,8 +773,10 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     // recursive / cross-file references (e.g. `struct Node { next: Option<Node> }`,
     // or an impl in a later alphabetically-loaded stdlib file) resolve before any
     // fields are resolved. visit(HIRStruct) fills the fields in pass 2.
-    for (auto &item : node->items)
+    for (size_t i = 0; i < node->items.size(); ++i)
     {
+        setModuleForItem(i);
+        auto &item = node->items[i];
         if (auto *s = dynamic_cast<HIRStruct *>(item.get()))
         {
             if (auto *sym = SymbolTable::getInstance().lookupSymbol(s->name))
@@ -795,8 +818,10 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     // Pass 1b': build trait types so struct/function trait bounds resolve
     // regardless of declaration order. visit(HIRTrait) is idempotent (traits are
     // cached by name), so re-running it in pass 2 is harmless.
-    for (auto &item : node->items)
+    for (size_t i = 0; i < node->items.size(); ++i)
     {
+        setModuleForItem(i);
+        auto &item = node->items[i];
         if (auto *t = dynamic_cast<HIRTrait *>(item.get()))
             visit(t);
     }
@@ -805,8 +830,10 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     // references resolve to the shell type (correct identity); setFields fills
     // the origin. This must complete before any struct-init / impl body is
     // analyzed in pass 2 (those read struct fields).
-    for (auto &item : node->items)
+    for (size_t i = 0; i < node->items.size(); ++i)
     {
+        setModuleForItem(i);
+        auto &item = node->items[i];
         if (auto *s = dynamic_cast<HIRStruct *>(item.get()))
             buildStructType(s);
         else if (auto *e = dynamic_cast<HIREnum *>(item.get()))
@@ -816,8 +843,10 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     // Pass 1b''': register every impl's trait conformance on its struct BEFORE
     // any body/call analysis, so bound checks are order-independent (an impl
     // may appear after its first use in file order).
-    for (auto &item : node->items)
+    for (size_t i = 0; i < node->items.size(); ++i)
     {
+        setModuleForItem(i);
+        auto &item = node->items[i];
         if (auto *impl = dynamic_cast<HIRImpl *>(item.get()))
             preRegisterImplTrait(impl);
     }
@@ -832,8 +861,10 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     while (changed)
     {
         changed = false;
-        for (auto &item : node->items)
+        for (size_t i = 0; i < node->items.size(); ++i)
         {
+            setModuleForItem(i);
+            auto &item = node->items[i];
             auto *f = dynamic_cast<HIRFunction *>(item.get());
             if (!f || f->hasReturnType) continue;
 
@@ -865,8 +896,10 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     }
 
     // Pass 1c-2: resolve function signatures (best-effort, errors suppressed).
-    for (auto &item : node->items)
+    for (size_t i = 0; i < node->items.size(); ++i)
     {
+        setModuleForItem(i);
+        auto &item = node->items[i];
         if (auto *f = dynamic_cast<HIRFunction *>(item.get()))
             preRegisterFunctionType(f, inferredReturns);
     }
@@ -874,8 +907,11 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     suppressTypeErrors_ = false;
 
     // Pass 2: full analysis
-    for (auto &item : node->items)
-        item->accept(this);
+    for (size_t i = 0; i < node->items.size(); ++i)
+    {
+        setModuleForItem(i);
+        node->items[i]->accept(this);
+    }
 }
 
 // ============================================================
@@ -2706,18 +2742,54 @@ void HIRSemanticAnalyzer::visit(HIRLiteral *node)
 }
 
 // ---------------------------------------------------------------------------
+Symbol *HIRSemanticAnalyzer::lookupModuleAware(const std::string &name)
+{
+    auto &table = SymbolTable::getInstance();
+
+    // A `$`-prefixed name is already internal (baked by the Parser for `m::x`).
+    if (isInternalName(name))
+        return table.lookupSymbol(name);
+
+    // 1. Bare name through the LOCAL scope chain only (params/locals are bare;
+    //    stop at the global scope, which is the only scope with no parent).
+    for (auto scope = table.getCurrentScope(); scope && scope->getParent(); scope = scope->getParent())
+    {
+        const auto &syms = scope->getSymbols();
+        auto it = syms.find(name);
+        if (it != syms.end())
+            return it->second.get();
+    }
+
+    // 2. The current module's top-level name (internal).
+    if (!currentModule_.empty())
+    {
+        Symbol *sym = table.lookupSymbol(internalName(currentModule_, name));
+        if (sym)
+            return sym;
+    }
+
+    // 3. Root-module bare name (global-scope fallback; step 1 already excluded
+    //    locals, so a hit here is a root-module top-level symbol).
+    return table.lookupSymbol(name);
+}
+
+// ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRNameRef *node)
 {
-    auto *sym = SymbolTable::getInstance().lookupSymbol(node->name);
+    auto *sym = lookupModuleAware(node->name);
     if (!sym)
     {
-        log(*node, "undefined identifier '" + node->name + "'.", E_UndefinedIdentifier);
+        log(*node, "undefined identifier '" + displayName(node->name) + "'.", E_UndefinedIdentifier);
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
     node->symbol = sym;
     node->type = sym->type;
     node->scope = SymbolTable::getInstance().getCurrentScope();
+    // Write back the resolved name: top-level symbols carry their internal
+    // (module-prefixed) name so MIRBuilder/codegen emit the right symbol;
+    // locals/params keep their bare name.
+    node->name = sym->name;
 
     // NLL: record the last use of any borrow-holder variable (r in `let r = &x`),
     // so its borrow's liveness can end here.

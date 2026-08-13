@@ -46,6 +46,20 @@ private:
     /** Loop nesting depth, for validating break/continue placement. */
     size_t loopDepth_ = 0;
 
+    /// Module path of the top-level item currently being analyzed (from
+    /// Context::stmtAttributions). Reference-side lookups use it to resolve
+    /// bare names to the module's internal names.
+    std::string currentModule_;
+
+    /** Module-aware symbol lookup: bare names resolve against (1) the local
+     *  scope chain (locals/params are always bare), (2) the current module's
+     *  internal top-level name, (3) the root module's bare name. Names already
+     *  carrying a `$` prefix (module-qualified) are looked up directly. */
+    Symbol *lookupModuleAware(const std::string &name);
+
+    /// Set currentModule_ from Context::stmtAttributions for the item at `index`.
+    void setModuleForItem(size_t index);
+
     // ── borrow-checker state (Stage 1: lexical temps, Stage 2: NLL) ────────────
 
     /// One active borrow of a place. Created by `&p` / `&mut p`, a method

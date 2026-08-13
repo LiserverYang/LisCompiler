@@ -6,6 +6,13 @@
 #include "IR/HIRBuilder.hpp"
 #include "Logger/Logger.hpp"
 
+// Helper: a type/name reference may already carry a module prefix (baked by the
+// Parser for `m::X` references); bare names get the current module's prefix.
+static std::string resolveModuleRef(const std::string &currentModule, const std::string &name)
+{
+    return isInternalName(name) ? name : internalName(currentModule, name);
+}
+
 // Helper: convert an AST TypeNode pointer into an HIRRawType.
 static HIRRawType toRaw(const TypeNode *n)
 {
@@ -54,9 +61,19 @@ void HIRBuilder::visit(Program *node)
     context->hirProgram->position = node->position;
     context->hirProgram->length = node->length;
 
-    for (auto &it : node->globalStatements)
+    // Walk globalStatements in parallel with Context::stmtAttributions (filled
+    // by the Parser, one entry per statement) so each top-level declaration
+    // knows which module it belongs to and gets the module prefix.
+    for (size_t i = 0; i < node->globalStatements.size(); ++i)
     {
+        auto &it = node->globalStatements[i];
+        std::string savedModule = currentModule_;
+        if (i < context->stmtAttributions.size())
+            currentModule_ = context->stmtAttributions[i].modulePath;
+
         it->accept(this);
+        currentModule_ = savedModule;
+
         context->hirProgram->items.emplace_back((HIRNode *)nodeStack.top().release());
         nodeStack.pop();
     }
@@ -90,7 +107,7 @@ void HIRBuilder::visit(SelfParam *node) {} // handled inline
 void HIRBuilder::visit(StructDef *node)
 {
     auto result = std::make_unique<HIRStruct>();
-    result->name = node->name;
+    result->name = internalName(currentModule_, node->name);
     result->position = node->position;
     result->length = node->length;
 
@@ -121,7 +138,7 @@ void HIRBuilder::visit(StructDef *node)
 void HIRBuilder::visit(EnumDef *node)
 {
     auto result = std::make_unique<HIREnum>();
-    result->name = node->name;
+    result->name = internalName(currentModule_, node->name);
     result->position = node->position;
     result->length = node->length;
 
@@ -158,7 +175,7 @@ void HIRBuilder::visit(EnumVariant *node)
 void HIRBuilder::visit(TraitDef *node)
 {
     auto result = std::make_unique<HIRTrait>();
-    result->name = node->name;
+    result->name = internalName(currentModule_, node->name);
     result->position = node->position;
     result->length = node->length;
 
@@ -190,10 +207,10 @@ void HIRBuilder::visit(MemberFunctionDef *node)
     auto result = std::make_unique<HIRFunction>();
     result->position = node->position;
     result->length = node->length;
-    result->name = node->name;
+    result->name = node->name; // method name stays bare: `math$Option::new`
     result->isMethod = true;
-    result->associatedStruct = node->structName;
-    result->associatedTrait = node->traitName;
+    result->associatedStruct = node->structName.empty() ? "" : internalName(currentModule_, node->structName);
+    result->associatedTrait = node->traitName.empty() ? "" : internalName(currentModule_, node->traitName);
 
     // Self param
     if (node->selfParam.has_value())
@@ -251,8 +268,9 @@ void HIRBuilder::visit(StructImpl *node)
     auto result = std::make_unique<HIRImpl>();
     result->position = node->position;
     result->length = node->length;
-    result->structName = node->structName;
-    result->traitName = node->traitName;
+    result->structName = node->structName.empty() ? "" : internalName(currentModule_, node->structName);
+    if (node->traitName.has_value() && !node->traitName->empty())
+        result->traitName = internalName(currentModule_, *node->traitName);
 
     if (!node->genericParams.empty())
     {
@@ -290,7 +308,7 @@ void HIRBuilder::visit(FunctionDef *node)
     auto result = std::make_unique<HIRFunction>();
     result->position = node->position;
     result->length = node->length;
-    result->name = node->name;
+    result->name = internalName(currentModule_, node->name);
     result->isMethod = false;
     result->isStatic = true;
     result->isTraitMethod = false;
@@ -336,7 +354,7 @@ void HIRBuilder::visit(GlobalVarDef *node)
     auto result = std::make_unique<HIRVarDecl>();
     result->position = node->position;
     result->length = node->length;
-    result->name = node->name;
+    result->name = internalName(currentModule_, node->name);
     result->isGlobal = true;
     // Globals are mutable (the grammar has no `mut` keyword for them, but
     // assignment to a global is the only shared-mutable-state mechanism).
@@ -828,7 +846,7 @@ void HIRBuilder::visit(StructInitExpr *node)
     auto result = std::make_unique<HIRStructInit>();
     result->position = node->position;
     result->length = node->length;
-    result->structName = node->structType->typeName;
+    result->structName = resolveModuleRef(currentModule_, node->structType->typeName);
 
     for (auto &arg : node->genericParams)
     {
@@ -854,14 +872,15 @@ void HIRBuilder::visit(VariantInitExpr *node)
     // otherwise it is a static method call (`Box::new(10)`) parsed through the
     // same syntax. The parser cannot tell the two apart (a stdlib enum may be
     // parsed after its first use), so dispatch here against the shared
-    // knownEnums.
-    if (context->knownEnums.count(node->enumType->typeName) == 0)
+    // knownEnums (module-internal names).
+    std::string typeRef = resolveModuleRef(currentModule_, node->enumType->typeName);
+    if (context->knownEnums.count(typeRef) == 0)
     {
         auto call = std::make_unique<HIRCall>();
         call->position = node->position;
         call->length = node->length;
         call->callKind = HIRCall::CallKind::Static;
-        call->staticTypeName = node->enumType->typeName;
+        call->staticTypeName = typeRef;
         call->methodName = node->variantName;
         for (auto &ga : node->enumType->genericArgs)
             call->genericParams.push_back(toRaw(ga.get()));
@@ -878,7 +897,7 @@ void HIRBuilder::visit(VariantInitExpr *node)
     auto result = std::make_unique<HIRVariantInit>();
     result->position = node->position;
     result->length = node->length;
-    result->enumName = node->enumType->typeName;
+    result->enumName = typeRef;
     result->variantName = node->variantName;
 
     for (auto &ga : node->enumType->genericArgs)
@@ -899,12 +918,13 @@ void HIRBuilder::visit(StaticMemberCall *node)
 {
     // `option<i32>::some(5)` — a turbofish enum-variant construction. Dispatch
     // on knownEnums like visit(VariantInitExpr) does.
-    if (context->knownEnums.count(node->classType->typeName) > 0)
+    std::string typeRef = resolveModuleRef(currentModule_, node->classType->typeName);
+    if (context->knownEnums.count(typeRef) > 0)
     {
         auto result = std::make_unique<HIRVariantInit>();
         result->position = node->position;
         result->length = node->length;
-        result->enumName = node->classType->typeName;
+        result->enumName = typeRef;
         result->variantName = node->methodName;
         for (auto &ga : node->genericParams)
             result->genericArgs.push_back(toRaw(ga.get()));
@@ -922,7 +942,7 @@ void HIRBuilder::visit(StaticMemberCall *node)
     result->position = node->position;
     result->length = node->length;
     result->callKind = HIRCall::CallKind::Static;
-    result->staticTypeName = node->classType->typeName;
+    result->staticTypeName = typeRef;
     result->methodName = node->methodName;
 
     for (auto &arg : node->genericParams)
