@@ -4217,3 +4217,19 @@ TEST_F(RuntimeTest, ModuleCrossReference)
          {"b", "fn seven() -> i32 { ret 7; }"}}));
     EXPECT_EQ(linkAndRun(), 7);
 }
+
+TEST_F(RuntimeTest, ModuleImportAfterLexErrorStillRejected)
+{
+    // A lex error (`@`) BEFORE an import must not be wiped by the module's nested
+    // Lexer::run() — which calls ResetErrorCount() and would otherwise zero the
+    // running total, letting a broken program compile (the parser gate would see
+    // 0 errors). This imports a FRESH module (not in the stdlib prologue) so
+    // loadModule actually runs the nested lexer. Regression for the
+    // error-count-reset bug.
+    std::string diag;
+    bool ok = compileMulti(
+        "@\nimpt fresh_mod;\nfn main() -> i32 { ret fresh_mod::f(); }",
+        {{"fresh_mod", "fn f() -> i32 { ret 1; }"}},
+        &diag);
+    EXPECT_FALSE(ok) << "a lex error before an import must still fail the compile";
+}

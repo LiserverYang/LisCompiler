@@ -174,12 +174,13 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
     // `impt foo.bar { a, b };`       → selective import (bare names into scope)
     if (match(TokenCode::AS))
     {
-        stmt->alias = consume(TokenCode::IDENTIFIER, "expected alias name after 'as'", E_ExpectAnIdentifier).value;
-        // A failed consume returns the offending token (the ';' in `impt foo as ;`),
-        // whose value is "" — that must not register as a real (empty) alias. Treat
-        // it as "no alias" so downstream sees has_value()==false instead of "".
-        if (stmt->alias->empty())
-            stmt->alias.reset();
+        // Capture the token so we can tell a successful consume (code == IDENTIFIER)
+        // from a failed one. consume() returns the offending token on failure (the
+        // ';' in `impt foo as ;`, or the last token at EOF), whose value would
+        // otherwise be registered as an alias even though it is not an identifier.
+        Token aliasTok = consume(TokenCode::IDENTIFIER, "expected alias name after 'as'", E_ExpectAnIdentifier);
+        if (aliasTok.code == TokenCode::IDENTIFIER)
+            stmt->alias = aliasTok.value;
     }
     else if (match(TokenCode::LBRACE))
     {

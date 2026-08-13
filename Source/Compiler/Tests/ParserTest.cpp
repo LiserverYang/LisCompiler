@@ -173,6 +173,36 @@ TEST_F(ParserTest, ImptTrailingJunkRejected)
     EXPECT_GT(Logger::GetErrorCount(), 0) << "selective import needs at least one symbol";
 }
 
+TEST_F(ParserTest, ImptFailedAliasNotRegistered)
+{
+    // `impt foo as ;` — the failed alias consume returns the ';' token (value ""),
+    // which must NOT register as a real (empty) alias. Downstream sees
+    // has_value() == false, not an engaged "".
+    parseSource("impt foo as ;");
+    auto &globalStmts = context->program.globalStatements;
+    ASSERT_EQ(globalStmts.size(), 1);
+    auto *imp = dynamic_cast<ImportStmt *>(globalStmts[0].get());
+    ASSERT_NE(imp, nullptr);
+    EXPECT_FALSE(imp->alias.has_value()) << "a failed alias must not leave an empty-string alias";
+}
+
+TEST_F(ParserTest, ImptMissingSemicolonDoesNotLoadModule)
+{
+    // A malformed import (missing ';') must skip the module-loading side effect —
+    // no binding is registered, so no "cannot find module" cascade follows.
+    parseSource("impt foo.bar");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "impt requires a terminating ';'";
+    EXPECT_TRUE(context->importsByModule.empty())
+        << "a malformed import must not register a module binding";
+}
+
+TEST_F(ParserTest, ImptUnclosedSelectiveListRecovers)
+{
+    // `impt math {` at EOF must not spin or crash — it reports errors and recovers.
+    parseSource("impt math {");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
 TEST_F(ParserTest, GlobalVarDefPosition)
 {
     std::string source = "let x = 42;";
