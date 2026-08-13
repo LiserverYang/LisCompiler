@@ -264,10 +264,14 @@ void Parser::loadModule(const std::string &canonical)
         return;
     }
 
-    // Save/restore the single-slot file fields (mirrors CompilePipeline's
-    // stdlib preload), then recursively lex + parse the module file.
+    // Save/restore the single-slot file fields AND the token stream (mirrors
+    // CompilePipeline's stdlib preload). The token stream MUST be saved: the
+    // recursive Lexer overwrites context->tokenStream, and the CURRENT parser's
+    // tokenStream pointer (bound to &context->tokenStream) would otherwise
+    // start reading the module file's tokens mid-parse.
     std::string savedFilePath = context->filePath;
     std::string savedFileValue = context->fileValue;
+    TokenStream savedStream = std::move(context->tokenStream);
 
     std::ifstream file(foundPath);
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -283,6 +287,7 @@ void Parser::loadModule(const std::string &canonical)
 
     context->filePath = savedFilePath;
     context->fileValue = savedFileValue;
+    context->tokenStream = std::move(savedStream);
 
     context->loadingModules.erase(canonical);
     context->loadedModules.insert(canonical);
@@ -669,6 +674,7 @@ std::unique_ptr<TypeNode> Parser::parseType()
         if (check(TokenCode::DOUBLE_COLON) && !resolveModuleAlias(type->typeName).empty())
         {
             std::string canonical = resolveModuleAlias(type->typeName);
+            match(TokenCode::DOUBLE_COLON); // consume the '::'
             Token inner = consume(TokenCode::IDENTIFIER, "expected type name after '::'", E_ExpectAnIdentifier);
             type->typeName = internalName(canonical, inner.value);
         }

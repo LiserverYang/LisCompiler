@@ -192,6 +192,88 @@ protected:
         return true;
     }
 
+    /// Compile `source` with extra MODULE files. Each module entry is
+    /// (module-path, content); files are written under a fresh temp dir that is
+    /// prepended to Context::searchPaths, so `impt foo.bar;` finds foo/bar.lis.
+    /// The stdlib is still preloaded into the root module (as compile() does).
+    bool compileMulti(const std::string &source,
+        const std::vector<std::pair<std::string, std::string>> &modules,
+        std::string *diagnostics = nullptr)
+    {
+        auto context = std::make_shared<Context>();
+        context->args->setArg("o", "2");
+        context->args->setArg("filePath", "test.lis");
+
+        // Write the module files and expose them via searchPaths.
+        fs::path modDir = fs::temp_directory_path() / ("lis_mods_" + std::to_string(g_rtCounter++));
+        fs::create_directories(modDir);
+        for (auto &[name, src] : modules)
+        {
+            // Dot-separated module path → filesystem path: "foo.bar" → foo/bar
+            fs::path relPath;
+            std::string seg;
+            for (char c : name)
+            {
+                if (c == '.') { relPath /= seg; seg.clear(); }
+                else seg += c;
+            }
+            relPath /= seg;
+            fs::path p = modDir / relPath;
+            p += ".lis";
+            fs::create_directories(p.parent_path());
+            std::ofstream f(p);
+            f << src;
+        }
+        context->searchPaths.push_back(modDir.string());
+
+        // Preload the stdlib (Lexer + Parser only, mirroring CompilePipeline).
+        for (auto &entry : fs::directory_iterator(stdLibDir))
+        {
+            if (entry.path().extension() != ".lis") continue;
+            std::ifstream file(entry.path());
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            context->filePath = entry.path().string();
+            context->fileValue = content;
+            Lexer lexer(context);
+            lexer.run();
+            Parser parser(context);
+            parser.parseAll();
+        }
+
+        // Main source.
+        context->filePath = "test.lis";
+        context->fileValue = source;
+        Lexer lexer(context);
+        lexer.run();
+        Parser parser(context);
+        parser.parseAll();
+        if (Logger::GetErrorCount() > 0) { fs::remove_all(modDir); return false; }
+
+        HIRBuilder builder(context);
+        builder.run();
+
+        // Gate on semantic errors — do NOT call sema.run() (it calls exit(1)).
+        Logger::ResetErrorCount();
+        HIRSemanticAnalyzer sema(context);
+        sema.visit(context->hirProgram.get());
+        if (Logger::GetErrorCount() > 0) { fs::remove_all(modDir); return false; }
+
+        MIRBuilder mir(context);
+        mir.run();
+        MIRMonomorphization mono(context);
+        mono.run();
+        LLVMIRBuilder llvm(context, context->llvmContext, "test.lis");
+        llvm.run();
+
+        Emitter::Options opts;
+        opts.outPath = objPath.string();
+        Emitter emitter(context, opts);
+        emitter.run();
+        fs::remove_all(modDir);
+        (void)diagnostics;
+        return true;
+    }
+
     /// Link objPath → exePath with the MinGW toolchain, then run it and return
     /// the process exit code (-1 if linking or launching failed). If `out` is
     /// non-null the child's stdout is captured into it; if `in` is non-null its
@@ -4030,4 +4112,105 @@ TEST_F(RuntimeTest, SimpleBoolPrint
 )
 {
     expectOutput("fn main() -> i32 { print_bool(true); println(); ret 0; }", "1\n", 0);
+}
+
+// ── module system (import) ────────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, MultiFileFullImport)
+{
+    ASSERT_TRUE(compileMulti(
+        "impt math_lib;\n"
+        "fn main() -> i32 { ret math_lib::double_it(21); }",
+        {{"math_lib", "fn double_it(x: i32) -> i32 { ret x * 2; }"}}));
+    EXPECT_EQ(linkAndRun(), 42);
+}
+
+TEST_F(RuntimeTest, ModuleAliasImport)
+{
+    ASSERT_TRUE(compileMulti(
+        "impt math_lib as m;\n"
+        "fn main() -> i32 { ret m::double_it(21); }",
+        {{"math_lib", "fn double_it(x: i32) -> i32 { ret x * 2; }"}}));
+    EXPECT_EQ(linkAndRun(), 42);
+}
+
+TEST_F(RuntimeTest, ModuleNestedPathImport)
+{
+    ASSERT_TRUE(compileMulti(
+        "impt lib.nums;\n"
+        "fn main() -> i32 { ret nums::double_it(5) + nums::triple_it(10); }",
+        {{"lib.nums", "fn double_it(x: i32) -> i32 { ret x * 2; }\n"
+                       "fn triple_it(x: i32) -> i32 { ret x * 3; }"}}));
+    EXPECT_EQ(linkAndRun(), 40);
+}
+
+TEST_F(RuntimeTest, ModuleNotFoundRejected)
+{
+    std::string diag;
+    bool ok = compileMulti("impt no_such_module;\nfn main() -> i32 { ret 0; }", {}, &diag);
+    EXPECT_FALSE(ok) << "importing a missing module must fail";
+}
+
+TEST_F(RuntimeTest, ModuleTypeIsolation)
+{
+    // Two modules each define their own `struct Vec2` and `fn make` — the
+    // module prefix keeps them from colliding.
+    ASSERT_TRUE(compileMulti(
+        "impt a;\n"
+        "impt b;\n"
+        "fn main() -> i32 { ret a::make(3) + b::make(4); }",
+        {{"a", "struct Vec2 { pub x: i32 }\nfn make(v: i32) -> i32 { ret v; }"},
+         {"b", "struct Vec2 { pub x: i32 }\nfn make(v: i32) -> i32 { ret v * 10; }"}}));
+    EXPECT_EQ(linkAndRun(), 43);
+}
+
+TEST_F(RuntimeTest, ModuleQualifiedStructLiteral)
+{
+    ASSERT_TRUE(compileMulti(
+        "impt geom;\n"
+        "fn main() -> i32 { let v = geom::Vec2 { x: 5, y: 6 }; ret v.x + v.y; }",
+        {{"geom", "struct Vec2 { pub x: i32, pub y: i32 }"}}));
+    EXPECT_EQ(linkAndRun(), 11);
+}
+
+TEST_F(RuntimeTest, ModuleQualifiedEnumVariant)
+{
+    ASSERT_TRUE(compileMulti(
+        "impt shapes;\n"
+        "fn main() -> i32 { let s = shapes::Shape::Circle(7); let r = match s { Circle(r) => r, Square(_) => 0 }; ret r; }",
+        {{"shapes", "enum Shape { Circle(i32), Square(i32) }"}}));
+    EXPECT_EQ(linkAndRun(), 7);
+}
+
+TEST_F(RuntimeTest, ModuleQualifiedTypeAnnotation)
+{
+    ASSERT_TRUE(compileMulti(
+        "impt geom;\n"
+        "fn area(v: geom::Vec2) -> i32 { ret v.x * v.y; }\n"
+        "fn main() -> i32 { ret area(geom::Vec2 { x: 3, y: 4 }); }",
+        {{"geom", "struct Vec2 { pub x: i32, pub y: i32 }"}}));
+    EXPECT_EQ(linkAndRun(), 12);
+}
+
+TEST_F(RuntimeTest, CircularImportRejected)
+{
+    // a.lis imports b, b.lis imports a — the cycle must be diagnosed.
+    std::string diag;
+    bool ok = compileMulti(
+        "impt a;\nfn main() -> i32 { ret a::f(); }",
+        {{"a", "impt b;\nfn f() -> i32 { ret b::g(); }"},
+         {"b", "impt a;\nfn g() -> i32 { ret 1; }"}},
+        &diag);
+    EXPECT_FALSE(ok) << "circular imports must be rejected";
+}
+
+TEST_F(RuntimeTest, ModuleCrossReference)
+{
+    // Module a calls into module b (both imported by the main file).
+    ASSERT_TRUE(compileMulti(
+        "impt a;\nimpt b;\n"
+        "fn main() -> i32 { ret a::call_b(); }",
+        {{"a", "impt b;\nfn call_b() -> i32 { ret b::seven(); }"},
+         {"b", "fn seven() -> i32 { ret 7; }"}}));
+    EXPECT_EQ(linkAndRun(), 7);
 }
