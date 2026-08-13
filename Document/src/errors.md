@@ -55,11 +55,10 @@
 | 3003 | Undefined identifier（模块错误也归此码：cannot find module 'x' / circular import: module 'x' / module 'x' has no member 'y' / selective import of 'y' conflicts with an existing name） |
 | 3004 | cannot assign to immutable variable 'x'（及字段/元素/共享引用变体） |
 | 3005 | use of moved value: 'x'（含 partially moved / moved inside loop 变体） |
-| 3006 | Arg mismatch |
-| 3007 | Generic error |
-| 3008 | Trait error |
-| 3009 | Return type mismatch |
-| 3010 | Cast error |
+
+> 3006–3010（Arg mismatch / Generic / Trait / Return type / Cast）在 ErrorID.hpp 中定义，
+> 但语义分析器实际未使用 —— 实参/泛型/trait/返回/cast 类错误均落到 3001/3002 或带消息
+> 的 3001。E2016 用于字面量溢出（语义层）。
 
 ## E4xxx 借用检查
 
