@@ -46,4 +46,6 @@ public:
     static int GetErrorCount();
     /** Reset the error counter (start of a fresh compilation unit). */
     static void ResetErrorCount();
+    /** Set the error counter (restore after a nested module lex resets it). */
+    static void SetErrorCount(int count);
 };

@@ -13,7 +13,7 @@ impt string { String };
 ```
 
 六个模块：`drop`（Drop trait）、`option`（Option<T>）、`iterator`（Iterator/Range/for
-协议）、`math`（Numeric/算子 trait + 数值函数）、`char`（字符分类）、`string`
+协议）、`math`（Numeric/算子 trait + 数值函数）、`chars`（字符分类）、`string`
 （String 堆字符串）。模块间依赖已显式声明（iterator 导入 option；string 导入
 drop 与 option）—— 只需导入你直接使用的模块。
 
@@ -86,7 +86,7 @@ struct String
   （无一元负号，`0 - x` 实现）、`gcd` `lcm` `ipow` `is_even` `is_odd` `sign`
   `deg_to_rad` `rad_to_deg` `lerp`。
 
-## char
+## chars
 
 `is_digit` `is_alpha` `is_alphanumeric` `is_whitespace` `digit_to_int`——
 只用比较与 `as i32`（char 无算术）。

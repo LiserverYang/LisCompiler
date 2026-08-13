@@ -148,22 +148,9 @@ std::unique_ptr<ModulePath> Parser::parseModulePath()
 
     do
     {
-        // A module segment may be an identifier OR a keyword (the stdlib's
-        // char.lis module is spelled `impt char;` — `char` lexes as the CHAR
-        // type keyword, not an IDENTIFIER). Accept any name-like token.
-        Token seg = currentToken();
-        bool nameLike = seg.code == TokenCode::IDENTIFIER
-            || ((size_t)seg.code >= TYPE_KEYWORD_BEGIN && (size_t)seg.code <= TYPE_KEYWORD_END)
-            || ((size_t)seg.code >= (size_t)TokenCode::IMPT && (size_t)seg.code <= (size_t)TokenCode::BOOLEAN_FALSE);
-        if (nameLike)
-        {
-            path->pathSegments.push_back(seg.value);
-            advance();
-        }
-        else
-        {
-            path->pathSegments.push_back(consume(TokenCode::IDENTIFIER, "expected module name", E_ExpectAnIdentifier).value);
-        }
+        // Module segments are IDENTIFIERS only — keywords are not module names
+        // (the stdlib's character module is spelled `chars`, not `char`).
+        path->pathSegments.push_back(consume(TokenCode::IDENTIFIER, "expected module name", E_ExpectAnIdentifier).value);
     } while (match(TokenCode::DOT));
 
     return path;
@@ -173,6 +160,10 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
 {
     auto stmt = std::make_unique<ImportStmt>();
     PositionRecorder recorder(this, stmt.get());
+
+    // Snapshot the error count so we can skip the module-loading side effect if
+    // THIS import statement failed to parse (see the gate before loadModule).
+    int errBefore = Logger::GetErrorCount();
 
     match(TokenCode::IMPT);
 
@@ -184,11 +175,20 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
     if (match(TokenCode::AS))
     {
         stmt->alias = consume(TokenCode::IDENTIFIER, "expected alias name after 'as'", E_ExpectAnIdentifier).value;
+        // A failed consume returns the offending token (the ';' in `impt foo as ;`),
+        // whose value is "" — that must not register as a real (empty) alias. Treat
+        // it as "no alias" so downstream sees has_value()==false instead of "".
+        if (stmt->alias->empty())
+            stmt->alias.reset();
     }
     else if (match(TokenCode::LBRACE))
     {
         std::vector<std::string> symbols;
-        while (!check(TokenCode::RBRACE))
+        // Guard with !finished(): at EOF, check() keeps returning the last
+        // (non-`}`) token via currentToken(), so without this the loop would spin
+        // through consume() error-logs once per remaining token — an error storm
+        // for a single unclosed brace (`impt math {` + EOF).
+        while (!finished() && !check(TokenCode::RBRACE))
         {
             symbols.push_back(consume(TokenCode::IDENTIFIER, "expected symbol name", E_ExpectAnIdentifier).value);
             if (!match(TokenCode::COMMA))
@@ -201,6 +201,13 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
     }
 
     consume(TokenCode::SEMI, "expected ';' after import statement", E_ExpectASEMI);
+
+    // If THIS import statement produced errors (missing ';', failed alias, empty
+    // selective list, …), skip the module-loading side effect: loading a module
+    // from a malformed import only cascades spurious "cannot find module" noise
+    // on top of the real syntax error.
+    if (Logger::GetErrorCount() > errBefore)
+        return stmt;
 
     // ── module-system side effect: bind the import and load the file ──────
     // Join the dot-path into a canonical module path ("foo.bar") and record the
@@ -309,11 +316,23 @@ void Parser::loadModule(const std::string &canonical)
     context->fileValue = content;
     context->fileContents[foundPath] = content;
 
+    // Save the outer error count: Lexer::run() calls ResetErrorCount() (it treats
+    // each lex as a fresh unit), so lexing the module here would WIPE every error
+    // the outer file accumulated before this import — the Parser gate would then
+    // see 0 errors and compile a broken program (e.g. a `@` lex error followed by
+    // an import exits 0 instead of 1). Fold the module's own errors back into the
+    // running total: after the reset, GetErrorCount() holds exactly the module's
+    // (transitive) errors, so savedErrors + moduleErrors is the merged count.
+    int savedErrors = Logger::GetErrorCount();
+
     Lexer lexer(context);
-    lexer.run();
+    lexer.run();      // resets the count to 0, then lexes the module file
     Parser parser(context);
     parser.setCurrentModule(canonical);
     parser.parseAll(); // gate-free: parse errors are non-fatal and counted
+
+    int moduleErrors = Logger::GetErrorCount();
+    Logger::SetErrorCount(savedErrors + moduleErrors);
 
     context->filePath = savedFilePath;
     context->fileValue = savedFileValue;

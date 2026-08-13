@@ -1,0 +1,44 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// chars.lis
+//
+// char classification helpers. `char` is an i32 at runtime and only supports
+// comparison + cast-to-i32 (no char arithmetic), which is all these need.
+//
+// All functions classify a single character against the ASCII ranges. To read
+// a character as a number, use `digit_to_int` (or the plain cast `c as i32`).
+
+// True if `c` is an ASCII digit `'0'`..`'9'`.
+fn is_digit(c: char) -> bool
+{
+    ret (c >= '0') && (c <= '9');
+}
+
+// True if `c` is an ASCII letter `'a'`..`'z'` or `'A'`..`'Z'`.
+fn is_alpha(c: char) -> bool
+{
+    ret ((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z'));
+}
+
+// True if `c` is a digit or a letter.
+fn is_alphanumeric(c: char) -> bool
+{
+    ret is_digit(c) || is_alpha(c);
+}
+
+// True if `c` is whitespace: space, tab, newline or carriage return.
+fn is_whitespace(c: char) -> bool
+{
+    ret (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r');
+}
+
+// The integer value of a digit character: `'7'` → `7`. Returns `0` for a
+// non-digit.
+fn digit_to_int(c: char) -> i32
+{
+    if (c < '0') || (c > '9') {
+        ret 0;
+    }
+    ret (c as i32) - ('0' as i32);
+}

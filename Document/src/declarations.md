@@ -9,7 +9,7 @@
 
 每个源文件是一个模块。模块隔离命名空间：模块 A 的顶层名字对模块 B 不可见，
 除非 B 显式导入。标准库**不再自动预加载** —— 用到的每个标准库模块都要显式
-`impt`（`math`、`option`、`iterator`、`string`、`char`、`drop`）。
+`impt`（`math`、`option`、`iterator`、`string`、`chars`、`drop`）。
 
 <grammar>
 import_statement = "impt" module_path ["as" identifier | "{" identifier_list "}"] ";"

@@ -100,6 +100,11 @@ void Logger::ResetErrorCount()
     gErrorCount = 0;
 }
 
+void Logger::SetErrorCount(int count)
+{
+    gErrorCount = count;
+}
+
 void Logger::Log(Logger::LogLevel level, Logger::LogInfo info)
 {
     if (level == LogLevel::ERROR)

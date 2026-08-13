@@ -60,7 +60,7 @@ static const char *kStdlibPrologue =
     "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
     "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
     "impt string { String };\n"
-    "impt char { is_digit, is_alpha, is_alphanumeric, is_whitespace, digit_to_int };\n"
+    "impt chars { is_digit, is_alpha, is_alphanumeric, is_whitespace, digit_to_int };\n"
     "impt drop { Drop };\n";
 
 /// Math-only prologue for snippets that DEFINE their own `fn sum` (which would
@@ -2566,7 +2566,7 @@ TEST_F(RuntimeTest, MathLerpBeyondRange)
         "20.000000\n", 0);
 }
 
-// ── E: char.lis ────────────────────────────────────────────────────────────────
+// ── E: chars.lis ────────────────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, CharIsDigitTrue)
 {
