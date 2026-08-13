@@ -11,9 +11,6 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [
-    "onLanguage:lis"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
@@ -51,10 +48,12 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./"
   },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.75.0",
-    "typescript": "^5.0.0",
-    "vscode-languageclient": "^9.0.1"
+    "typescript": "^5.0.0"
   }
 }
