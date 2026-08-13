@@ -663,36 +663,31 @@ TEST_F(LexerTest, ConsecutiveCharLiterals)
     expectToken(1, TokenCode::CHAR_LITERAL, "b", 1, 4);
 }
 
-TEST_F(LexerTest, MultiDigitExponent
-)
+TEST_F(LexerTest, MultiDigitExponent)
 {
     runLexer("1e123");
     expectToken(0, TokenCode::FLOAT_LITERAL, "1e123", 1, 1);
 }
 
-TEST_F(LexerTest, ExponentWithNegativeLarge
-)
+TEST_F(LexerTest, ExponentWithNegativeLarge)
 {
     runLexer("2.5e-10");
     expectToken(0, TokenCode::FLOAT_LITERAL, "2.5e-10", 1, 1);
 }
 
-TEST_F(LexerTest, ZeroFloat
-)
+TEST_F(LexerTest, ZeroFloat)
 {
     runLexer("0.0");
     expectToken(0, TokenCode::FLOAT_LITERAL, "0.0", 1, 1);
 }
 
-TEST_F(LexerTest, LargeIntegerRun
-)
+TEST_F(LexerTest, LargeIntegerRun)
 {
     runLexer("123456789");
     expectToken(0, TokenCode::INT_LITERAL, "123456789", 1, 1);
 }
 
-TEST_F(LexerTest, DecimalThenIdentifierBoundary
-)
+TEST_F(LexerTest, DecimalThenIdentifierBoundary)
 {
     runLexer("3abc");
     expectToken(0, TokenCode::INT_LITERAL, "3", 1, 1);
@@ -701,8 +696,7 @@ TEST_F(LexerTest, DecimalThenIdentifierBoundary
 
 // ── D2: more operator/delimiter edge cases ─────────────────────────────────────
 
-TEST_F(LexerTest, AssignmentInExpression
-)
+TEST_F(LexerTest, AssignmentInExpression)
 {
     runLexer("= == != ==");
     expectToken(0, TokenCode::ASSIGN, "=", 1, 1);
@@ -711,8 +705,7 @@ TEST_F(LexerTest, AssignmentInExpression
     expectToken(3, TokenCode::EQ_EQ, "==", 1, 9);
 }
 
-TEST_F(LexerTest, ReferenceThenBorrow
-)
+TEST_F(LexerTest, ReferenceThenBorrow)
 {
     runLexer("& && &");
     expectToken(0, TokenCode::REFERENCE, "&", 1, 1);
@@ -720,8 +713,7 @@ TEST_F(LexerTest, ReferenceThenBorrow
     expectToken(2, TokenCode::REFERENCE, "&", 1, 6);
 }
 
-TEST_F(LexerTest, ColonDoubleColonMix
-)
+TEST_F(LexerTest, ColonDoubleColonMix)
 {
     runLexer(": :: :::");
     expectToken(0, TokenCode::COLON, ":", 1, 1);
@@ -730,8 +722,7 @@ TEST_F(LexerTest, ColonDoubleColonMix
     expectToken(3, TokenCode::COLON, ":", 1, 8);
 }
 
-TEST_F(LexerTest, OperatorsNoSpaces
-)
+TEST_F(LexerTest, OperatorsNoSpaces)
 {
     runLexer("+=-*");
     expectToken(0, TokenCode::PLUS, "+", 1, 1);
@@ -740,8 +731,7 @@ TEST_F(LexerTest, OperatorsNoSpaces
     expectToken(3, TokenCode::STAR, "*", 1, 4);
 }
 
-TEST_F(LexerTest, BracketsBalanced
-)
+TEST_F(LexerTest, BracketsBalanced)
 {
     runLexer("[](){}");
     expectToken(0, TokenCode::LBRACKET, "[", 1, 1);
@@ -762,8 +752,7 @@ TEST_F(LexerTest, IdentifierStartingWithUnderscore)
     expectToken(2, TokenCode::IDENTIFIER, "_", 1, 19);
 }
 
-TEST_F(LexerTest, KeywordFollowedByUnderscoreIsIdentifier
-)
+TEST_F(LexerTest, KeywordFollowedByUnderscoreIsIdentifier)
 {
     runLexer("if_ else_ ret_");
     expectToken(0, TokenCode::IDENTIFIER, "if_", 1, 1);
@@ -771,16 +760,14 @@ TEST_F(LexerTest, KeywordFollowedByUnderscoreIsIdentifier
     expectToken(2, TokenCode::IDENTIFIER, "ret_", 1, 11);
 }
 
-TEST_F(LexerTest, TypeKeywordFollowedByDigit
-)
+TEST_F(LexerTest, TypeKeywordFollowedByDigit)
 {
     runLexer("i32x i64_");
     expectToken(0, TokenCode::IDENTIFIER, "i32x", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "i64_", 1, 6);
 }
 
-TEST_F(LexerTest, SingleCharacterIdentifiers
-)
+TEST_F(LexerTest, SingleCharacterIdentifiers)
 {
     runLexer("a b c");
     expectToken(0, TokenCode::IDENTIFIER, "a", 1, 1);
@@ -788,8 +775,7 @@ TEST_F(LexerTest, SingleCharacterIdentifiers
     expectToken(2, TokenCode::IDENTIFIER, "c", 1, 5);
 }
 
-TEST_F(LexerTest, MixedCaseKeywordsBoundary
-)
+TEST_F(LexerTest, MixedCaseKeywordsBoundary)
 {
     runLexer("IF If iF");
     expectToken(0, TokenCode::IDENTIFIER, "IF", 1, 1);
@@ -799,8 +785,7 @@ TEST_F(LexerTest, MixedCaseKeywordsBoundary
 
 // ── D2: positions & whitespace ─────────────────────────────────────────────────
 
-TEST_F(LexerTest, MultiLinePositionsWithContent
-)
+TEST_F(LexerTest, MultiLinePositionsWithContent)
 {
     runLexer("let x = 1;\nlet y = 2;");
     expectToken(0, TokenCode::LET, "let", 1, 1);
@@ -809,31 +794,27 @@ TEST_F(LexerTest, MultiLinePositionsWithContent
     expectToken(8, TokenCode::INT_LITERAL, "2", 2, 9);
 }
 
-TEST_F(LexerTest, WindowsNewlinePositions
-)
+TEST_F(LexerTest, WindowsNewlinePositions)
 {
     runLexer("a\r\nb");
     expectToken(0, TokenCode::IDENTIFIER, "a", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "b", 2, 1);
 }
 
-TEST_F(LexerTest, TabsAndSpacesMixed
-)
+TEST_F(LexerTest, TabsAndSpacesMixed)
 {
     runLexer("  \t  let");
     expectToken(0, TokenCode::LET, "let", 1, 6);
 }
 
-TEST_F(LexerTest, CommentBetweenTokens
-)
+TEST_F(LexerTest, CommentBetweenTokens)
 {
     runLexer("a /* mid */ b");
     expectToken(0, TokenCode::IDENTIFIER, "a", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "b", 1, 13);
 }
 
-TEST_F(LexerTest, MultipleLineComments
-)
+TEST_F(LexerTest, MultipleLineComments)
 {
     runLexer("// one\n// two\nx");
     expectToken(0, TokenCode::IDENTIFIER, "x", 3, 1);
@@ -841,8 +822,7 @@ TEST_F(LexerTest, MultipleLineComments
 
 // ── D2: unknown chars & errors ─────────────────────────────────────────────────
 
-TEST_F(LexerTest, UnknownCharsStillLexAround
-)
+TEST_F(LexerTest, UnknownCharsStillLexAround)
 {
     runLexer("a $ b");
     EXPECT_GT(Logger::GetErrorCount(), 0);
@@ -851,29 +831,25 @@ TEST_F(LexerTest, UnknownCharsStillLexAround
     EXPECT_EQ(context->tokenStream[2].value, "b");
 }
 
-TEST_F(LexerTest, TildeIsUnknownChar
-)
+TEST_F(LexerTest, TildeIsUnknownChar)
 {
     runLexer("~");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(LexerTest, CaretIsUnknownChar
-)
+TEST_F(LexerTest, CaretIsUnknownChar)
 {
     runLexer("^");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(LexerTest, UnclosedStringThenMoreTokens
-)
+TEST_F(LexerTest, UnclosedStringThenMoreTokens)
 {
     runLexer("\"abc let");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(LexerTest, CharLiteralExtraChars
-)
+TEST_F(LexerTest, CharLiteralExtraChars)
 {
     // `'ab'` is a malformed char literal — first char read, closing quote check
     // fails.
@@ -881,8 +857,7 @@ TEST_F(LexerTest, CharLiteralExtraChars
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(LexerTest, BlockCommentAtStartThenCode
-)
+TEST_F(LexerTest, BlockCommentAtStartThenCode)
 {
     runLexer("/*x*/y");
     expectToken(0, TokenCode::IDENTIFIER, "y", 1, 6);
@@ -898,8 +873,7 @@ TEST_F(LexerTest, StringThenCharMix)
     expectToken(1, TokenCode::CHAR_LITERAL, "c", 1, 4);
 }
 
-TEST_F(LexerTest, NumberThenOperators
-)
+TEST_F(LexerTest, NumberThenOperators)
 {
     runLexer("5+5-5");
     expectToken(0, TokenCode::INT_LITERAL, "5", 1, 1);
@@ -909,54 +883,47 @@ TEST_F(LexerTest, NumberThenOperators
     expectToken(4, TokenCode::INT_LITERAL, "5", 1, 5);
 }
 
-TEST_F(LexerTest, AllTypeKeywords
-)
+TEST_F(LexerTest, AllTypeKeywords)
 {
     runLexer("i8 i16 i32 i64 f32 f64 bool char void");
     expectToken(0, TokenCode::I8, "i8", 1, 1);
     expectToken(8, TokenCode::VOID, "void", 1, 34);
 }
 
-TEST_F(LexerTest, DoubleColonBeforeIdent
-)
+TEST_F(LexerTest, DoubleColonBeforeIdent)
 {
     runLexer("::foo");
     expectToken(0, TokenCode::DOUBLE_COLON, "::", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "foo", 1, 3);
 }
 
-TEST_F(LexerTest, ArrowThenIdent
-)
+TEST_F(LexerTest, ArrowThenIdent)
 {
     runLexer("->x");
     expectToken(0, TokenCode::ARROW, "->", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "x", 1, 3);
 }
 
-TEST_F(LexerTest, FloatWithMultipleDigits
-)
+TEST_F(LexerTest, FloatWithMultipleDigits)
 {
     runLexer("123.456");
     expectToken(0, TokenCode::FLOAT_LITERAL, "123.456", 1, 1);
 }
 
-TEST_F(LexerTest, LineCommentWithCodeAfter
-)
+TEST_F(LexerTest, LineCommentWithCodeAfter)
 {
     runLexer("// c\n\nlet x");
     expectToken(0, TokenCode::LET, "let", 3, 1);
 }
 
-TEST_F(LexerTest, CharAndStringAdjacent
-)
+TEST_F(LexerTest, CharAndStringAdjacent)
 {
     runLexer("'a'\"b\"");
     expectToken(0, TokenCode::CHAR_LITERAL, "a", 1, 1);
     expectToken(1, TokenCode::STRING_LITERAL, "b", 1, 4);
 }
 
-TEST_F(LexerTest, Semicolons
-)
+TEST_F(LexerTest, Semicolons)
 {
     runLexer(";;;");
     expectToken(0, TokenCode::SEMI, ";", 1, 1);
@@ -964,8 +931,7 @@ TEST_F(LexerTest, Semicolons
     expectToken(2, TokenCode::SEMI, ";", 1, 3);
 }
 
-TEST_F(LexerTest, CommaAndColon
-)
+TEST_F(LexerTest, CommaAndColon)
 {
     runLexer(", : ,");
     expectToken(0, TokenCode::COMMA, ",", 1, 1);
@@ -973,37 +939,32 @@ TEST_F(LexerTest, CommaAndColon
     expectToken(2, TokenCode::COMMA, ",", 1, 5);
 }
 
-TEST_F(LexerTest, IdentifierAfterNumberNoSpace
-)
+TEST_F(LexerTest, IdentifierAfterNumberNoSpace)
 {
     runLexer("42x");
     expectToken(0, TokenCode::INT_LITERAL, "42", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "x", 1, 3);
 }
 
-TEST_F(LexerTest, FloatExponentWithDecimal
-)
+TEST_F(LexerTest, FloatExponentWithDecimal)
 {
     runLexer("3.14e2");
     expectToken(0, TokenCode::FLOAT_LITERAL, "3.14e2", 1, 1);
 }
 
-TEST_F(LexerTest, EmptyLinePosition
-)
+TEST_F(LexerTest, EmptyLinePosition)
 {
     runLexer("\n\nx");
     expectToken(0, TokenCode::IDENTIFIER, "x", 3, 1);
 }
 
-TEST_F(LexerTest, TabBeforeToken
-)
+TEST_F(LexerTest, TabBeforeToken)
 {
     runLexer("\tx");
     expectToken(0, TokenCode::IDENTIFIER, "x", 1, 2);
 }
 
-TEST_F(LexerTest, MultipleBlockComments
-)
+TEST_F(LexerTest, MultipleBlockComments)
 {
     // /*a*/ = cols 1-5, x = 6, /*b*/ = 7-11, y = 12.
     runLexer("/*a*/x/*b*/y");
@@ -1011,39 +972,34 @@ TEST_F(LexerTest, MultipleBlockComments
     expectToken(1, TokenCode::IDENTIFIER, "y", 1, 12);
 }
 
-TEST_F(LexerTest, NestedBlockCommentContent
-)
+TEST_F(LexerTest, NestedBlockCommentContent)
 {
     runLexer("/* outer { */ x");
     expectToken(0, TokenCode::IDENTIFIER, "x", 1, 15);
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(LexerTest, NegativeNumberTokenizesAsMinusInt
-)
+TEST_F(LexerTest, NegativeNumberTokenizesAsMinusInt)
 {
     runLexer("-5");
     expectToken(0, TokenCode::MINUS, "-", 1, 1);
     expectToken(1, TokenCode::INT_LITERAL, "5", 1, 2);
 }
 
-TEST_F(LexerTest, UnderscoreIdentifier
-)
+TEST_F(LexerTest, UnderscoreIdentifier)
 {
     runLexer("_");
     expectToken(0, TokenCode::IDENTIFIER, "_", 1, 1);
 }
 
-TEST_F(LexerTest, KeywordSelfThenIdent
-)
+TEST_F(LexerTest, KeywordSelfThenIdent)
 {
     runLexer("self selfx");
     expectToken(0, TokenCode::SELF, "self", 1, 1);
     expectToken(1, TokenCode::IDENTIFIER, "selfx", 1, 6);
 }
 
-TEST_F(LexerTest, ExclamationVariants
-)
+TEST_F(LexerTest, ExclamationVariants)
 {
     runLexer("! != !");
     expectToken(0, TokenCode::NOT, "!", 1, 1);

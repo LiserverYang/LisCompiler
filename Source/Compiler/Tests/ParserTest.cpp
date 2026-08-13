@@ -1080,65 +1080,56 @@ TEST_F(ParserTest, MissingFunctionReturnArrow)
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingIfCondition
-)
+TEST_F(ParserTest, MissingIfCondition)
 {
     parseSource("fn main() -> i32 { if { ret 1; } ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingLoopVariable
-)
+TEST_F(ParserTest, MissingLoopVariable)
 {
     parseSource("fn main() -> i32 { for in range(1, 5) { ret 0; } }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingInKeyword
-)
+TEST_F(ParserTest, MissingInKeyword)
 {
     parseSource("fn main() -> i32 { for x range(1, 5) { ret 0; } }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, StructSelfReferenceNoParseError
-)
+TEST_F(ParserTest, StructSelfReferenceNoParseError)
 {
     // A recursive struct field parses fine; the sema rejects it later.
     parseSource("struct S { next: S } fn main() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, EnumIncompletePayload
-)
+TEST_F(ParserTest, EnumIncompletePayload)
 {
     parseSource("enum E { A(i32, ) }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingGlobalInit
-)
+TEST_F(ParserTest, MissingGlobalInit)
 {
     parseSource("let g; fn main() -> i32 { ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, TwoTypesForParam
-)
+TEST_F(ParserTest, TwoTypesForParam)
 {
     parseSource("fn f(x: i32 i32) -> i32 { ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, EmptyParensParam
-)
+TEST_F(ParserTest, EmptyParensParam)
 {
     parseSource("fn f(()) -> i32 { ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, TrailingCommaInArgs
-)
+TEST_F(ParserTest, TrailingCommaInArgs)
 {
     parseSource("fn main() -> i32 { ret f(1, 2,); }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
@@ -1156,8 +1147,7 @@ TEST_F(ParserTest, EnumVariantPayloadCount)
     EXPECT_EQ(def->variants[2]->payloadTypes.size(), 3);
 }
 
-TEST_F(ParserTest, StructImplHasMethods
-)
+TEST_F(ParserTest, StructImplHasMethods)
 {
     parseSource("struct S { v: i32 } impl S { fn a(self: &S) -> i32 { ret 0; }"
                 " fn b(self: &S) -> i32 { ret 0; } }");
@@ -1166,8 +1156,7 @@ TEST_F(ParserTest, StructImplHasMethods
     EXPECT_EQ(impl->methods.size(), 2);
 }
 
-TEST_F(ParserTest, FunctionGenericParamsCount
-)
+TEST_F(ParserTest, FunctionGenericParamsCount)
 {
     parseSource("fn f<T, U>(a: T, b: U) -> T { ret a; }");
     auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
@@ -1175,8 +1164,7 @@ TEST_F(ParserTest, FunctionGenericParamsCount
     EXPECT_EQ(func->genericParams.size(), 2);
 }
 
-TEST_F(ParserTest, MatchArmBindingCount
-)
+TEST_F(ParserTest, MatchArmBindingCount)
 {
     parseSource("enum E { P(i32, i32) } fn main() -> i32 { let e = E::P(1, 2);"
                 " let y = match e { P(a, b) => a + b }; ret y; }");
@@ -1189,8 +1177,7 @@ TEST_F(ParserTest, MatchArmBindingCount
     EXPECT_EQ(matchExpr->arms[0]->pattern->bindings.size(), 2);
 }
 
-TEST_F(ParserTest, ArrayLiteralElementCount
-)
+TEST_F(ParserTest, ArrayLiteralElementCount)
 {
     parseSource("fn main() -> i32 { let a = [1, 2, 3, 4]; ret 0; }");
     auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
@@ -1202,8 +1189,7 @@ TEST_F(ParserTest, ArrayLiteralElementCount
     EXPECT_EQ(arr->elements.size(), 4);
 }
 
-TEST_F(ParserTest, ReturnStatementHasValue
-)
+TEST_F(ParserTest, ReturnStatementHasValue)
 {
     parseSource("fn main() -> i32 { ret 42; }");
     auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
@@ -1213,8 +1199,7 @@ TEST_F(ParserTest, ReturnStatementHasValue
     EXPECT_TRUE(ret->returnValue.has_value());
 }
 
-TEST_F(ParserTest, ReturnStatementNoValue
-)
+TEST_F(ParserTest, ReturnStatementNoValue)
 {
     parseSource("fn main() { ret; }");
     auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
@@ -1224,8 +1209,7 @@ TEST_F(ParserTest, ReturnStatementNoValue
     EXPECT_FALSE(ret->returnValue.has_value());
 }
 
-TEST_F(ParserTest, AssignStatementTarget
-)
+TEST_F(ParserTest, AssignStatementTarget)
 {
     parseSource("fn main() -> i32 { x = 5; ret 0; }");
     auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[0].get());
@@ -1236,15 +1220,13 @@ TEST_F(ParserTest, AssignStatementTarget
     EXPECT_NE(assign->value, nullptr);
 }
 
-TEST_F(ParserTest, BreakContinueInLoopsParse
-)
+TEST_F(ParserTest, BreakContinueInLoopsParse)
 {
     parseSource("fn main() -> i32 { while true { break; continue; } ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, NestedStructLiteralInInit
-)
+TEST_F(ParserTest, NestedStructLiteralInInit)
 {
     parseSource("struct A { x: i32 } fn main() -> i32 { let a = A { x: A { x: 1 }.x }; ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
@@ -1270,88 +1252,76 @@ TEST_F(ParserTest, ValidEmptyTrait)
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidEnumWithTrailingComma
-)
+TEST_F(ParserTest, ValidEnumWithTrailingComma)
 {
     parseSource("enum E { A, B, } fn main() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidCallOnMemberAccess
-)
+TEST_F(ParserTest, ValidCallOnMemberAccess)
 {
     parseSource("struct S { v: i32 } impl S { fn get(self: &S) -> i32 { ret self.v; } }"
                 " fn main() -> i32 { let s = S { v: 1 }; ret s.get(); }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidFunctionWithManyParams
-)
+TEST_F(ParserTest, ValidFunctionWithManyParams)
 {
     parseSource("fn f(a: i32, b: i32, c: i32, d: i32) -> i32 { ret a + b + c + d; }"
                 " fn main() -> i32 { ret f(1, 2, 3, 4); }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidChainedCalls
-)
+TEST_F(ParserTest, ValidChainedCalls)
 {
     parseSource("fn f(x: i32) -> i32 { ret x; } fn main() -> i32 { ret f(f(1)); }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidArithmeticWithAllOperators
-)
+TEST_F(ParserTest, ValidArithmeticWithAllOperators)
 {
     parseSource("fn main() -> i32 { ret 1 + 2 - 3 * 4 / 5 % 6; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingDotInMemberAccess
-)
+TEST_F(ParserTest, MissingDotInMemberAccess)
 {
     parseSource("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret sv; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingMatchScrutinee
-)
+TEST_F(ParserTest, MissingMatchScrutinee)
 {
     parseSource("enum E { A } fn main() -> i32 { match { A => 1 } ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, UnexpectedKeywordAsStatement
-)
+TEST_F(ParserTest, UnexpectedKeywordAsStatement)
 {
     parseSource("fn main() -> i32 { struct x; ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, MissingParamType
-)
+TEST_F(ParserTest, MissingParamType)
 {
     parseSource("fn f(x:) -> i32 { ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, EmptyFunctionParamList
-)
+TEST_F(ParserTest, EmptyFunctionParamList)
 {
     parseSource("fn f() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidMultipleMethodsInImpl
-)
+TEST_F(ParserTest, ValidMultipleMethodsInImpl)
 {
     parseSource("struct S { v: i32 } impl S { fn a(self: &S) -> i32 { ret self.v; }"
                 " fn b(self: &mut S, x: i32) { self.v = x; } }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidNestedMatch
-)
+TEST_F(ParserTest, ValidNestedMatch)
 {
     parseSource("enum A { X(i32) } enum B { M(i32) } fn main() -> i32 {"
                 " let a = A::X(1); match a { X(v) => { match B::M(v) { M(w) => { ret w; } } } } }");
@@ -1362,30 +1332,26 @@ TEST_F(ParserTest, ValidNestedMatch
 // ambiguous error-recovery behavior (the ParserTest harness reports 0 errors
 // while the full pipeline's run() gate treats it as failing) — not pinned here.
 
-TEST_F(ParserTest, StraySemicolonAfterFunction
-)
+TEST_F(ParserTest, StraySemicolonAfterFunction)
 {
     // A `;` between top-level definitions is an illegal global statement.
     parseSource("fn f() -> i32 { ret 0; }; fn main() -> i32 { ret 0; }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidBooleanLiteralsInExpr
-)
+TEST_F(ParserTest, ValidBooleanLiteralsInExpr)
 {
     parseSource("fn main() -> i32 { if true && false { ret 1; } ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidIndexExpressionWithVariable
-)
+TEST_F(ParserTest, ValidIndexExpressionWithVariable)
 {
     parseSource("fn main() -> i32 { let a = [1, 2]; let i = 0; ret a[i]; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
-TEST_F(ParserTest, ValidBorrowOfCallResult
-)
+TEST_F(ParserTest, ValidBorrowOfCallResult)
 {
     parseSource("fn make() -> i32 { ret 5; } fn main() -> i32 { let r = &make(); ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);

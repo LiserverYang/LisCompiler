@@ -327,7 +327,7 @@ void Parser::loadModule(const std::string &canonical)
     int savedErrors = Logger::GetErrorCount();
 
     Lexer lexer(context);
-    lexer.run();      // resets the count to 0, then lexes the module file
+    lexer.run(); // resets the count to 0, then lexes the module file
     Parser parser(context);
     parser.setCurrentModule(canonical);
     parser.parseAll(); // gate-free: parse errors are non-fatal and counted

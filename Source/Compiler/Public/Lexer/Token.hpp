@@ -86,20 +86,20 @@ enum class TokenCode
     AND,    // &&
 
     /* Delimiter */
-    LBRACE,       // "{"
-    RBRACE,       // "}"
-    LPAREN,       // "("
-    RPAREN,       // ")"
-    COMMA,        // ","
-    COLON,        // ":"
-    SEMI,         // ";"
-    DOT,          // "."
-    DOUBLE_COLON, // "::"
-    ARROW,        // "->"
-    DOUBLE_ARROW, // "=>"
-    REFERENCE,    // &
-    LBRACKET,     // "["
-    RBRACKET,     // "]"
+    LBRACE,          // "{"
+    RBRACE,          // "}"
+    LPAREN,          // "("
+    RPAREN,          // ")"
+    COMMA,           // ","
+    COLON,           // ":"
+    SEMI,            // ";"
+    DOT,             // "."
+    DOUBLE_COLON,    // "::"
+    ARROW,           // "->"
+    DOUBLE_ARROW,    // "=>"
+    REFERENCE,       // &
+    LBRACKET,        // "["
+    RBRACKET,        // "]"
     ATTRIBUTE_START, // "#[" (attributes, e.g. #[i_know = "..."])
 };
 

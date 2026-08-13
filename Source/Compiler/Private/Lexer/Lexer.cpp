@@ -167,8 +167,7 @@ void Lexer::skipBlockComment()
     // Reached EOF without a closing "*/" — report it instead of failing silently.
     // P17: recoverable (exit=false) — see the unknown-char site for why.
     {
-        Logger::LogInfo info = {&source, context->filePath, "Unclosed block comment",
-                                line, column - 1, 1, lineStart, E_UnclosedBlockComment};
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed block comment", line, column - 1, 1, lineStart, E_UnclosedBlockComment};
         info.exit = false;
         Logger::Log(Logger::LogLevel::ERROR, info);
     }
@@ -249,8 +248,7 @@ Token Lexer::lexStringLiteral()
     // handle unclosed string error (P17: recoverable, exit=false — see the
     // unknown-char site for why an exit=true lexer error kills Debug builds).
     {
-        Logger::LogInfo info = {&source, context->filePath, "Unclosed string literal",
-                                line, column - 1, 1, lineStart, E_UnClosedStringLiteral};
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed string literal", line, column - 1, 1, lineStart, E_UnClosedStringLiteral};
         info.exit = false;
         Logger::Log(Logger::LogLevel::ERROR, info);
     }
@@ -332,8 +330,7 @@ Token Lexer::lexCharLiteral()
     // unknown-char site for why an exit=true lexer error kills Debug builds).
     if (index >= source.size() || source[index] != '\'')
     {
-        Logger::LogInfo info = {&source, context->filePath, "Unclosed char literal",
-                                line, column - 1, 1, lineStart, E_UnclosedCharLiteral};
+        Logger::LogInfo info = {&source, context->filePath, "Unclosed char literal", line, column - 1, 1, lineStart, E_UnclosedCharLiteral};
         info.exit = false;
         Logger::Log(Logger::LogLevel::ERROR, info);
     }
@@ -584,9 +581,7 @@ single_char:
         // surfacing the error and letting the Parser gate stop the build. Same
         // rule as the P1/P10 lexer-error fixes: report and continue lexing.
         {
-            Logger::LogInfo info = {&source, context->filePath,
-                "Unknown character '" + std::string(1, current) + "'",
-                line, column, 1, lineStart, E_UnknownCharacter};
+            Logger::LogInfo info = {&source, context->filePath, "Unknown character '" + std::string(1, current) + "'", line, column, 1, lineStart, E_UnknownCharacter};
             info.exit = false;
             Logger::Log(Logger::LogLevel::ERROR, info);
         }

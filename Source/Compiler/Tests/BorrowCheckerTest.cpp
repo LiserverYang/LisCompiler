@@ -697,7 +697,8 @@ TEST_F(BorrowCheckerTest, MoveThenReinitRejected)
 {
     // Re-initialising a moved variable is rejected (single-owner, no revival).
     expectError("struct S { v: i32 } fn main() { let mut x = S { v: 1 }; let y = x;"
-                " x = S { v: 2 }; ret x.v; }", "moved");
+                " x = S { v: 2 }; ret x.v; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, MoveWholeAfterFieldMoveAllowed)
@@ -723,7 +724,8 @@ TEST_F(BorrowCheckerTest, MoveDisjointFieldsOk)
 TEST_F(BorrowCheckerTest, DoubleMoveRejected)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 };"
-                " let a = x; let b = x; }", "moved");
+                " let a = x; let b = x; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, CopyPrimitivesDoNotMove)
@@ -744,7 +746,8 @@ TEST_F(BorrowCheckerTest, CopyBoolDoesNotMove)
 TEST_F(BorrowCheckerTest, NonCopyStructMoveForbidsSecondUse)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let a = x;"
-                " let b = x; }", "moved");
+                " let b = x; }",
+        "moved");
 }
 
 // ── C: deeper paths and mixed projections ──────────────────────────────────────
@@ -863,7 +866,8 @@ TEST_F(BorrowCheckerTest, ReborrowChainSharedBinding)
 TEST_F(BorrowCheckerTest, WriteThroughSharedRefToFieldRejected)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let r = &x;"
-                " r.v = 5; }", "immutable");
+                " r.v = 5; }",
+        "immutable");
 }
 
 TEST_F(BorrowCheckerTest, WriteThroughMutRefToFieldAllowed)
@@ -893,7 +897,8 @@ TEST_F(BorrowCheckerTest, WriteThroughMutRefToNestedFieldAllowed)
 TEST_F(BorrowCheckerTest, AssignThroughSharedRefWholeRejected)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let r = &x;"
-                " r = &x; }", "immutable");
+                " r = &x; }",
+        "immutable");
 }
 
 // ── C: NLL across calls and expressions ────────────────────────────────────────
@@ -916,13 +921,15 @@ TEST_F(BorrowCheckerTest, ArrayElementMutBorrowsConflict)
     // `&mut a[i]` borrows the whole array root `a` (index is a `[*]`
     // projection), so two element mut borrows conflict even on distinct indices.
     expectError("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
-                " let t0 = r0; }", "borrowed as mutable");
+                " let t0 = r0; }",
+        "borrowed as mutable");
 }
 
 TEST_F(BorrowCheckerTest, ArraySameElementMutBorrowConflict)
 {
     expectError("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[0];"
-                " let t = r0; }", "borrowed as mutable");
+                " let t = r0; }",
+        "borrowed as mutable");
 }
 
 TEST_F(BorrowCheckerTest, ArrayIndexBorrowAndMutateConflict)
@@ -962,7 +969,8 @@ TEST_F(BorrowCheckerTest, SelfMutWriteAllowed)
 TEST_F(BorrowCheckerTest, SelfSharedWriteRejected)
 {
     expectError("struct S { v: i32 } impl S { fn bad(self: &S) { self.v = 9; } }"
-                " fn main() { let c = S { v: 1 }; c.bad(); ret 0; }", "immutable");
+                " fn main() { let c = S { v: 1 }; c.bad(); ret 0; }",
+        "immutable");
 }
 
 TEST_F(BorrowCheckerTest, BorrowDoesNotBlockWriteToOtherVar)
@@ -1072,13 +1080,15 @@ TEST_F(BorrowCheckerTest, MutBorrowWholeThenFieldConflict)
 {
     // &mut x (whole) then &x.v (field) — field is inside the whole borrow.
     expectError("struct S { v: i32 } fn main() { let mut x = S { v: 1 };"
-                " let r = &mut x; let q = &x.v; let t = r.v; }", "borrowed");
+                " let r = &mut x; let q = &x.v; let t = r.v; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, SharedBorrowWholeThenMutFieldConflict)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 };"
-                " let r = &x; let q = &mut x.v; let t = r.v; }", "borrowed");
+                " let r = &x; let q = &mut x.v; let t = r.v; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, DeepDisjointMutThreeLevels)
@@ -1169,7 +1179,8 @@ TEST_F(BorrowCheckerTest, MoveInOneBranchUseOtherRejected)
     // (flow-sensitive move tracking rejects it even though the branches are
     // exclusive at runtime).
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
-                " if b { let y = x; ret 0; } else { let t = x.v; ret t; } }", "moved");
+                " if b { let y = x; ret 0; } else { let t = x.v; ret t; } }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, MoveInBranchThenUseAfterRejected)
@@ -1177,14 +1188,16 @@ TEST_F(BorrowCheckerTest, MoveInBranchThenUseAfterRejected)
     // A move in the then-branch consumes x on that path; using x after the if
     // is unsound if the branch was taken.
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
-                " if b { let y = x; } let t = x.v; }", "moved");
+                " if b { let y = x; } let t = x.v; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, BorrowInThenMoveInElse)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
                 " if b { let r = &x; let t = r; } else { let y = x; }"
-                " let u = x; }", "moved");
+                " let u = x; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, MutBorrowInBothBranchesIndependent)
@@ -1204,7 +1217,8 @@ TEST_F(BorrowCheckerTest, CopyDoesNotMoveStruct)
 {
     // Structs are NOT Copy — a second use is a move, rejected.
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 };"
-                " let a = x; let b = x; }", "moved");
+                " let a = x; let b = x; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, CloneViaCopyPrimitive)
@@ -1238,22 +1252,19 @@ TEST_F(BorrowCheckerTest, UnusedMutBorrowDoesNotBlockRead)
     expectOk("fn main() { let mut x = 5; let r = &mut x; let t = x; ret t; }");
 }
 
-TEST_F(BorrowCheckerTest, MutBorrowThenMoveOtherVar
-)
+TEST_F(BorrowCheckerTest, MutBorrowThenMoveOtherVar)
 {
     expectOk("struct S { v: i32 } fn main() { let mut x = S { v: 1 }; let y = S { v: 2 };"
              " let r = &mut x; let z = y; ret 0; }");
 }
 
-TEST_F(BorrowCheckerTest, TwoStructsIndependentBorrows
-)
+TEST_F(BorrowCheckerTest, TwoStructsIndependentBorrows)
 {
     expectOk("struct S { v: i32 } fn main() { let mut a = S { v: 1 }; let mut b = S { v: 2 };"
              " let r = &mut a; let s = &mut b; ret 0; }");
 }
 
-TEST_F(BorrowCheckerTest, BorrowWholeThenUseFieldAfterDeath
-)
+TEST_F(BorrowCheckerTest, BorrowWholeThenUseFieldAfterDeath)
 {
     expectOk("struct S { v: i32 } fn main() { let x = S { v: 1 };"
              " { let r = &x; let t = r.v; } let u = x.v; ret u; }");
@@ -1263,28 +1274,25 @@ TEST_F(BorrowCheckerTest, BorrowWholeThenUseFieldAfterDeath
 // access checker rejects "member access on non-struct type '&S'". A ref-to-ref
 // can only be copied (`let s = &r; let u = s;`), which the reborrow tests cover.
 
-TEST_F(BorrowCheckerTest, ParamBorrowWriteThroughMut
-)
+TEST_F(BorrowCheckerTest, ParamBorrowWriteThroughMut)
 {
     expectOk("struct S { v: i32 } fn f(s: &mut S) { s.v = 9; }"
              " fn main() { let mut x = S { v: 1 }; f(&mut x); ret x.v; }");
 }
 
-TEST_F(BorrowCheckerTest, ParamSharedWriteRejected
-)
+TEST_F(BorrowCheckerTest, ParamSharedWriteRejected)
 {
     expectError("struct S { v: i32 } fn f(s: &S) { s.v = 9; }"
-                " fn main() { let x = S { v: 1 }; f(&x); ret 0; }", "immutable");
+                " fn main() { let x = S { v: 1 }; f(&x); ret 0; }",
+        "immutable");
 }
 
-TEST_F(BorrowCheckerTest, BorrowLocalRefToCopy
-)
+TEST_F(BorrowCheckerTest, BorrowLocalRefToCopy)
 {
     expectOk("fn main() { let x = 5; let r = &x; let s = r; ret 0; }");
 }
 
-TEST_F(BorrowCheckerTest, MutBorrowThenReadDifferentField
-)
+TEST_F(BorrowCheckerTest, MutBorrowThenReadDifferentField)
 {
     expectOk("struct S { v: i32, w: i32 } fn main() { let mut x = S { v: 1, w: 2 };"
              " let r = &mut x.v; let t = x.w; let u = r; ret t; }");
@@ -1322,13 +1330,15 @@ TEST_F(BorrowCheckerTest, ThreeLevelMutFieldDisjoint)
 TEST_F(BorrowCheckerTest, TwoLevelSamePathConflict)
 {
     expectError("struct A { x: i32 } struct B { a: A } fn main() { let mut v = B { a: A { x: 1 } };"
-                " let r = &mut v.a; let s = &mut v.a.x; let t = r.x; }", "borrowed");
+                " let r = &mut v.a; let s = &mut v.a.x; let t = r.x; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, FieldBorrowThenWholeMoveRejected)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 };"
-                " let r = &x.v; let y = x; }", "borrowed");
+                " let r = &x.v; let y = x; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, FieldMoveThenOtherFieldBorrow)
@@ -1389,7 +1399,8 @@ TEST_F(BorrowCheckerTest, MoveReturnValue)
 TEST_F(BorrowCheckerTest, MoveWholeThenBorrowSibling)
 {
     expectError("struct S { v: i32, w: i32 } fn main() { let x = S { v: 1, w: 2 };"
-                " let y = x; let r = &x.w; }", "moved");
+                " let y = x; let r = &x.w; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, CopyFieldThenMutateWhole)
@@ -1401,7 +1412,8 @@ TEST_F(BorrowCheckerTest, CopyFieldThenMutateWhole)
 TEST_F(BorrowCheckerTest, MoveInLoopBodyRejectedSecondIteration)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let mut i = 0;"
-                " while i < 2 { let y = x; i = i + 1; } }", "moved");
+                " while i < 2 { let y = x; i = i + 1; } }",
+        "moved");
 }
 
 // ── C3: arrays & refs ──────────────────────────────────────────────────────────
@@ -1593,13 +1605,15 @@ TEST_F(BorrowCheckerTest, CopyStructFieldTwice)
 TEST_F(BorrowCheckerTest, MutBorrowWholeThenFieldWriteConflict)
 {
     expectError("struct S { v: i32 } fn main() { let mut x = S { v: 1 };"
-                " let r = &mut x; x.v = 5; let t = r.v; }", "borrowed");
+                " let r = &mut x; x.v = 5; let t = r.v; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, SharedBorrowWholeThenWholeWrite)
 {
     expectError("struct S { v: i32 } fn main() { let mut x = S { v: 1 };"
-                " let r = &x; x = S { v: 2 }; let t = r.v; }", "borrowed");
+                " let r = &x; x = S { v: 2 }; let t = r.v; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, NestedBorrowDoesNotConflictWithSibling)
@@ -1616,7 +1630,8 @@ TEST_F(BorrowCheckerTest, TempBorrowOfLiteral)
 TEST_F(BorrowCheckerTest, MutBorrowOfArrayElementThenOtherElement)
 {
     expectError("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
-                " let t = r0; }", "borrowed");
+                " let t = r0; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, ParamMoveThenUseOther)
@@ -1650,13 +1665,15 @@ TEST_F(BorrowCheckerTest, CopyThenBorrowCopy)
 TEST_F(BorrowCheckerTest, TwoFieldBorrowsConflict)
 {
     expectError("struct S { v: i32 } fn main() { let mut x = S { v: 1 };"
-                " let r = &mut x.v; let s = &mut x.v; let t = r; }", "borrowed");
+                " let r = &mut x.v; let s = &mut x.v; let t = r; }",
+        "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, MoveThenUseMovedFieldRejected)
 {
     expectError("struct S { v: i32 } fn main() { let x = S { v: 1 }; let y = x;"
-                " let z = x.v; }", "moved");
+                " let z = x.v; }",
+        "moved");
 }
 
 TEST_F(BorrowCheckerTest, BorrowParamMutThenRead)

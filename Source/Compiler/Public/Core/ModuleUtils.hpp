@@ -55,9 +55,9 @@ inline std::string displayName(const std::string &internal)
 /// One `impt` statement's binding, as recorded against the importing module.
 struct ImportBinding
 {
-    std::string canonicalModule;   // "math" / "foo.bar" (module path, not internal)
-    std::string boundName;         // alias, or the last path segment ("m" / "bar")
-    bool selective = false;        // `impt foo.bar { a, b };` form
+    std::string canonicalModule;      // "math" / "foo.bar" (module path, not internal)
+    std::string boundName;            // alias, or the last path segment ("m" / "bar")
+    bool selective = false;           // `impt foo.bar { a, b };` form
     std::vector<std::string> symbols; // selective imports (bare names)
 };
 
