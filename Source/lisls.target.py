@@ -13,10 +13,12 @@ class lislsTarget(BuildSystem.TargetBase):
         """
 
         self.TargetType = BuildSystem.TargetTypeEnum.Program
-        # Only the Lsp module and its transitive deps (Compiler → Gtest +
-        # MagicEnum); the shared archives are rebuilt idempotently.
+        # ONLY the Lsp module: its dependency on Compiler is an EXTERNAL
+        # dependency — the lisc target has already produced libCompiler.a, and
+        # lisls links against it (no rebuild). Its Public headers resolve via
+        # the <SourceRoot>/Compiler/Public convention.
         self.bBuildAllmodules = False
-        self.BuildModulesList = ["Gtest", "MagicEnum", "Compiler", "Lsp"]
+        self.BuildModulesList = ["Lsp"]
         self.ModulesSubFolder = [""]
         self.ArgumentsAdded = ["-std=c++20", "-Wno-deprecated-declarations", "-Wno-deprecated-enum-enum-conversion", "-finput-charset=UTF-8", "-fexec-charset=UTF-8", "-DUNICODE", "-fdiagnostics-color=always"]
 
