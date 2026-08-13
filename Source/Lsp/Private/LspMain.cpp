@@ -20,6 +20,11 @@
 #include <string>
 #include <thread>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace fs = std::filesystem;
 
 // ── framing helpers ─────────────────────────────────────────────────────────
@@ -75,6 +80,7 @@ static void writeMessage(const llvm::json::Value &msg)
     llvm::raw_string_ostream os(out);
     os << msg;
     os.flush();
+    std::cerr << "[lisls] write " << out.size() << " bytes\n";
     std::string header = "Content-Length: " + std::to_string(out.size()) + "\r\n\r\n";
     fwrite(header.data(), 1, header.size(), stdout);
     fwrite(out.data(), 1, out.size(), stdout);
@@ -100,6 +106,13 @@ static const llvm::json::Object *getObjectField(const llvm::json::Object *o, llv
 
 int main(int argc, const char **argv)
 {
+    // Binary stdio: the CRT's text mode would translate \n → \r\n and corrupt
+    // the Content-Length framing on Windows.
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+
     // The stdlib sits next to the server (<exe dir>/lstdlib), like lisc.exe.
     fs::path exeDir = argc > 0 ? fs::path(argv[0]).parent_path() : fs::path(".");
     fs::path stdLibDir = exeDir / "lstdlib";
@@ -118,6 +131,7 @@ int main(int argc, const char **argv)
         int len = readMessage(body);
         if (len < 0)
             break; // EOF / malformed — exit
+        std::cerr << "[lisls] got " << body.size() << " bytes: " << body.substr(0, 80) << "\n";
 
         auto parsed = llvm::json::parse(body);
         if (!parsed)
@@ -130,7 +144,7 @@ int main(int argc, const char **argv)
         llvm::json::Value id = req->get("id") ? *req->get("id") : llvm::json::Value(nullptr);
         bool isNotification = req->get("id") == nullptr;
 
-        llvm::json::Value result;
+        llvm::json::Value result = llvm::json::Value(nullptr);
 
         if (method == "initialize")
         {
@@ -161,7 +175,8 @@ int main(int argc, const char **argv)
         }
         else if (method == "textDocument/didOpen" || method == "textDocument/didChange")
         {
-            const llvm::json::Object *td = getObjectField(req, "textDocument");
+            const llvm::json::Object *params = getObjectField(req, "params");
+            const llvm::json::Object *td = getObjectField(params, "textDocument");
             std::string uri = getString(td, "uri");
             std::string text = getString(td, "text");
             if (!uri.empty())
@@ -184,14 +199,16 @@ int main(int argc, const char **argv)
         }
         else if (method == "textDocument/didClose")
         {
-            const llvm::json::Object *td = getObjectField(req, "textDocument");
+            const llvm::json::Object *params = getObjectField(req, "params");
+            const llvm::json::Object *td = getObjectField(params, "textDocument");
             server.closeDocument(getString(td, "uri"));
             continue; // notification
         }
         else if (method == "textDocument/definition")
         {
-            const llvm::json::Object *td = getObjectField(req, "textDocument");
-            const llvm::json::Object *pos = getObjectField(req, "position");
+            const llvm::json::Object *params = getObjectField(req, "params");
+            const llvm::json::Object *td = getObjectField(params, "textDocument");
+            const llvm::json::Object *pos = getObjectField(params, "position");
             if (!td) continue;
             std::string uri = getString(td, "uri");
             if (!pos) continue;
@@ -204,8 +221,9 @@ int main(int argc, const char **argv)
         }
         else if (method == "textDocument/hover")
         {
-            const llvm::json::Object *td = getObjectField(req, "textDocument");
-            const llvm::json::Object *pos = getObjectField(req, "position");
+            const llvm::json::Object *params = getObjectField(req, "params");
+            const llvm::json::Object *td = getObjectField(params, "textDocument");
+            const llvm::json::Object *pos = getObjectField(params, "position");
             if (!td) continue;
             std::string uri = getString(td, "uri");
             if (!pos) continue;

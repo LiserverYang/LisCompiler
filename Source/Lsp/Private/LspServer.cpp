@@ -26,8 +26,9 @@ std::string LspServer::uriToPath(const std::string &uri)
     if (p.rfind("file://", 0) == 0)
     {
         p = p.substr(7);
-        // Strip the third slash for POSIX paths; keep drive letters on Windows.
-        if (!p.empty() && p[0] == '/' && !(p.size() >= 3 && p[2] == ':'))
+        // Windows: strip the slash BEFORE the drive letter (/F:/x → F:/x);
+        // POSIX keeps the leading slash (/home/x).
+        if (!p.empty() && p[0] == '/' && p.size() >= 3 && p[2] == ':')
             p = p.substr(1);
     }
     // Percent-decode.
@@ -49,12 +50,19 @@ std::string LspServer::uriToPath(const std::string &uri)
 
 std::string LspServer::pathToUri(const std::string &path)
 {
+    std::string p = path;
+    for (auto &c : p)
+        if (c == '\\') c = '/';
+    // Windows drive-letter path ("F:/...") is already absolute — file:///F:/...
+    // (fs::absolute on such paths is unreliable across standard libraries).
+    if (p.size() >= 2 && std::isalpha((unsigned char)p[0]) && p[1] == ':')
+        return "file:///" + p;
     fs::path abs = fs::absolute(path);
-    std::string p = abs.string();
+    p = abs.string();
     for (auto &c : p)
         if (c == '\\') c = '/';
     if (!p.empty() && p[0] != '/')
-        p = "/" + p; // drive-letter paths need the leading slash
+        p = "/" + p;
     return "file://" + p;
 }
 
@@ -243,8 +251,10 @@ void LspServer::rebuildIndex()
             continue;
         }
 
+        // The range covers just the NAME (HIR node length spans the whole
+        // declaration, which would highlight far past the identifier).
         addEntry(name, uri, node->position.line, node->position.col,
-                 node->length, typeStr, kindStr);
+                 name.size(), typeStr, kindStr);
     }
 }
 
