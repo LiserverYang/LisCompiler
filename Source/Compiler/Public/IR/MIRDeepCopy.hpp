@@ -220,6 +220,11 @@ inline MIRTermUnreachable copy(const MIRTermUnreachable &)
     return {};
 }
 
+inline MIRTermDiverge copy(const MIRTermDiverge &)
+{
+    return {};
+}
+
 inline MIRTerminator copy(const MIRTerminator &t)
 {
     return copy_variant(t);

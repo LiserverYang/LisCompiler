@@ -25,6 +25,16 @@ namespace
 bool typesCompatible(const std::shared_ptr<Type> &expected, const std::shared_ptr<Type> &actual)
 {
     if (!expected || !actual) return true;
+    // `never` (the type of a diverging `panic(...)` call) has no values, so an
+    // expression of this type never actually produces a mismatching value —
+    // it coerces to whatever the context expects. This is what lets
+    // `ret panic("x");` satisfy any declared return type, and a diverging
+    // match arm / call argument slot in next to a normally-typed one.
+    // One-directional (actual → expected only): panic() can stand in for i32,
+    // but an i32 obviously cannot stand in for a diverging call.
+    if (actual->getKind() == Type::Kind::Primitive
+        && std::static_pointer_cast<PrimitiveType>(actual)->getPrimKind() == PrimitiveType::PrimKind::NEVER)
+        return true;
     auto ce = std::dynamic_pointer_cast<CustomType>(expected);
     auto ca = std::dynamic_pointer_cast<CustomType>(actual);
     if (ce && ca && ce->getOriginName() == ca->getOriginName())
@@ -35,6 +45,36 @@ bool typesCompatible(const std::shared_ptr<Type> &expected, const std::shared_pt
         && re->getBaseType()->equals(ra->getBaseType()))
         return true;
     return expected->equals(actual);
+}
+
+/// True if ty is the uninhabited (never) type.
+///
+/// never is the language bottom type: an expression of it never produces a
+/// value, so it is compatible with ANY expected type (see typesCompatible).
+/// This is the narrow form for the sites that otherwise compare with
+/// Type::equals — initialisers, assignments and array-literal elements — so that
+/// a never-valued initialiser/assignment/element behaves like the argument,
+/// return and match-arm positions. It does NOT relax anything else (a &mut T is
+/// still not accepted where &T is declared).
+bool isNever(const std::shared_ptr<Type> &ty)
+{
+    return ty && ty->getKind() == Type::Kind::Primitive
+           && std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() == PrimitiveType::PrimKind::NEVER;
+}
+
+/// True when actual is the UN-INSTANTIATED definition of a generic type whose
+/// origin matches expected — i.e. a value whose generic arguments could not be
+/// inferred (a context-free Option::None where Option<i32> is required). The
+/// definition FIELDS still contain the bare T, so lowering it builds an LLVM
+/// struct with a generic-param field and crashes codegen; it must be rejected
+/// wherever a concrete type is expected.
+bool isUninferredGenericDefinition(const std::shared_ptr<Type> &expected, const std::shared_ptr<Type> &actual)
+{
+    auto ce = std::dynamic_pointer_cast<CustomType>(expected);
+    auto ca = std::dynamic_pointer_cast<CustomType>(actual);
+    if (!ce || !ca) return false;
+    if (ce->getName() != ca->getName() && ce->getOriginName() != ca->getOriginName()) return false;
+    return ce->getGenericArgs().size() != ca->getGenericArgs().size();
 }
 
 /// Decompose a member-access chain (p.a.b) into the root variable name and the
@@ -1553,6 +1593,15 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
             log(*node, "array type cannot be a function parameter yet (pass a reference instead).");
             resolvedTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         }
+        // A bare generic type (`o: Option`) is the type DEFINITION: its fields
+        // still contain the bare parameter, so there is no usable layout. Outside
+        // a generic context (where mono substitutes it) report it instead of
+        // letting codegen crash on the generic field.
+        if (auto ct = std::dynamic_pointer_cast<CustomType>(resolvedTy); ct && ct->isGeneric() && !inGenericContext())
+        {
+            log(*node, "parameter '" + pname + "' has the generic type '" + displayName(ct->getName()) + "' without its argument(s); write them explicitly (e.g. 'Option<i32>').");
+            resolvedTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        }
 
         node->params.emplace_back(pname, resolvedTy);
         paramTypes.push_back(resolvedTy);
@@ -2307,8 +2356,16 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
     if (node->hasExplicitType)
     {
         node->type = resolveType(node->rawType, *node);
-        if (initType && !initType->equals(node->type))
-            log(*node, "type mismatch in variable declaration.", E_TypeMismatch);
+        // A never-valued initialiser is compatible with any declared type
+        // (bottom): the value cannot exist, so nothing about the declared type
+        // is violated. Everything else still needs an exact match.
+        if (initType && !initType->equals(node->type) && !isNever(initType))
+        {
+            if (isUninferredGenericDefinition(node->type, initType))
+                log(*node, "cannot infer the generic argument(s) of '" + displayName(std::static_pointer_cast<CustomType>(initType)->getOriginName()) + "' for '" + node->name + "'; write them explicitly (e.g. 'Option<i32>::None').", E_TypeMismatch);
+            else
+                log(*node, "type mismatch in variable declaration.", E_TypeMismatch);
+        }
     }
     else
     {
@@ -2319,8 +2376,27 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         }
         else
         {
+            // A context-free generic value (`let n = Option::None;`) infers the
+            // type DEFINITION (its fields still contain the bare T), which has no
+            // usable layout — reject it here rather than crash in codegen. Inside
+            // a generic context monomorphization substitutes the parameters, so
+            // the same spelling is fine there.
+            auto ct = std::dynamic_pointer_cast<CustomType>(initType);
+            if (ct && ct->isGeneric() && !inGenericContext())
+                log(*node, "cannot infer the generic argument(s) of '" + displayName(ct->getName()) + "' for '" + node->name + "'; write them explicitly (e.g. 'Option<i32>::None') or annotate the variable.", E_TypeMismatch);
             node->type = initType;
         }
+    }
+
+    // `void` is a NO-VALUE type (the manual scopes it to function returns), so a
+    // void-typed binding could never be read: `let x = side_effect();` where the
+    // callee returns void used to reach codegen as a load of a valueless place.
+    // Report it as the semantic error it is. (`never` is deliberately NOT
+    // rejected here — the uninhabited type is allowed on a binding; reading it
+    // is what visit(HIRNameRef) rejects.)
+    if (node->type && node->type->equals(context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID)))
+    {
+        log(*node, "variable '" + node->name + "' cannot have type 'void': void has no value.", E_TypeMismatch);
     }
 
     auto sym = std::make_unique<Symbol>();
@@ -2350,7 +2426,10 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     if (extractRootAndPath(node->target.get(), targetRoot, targetPath))
         checkBorrowUse(targetRoot, targetPath, BorrowUseKind::Write, *node);
 
-    if (node->target->type && node->value->type && !node->target->type->equals(node->value->type))
+    // A never-valued RHS is compatible with any target type (bottom), like a
+    // never-valued initialiser or argument.
+    if (node->target->type && node->value->type
+        && !node->target->type->equals(node->value->type) && !isNever(node->value->type))
         log(*node, "assignment type mismatch.", E_TypeMismatch);
 
     // Mutability check: the assignment target must be writable. A plain
@@ -2594,10 +2673,23 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
             analyzeExpr(arm.tailValue.get());
             handleMoveSource(arm.tailValue.get(), *node);
             auto tailTy = arm.tailValue->type;
-            if (matchResultType && !matchResultType->equals(tailTy))
-                log(*node, "match arms have inconsistent types: '" + matchResultType->toString() + "' vs '" + tailTy->toString() + "'.");
-            else
+            // A DIVERGING arm (`None => panic("...")`) produces no value, so it
+            // must not fix the match's type — `match o { Some(v) => v, None =>
+            // panic("x") }` is a `T` match, not a type conflict. Such an arm is
+            // simply skipped; if every arm diverges, matchResultType stays null
+            // and the match becomes NEVER (see the type assignment below).
+            if (isNeverType(tailTy))
+            {
+                // contributes no type
+            }
+            else if (!matchResultType)
+            {
                 matchResultType = tailTy;
+            }
+            else if (!matchResultType->equals(tailTy))
+            {
+                log(*node, "match arms have inconsistent types: '" + matchResultType->toString() + "' vs '" + tailTy->toString() + "'.");
+            }
         }
         else
         {
@@ -2623,7 +2715,17 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
         }
     }
 
-    node->type = matchResultType ? matchResultType : voidTy; // VOID for statement match
+    // A statement match (all block arms) is VOID. A value match takes its arms'
+    // unified type — but when EVERY value arm diverges, no arm contributed a
+    // type and the match itself never produces a value: it is NEVER, so an
+    // enclosing `let x: i32 = match ...` still type-checks via the never
+    // coercion instead of failing against VOID.
+    if (matchResultType)
+        node->type = matchResultType;
+    else if (hasValueArm)
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::NEVER);
+    else
+        node->type = voidTy;
 
     SymbolTable::getInstance().exitScope(); // matchScope
 }
@@ -2795,6 +2897,14 @@ void HIRSemanticAnalyzer::visit(HIRLiteral *node)
 }
 
 // ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::inGenericContext() const
+{
+    if (!functionInfo.gParams.empty())
+        return true; // a generic function: mono rewrites this body
+    auto ct = std::dynamic_pointer_cast<CustomType>(currentStructType);
+    return ct && ct->isGeneric(); // a method of a generic struct: mono prepends its params
+}
+
 Symbol *HIRSemanticAnalyzer::lookupModuleAware(const std::string &name)
 {
     auto &table = SymbolTable::getInstance();
@@ -2869,6 +2979,18 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
                     holderLastUseStmt_[node->name] = stmtOrdinal_;
                 break;
             }
+    }
+
+    // An UNINHABITED binding (`let x: never;`) has no value to read: the type is
+    // allowed (it is the bottom type), but a value of it can never exist, so any
+    // use of the binding is a bug — and materialising it would put a valueless
+    // operand into MIR. Function symbols are exempt: the builtin `panic` callee
+    // carries the `never` RESULT type on its name-ref, and a user
+    // `fn f() -> never` name-ref is a FunctionType, not `never`.
+    if (isNeverType(sym->type) && sym->kind != SymbolKind::Function)
+    {
+        log(*node, "cannot use '" + node->name + "': it has the uninhabited type 'never'.", E_UndefinedIdentifier);
+        return;
     }
 
     // Borrow-check: a Copy read of a whole variable conflicts with active &mut
@@ -3641,6 +3763,39 @@ bool HIRSemanticAnalyzer::handleToStringBuiltin(HIRCall *node, const std::string
     return true;
 }
 
+bool HIRSemanticAnalyzer::isNeverType(const std::shared_ptr<Type> &ty)
+{
+    if (!ty || ty->getKind() != Type::Kind::Primitive) return false;
+    return std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() == PrimitiveType::PrimKind::NEVER;
+}
+
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handlePanicBuiltin(HIRCall *node, const std::string &name)
+{
+    if (name != "panic")
+        return false; // not the panic builtin
+
+    auto i8PtrTy = context->typeContext->getReference(
+        context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+    auto neverTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::NEVER);
+
+    if (node->args.size() != 1)
+        log(*node, "builtin 'panic' expects 1 argument, got " + std::to_string(node->args.size()) + ".");
+
+    for (auto &arg : node->args)
+    {
+        analyzeExpr(arg.get());
+        if (arg->type && !typesCompatible(i8PtrTy, arg->type))
+            log(*arg, "builtin 'panic' expects an argument of type '" + i8PtrTy->toString() + "', got '" + arg->type->toString() + "'.");
+    }
+
+    node->type = neverTy;
+    // A non-null type so MIR's buildNameRef/makeTempPlace is safe.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = neverTy;
+    return true;
+}
+
 void HIRSemanticAnalyzer::visit(HIRCall *node)
 {
     // Idempotency: once a call is resolved, re-analysis is a no-op. This
@@ -3678,6 +3833,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 return;
             case BuiltinCategory::ToString:
                 handleToStringBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::Panic:
+                handlePanicBuiltin(node, nr->name);
                 return;
             case BuiltinCategory::NotBuiltin:
                 break;
@@ -3783,7 +3941,20 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         for (size_t i = 0; i < node->args.size() && i < instantiatedFuncType->getParams().size(); ++i)
         {
             analyzeExpr(node->args[i].get());
-            if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
+            // A context-free generic value (`get(Option::None)` where the
+            // parameter is Option<i32>) keeps the type DEFINITION; explain the
+            // real problem instead of a bare mismatch (and instead of letting a
+            // generic-param field reach codegen).
+            // Only where monomorphization will NOT repair it: a monomorphized
+            // call carries typedGenericParams, and MIRMonomorphization rewrites
+            // both the argument operand AND its carrier local from the definition
+            // to the instantiation (that is why `unwrap_or(Option::None, 0)`
+            // works). With no mono step, the definition reaches codegen and
+            // crashes on its generic-param field.
+            if (node->typedGenericParams.empty() && instantiatedFuncType->getParams()[i] && node->args[i]->type
+                && isUninferredGenericDefinition(instantiatedFuncType->getParams()[i], node->args[i]->type))
+                log(*node->args[i], "cannot infer the generic argument(s) of '" + displayName(std::static_pointer_cast<CustomType>(node->args[i]->type)->getOriginName()) + "'; write them explicitly (e.g. 'Option<i32>::None').");
+            else if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
             // A by-value non-Copy arg consumes the source (`foo(p)` moves p).
             handleMoveSource(node->args[i].get(), *node);
@@ -4261,13 +4432,18 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
 {
+    // A never-valued element ([panic("..."), 1, 2]) contributes no element type
+    // and is compatible with whatever the other elements say (bottom), exactly
+    // like a never-valued initialiser or argument.
     std::shared_ptr<Type> elemTy;
     for (auto &e : node->elements)
     {
         analyzeExpr(e.get());
+        if (!e->type || isNever(e->type))
+            continue;
         if (!elemTy)
             elemTy = e->type;
-        else if (e->type && !e->type->equals(elemTy))
+        else if (!e->type->equals(elemTy))
             log(*e, "array literal elements must all have the same type ('" + elemTy->toString() + "' vs '" + e->type->toString() + "').");
     }
     if (!elemTy)

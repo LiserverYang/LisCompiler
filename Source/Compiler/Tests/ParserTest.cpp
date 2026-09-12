@@ -1356,3 +1356,27 @@ TEST_F(ParserTest, ValidBorrowOfCallResult)
     parseSource("fn make() -> i32 { ret 5; } fn main() -> i32 { let r = &make(); ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
+// `never` is accepted as a type wherever a type is parsed: as a function return
+// type and as a binding type.
+TEST_F(ParserTest, NeverParsesAsReturnType)
+{
+    parseSource("fn boom() -> never { panic(\"x\"); }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, NeverParsesAsBindingType)
+{
+    parseSource("fn main() -> i32 { let x: never; ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, NeverFunctionSignatureShape)
+{
+    parseSource("fn boom() -> never { panic(\"x\"); }");
+    auto &globalStmts = context->program.globalStatements;
+    ASSERT_EQ(globalStmts.size(), 1);
+    auto fnDef = dynamic_cast<FunctionDef *>(globalStmts[0].get());
+    ASSERT_NE(fnDef, nullptr);
+    ASSERT_TRUE(fnDef->returnType.has_value());
+    EXPECT_EQ(fnDef->returnType.value()->typeName, "never");
+}

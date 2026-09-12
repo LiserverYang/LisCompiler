@@ -34,6 +34,7 @@ enum class BuiltinCategory
     Input,     // read_line / read_int / read_f64
     Heap,      // __alloc / __free / __memcpy / __strlen
     ToString,  // to_string_i32/i64/f64/bool/char
+    Panic,     // panic
     NotBuiltin // any other name
 };
 
@@ -67,10 +68,14 @@ inline BuiltinCategory classifyBuiltin(const std::string &name)
         "to_string_bool",
         "to_string_char",
     };
+    static const std::unordered_set<std::string> panic = {
+        "panic",
+    };
     if (print.count(name)) return BuiltinCategory::Print;
     if (input.count(name)) return BuiltinCategory::Input;
     if (heap.count(name)) return BuiltinCategory::Heap;
     if (toString.count(name)) return BuiltinCategory::ToString;
+    if (panic.count(name)) return BuiltinCategory::Panic;
     return BuiltinCategory::NotBuiltin;
 }
 
@@ -92,6 +97,7 @@ inline bool isReservedFunctionName(const std::string &name)
         "atoi",
         "strtod",
         "abort",
+        "fprintf",
     };
     return libc.count(name);
 }

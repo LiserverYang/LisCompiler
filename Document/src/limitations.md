@@ -29,12 +29,19 @@
 
 ### 语义面
 
-- **panic / never 类型**：无；`unwrap`/`expect` 不可实现（`unwrap_or` 是安全替代）。
-  数组越界用 libc `abort()`。
+- **panic / never 类型**：**已实现**（2026-09-12）。内置 `panic(&i8) -> never` 写 stderr 后
+  `abort()`；`never` 是 bottom 类型，可用作函数返回类型与变量类型（读取 `never` 变量是
+  错误），`Option::unwrap` / `expect` 已提供（见[内置函数](./builtins.md)、[标准库](./stdlib.md)）。
+  数组越界仍用 libc `abort()`。
 - **引用模式匹配**（`match &opt`）：未实现。
 - **返回借用追踪**：`to_cstr` 返回的借用编译器不追踪，调用方负责 owner 存活。
 - **未初始化读取拒绝**（见上，规范决策待实现）。
-- **`let x = Option::None` 无上下文推断**：失败，需期望类型。
+- **无上下文的泛型值**：`let x = Option::None;`（既无标注也无期望类型）取到的是类型
+  **定义**（字段里还是裸 `T`），编译期以「cannot infer the generic argument(s) of 'Option'」
+  报错——**不会**崩溃，也仍不做推断。同类错误：`get(Option::None)` 传给 `Option<i32>`
+  形参、`let x: Option<i32> = Option::None;`、裸泛型类型 `fn f(o: Option)`。要显式给出
+  类型实参或加标注（`Option<i32>::None` 需要带载荷的变体语法，单元变体目前只能靠标注/
+  `ret` 期望类型推断）。
 - **嵌套模式 / or 模式 / 字面量模式**：match 模式仅 `_`/单元变体/载荷绑定。
 - **数组元素借用精度**：`a[i]` 用通配路径 `[*]`，不相交元素借用被保守拒绝。
 - **数组**：元素仅 Copy、禁引用、禁作参数/返回（用 `&[T; N]`）、尺寸 ≤ 1<<20。
@@ -51,7 +58,8 @@
 
 按可用性优先级：
 
-1. **panic/never 类型**：解锁 `unwrap`/`expect`/`Result`。
+1. ~~**panic/never 类型**：解锁 `unwrap`/`expect`/`Result`。~~ **已完成 2026-09-12**
+   （`panic` + `never` + `Option::unwrap`/`expect`；`Result` 仍待设计）。
 2. **编译期拒绝未初始化读取**（规范决策落地）。
 3. **`move` 语义实现**（用户定义：使用处移动构建）。
 4. **Vec/堆集合**：基于 String 堆机制扩展；非 Copy 数组元素。

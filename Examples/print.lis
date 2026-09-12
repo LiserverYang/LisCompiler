@@ -1,9 +1,10 @@
-impt math { abs, clamp, max, min };
 // Copyright 2026, LiserverYang. All rights reserved.
 // MIT License.
 //
 // print.lis — the print builtins + math helpers. The language can now produce
 // real output (lowered to libc printf), not just an exit code.
+
+impt math { abs, clamp, max, min };
 
 fn main() -> i32
 {

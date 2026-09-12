@@ -1006,3 +1006,19 @@ TEST_F(LexerTest, ExclamationVariants)
     expectToken(1, TokenCode::NOT_EQ, "!=", 1, 3);
     expectToken(2, TokenCode::NOT, "!", 1, 6);
 }
+// `never` is a TYPE keyword (the uninhabited type returned by the builtin
+// panic), so it is tokenized as TokenCode::NEVER — not as an identifier.
+TEST_F(LexerTest, RecognizesNeverTypeKeyword)
+{
+    runLexer("never void");
+    expectToken(0, TokenCode::NEVER, "never", 1, 1);
+    expectToken(1, TokenCode::VOID, "void", 1, 7);
+}
+
+TEST_F(LexerTest, NeverKeywordBoundaryNotSubstring)
+{
+    runLexer("neverland never_ never");
+    expectToken(0, TokenCode::IDENTIFIER, "neverland", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "never_", 1, 11);
+    expectToken(2, TokenCode::NEVER, "never", 1, 18);
+}

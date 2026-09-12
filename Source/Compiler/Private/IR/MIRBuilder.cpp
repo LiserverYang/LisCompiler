@@ -6,6 +6,7 @@
 #include "IR/MIRBuilder.hpp"
 #include "Analysiser/SymbolTable.hpp"
 #include "Core/Debugging.hpp"
+#include "Logger/ErrorID.hpp"
 
 #include <cassert>
 #include <stdexcept>
@@ -137,8 +138,37 @@ MIRBasicBlock &MIRBuilder::currentBlock()
 // Helpers: statement emitters
 // ─────────────────────────────────────────────────────────────────────────────
 
+bool MIRBuilder::isNeverType(const std::shared_ptr<Type> &type)
+{
+    if (!type || type->getKind() != Type::Kind::Primitive)
+        return false;
+    return std::static_pointer_cast<PrimitiveType>(type)->getPrimKind()
+           == PrimitiveType::PrimKind::NEVER;
+}
+
 void MIRBuilder::emit(MIRStatement stmt)
 {
+    // Single choke point for the DIVERGENCE invariant: once a block has been
+    // sealed with MIRTermDiverge (a `panic(...)` call), nothing may be appended
+    // to it — the statements that follow are unreachable.
+    //
+    // The guard lives here rather than in each buildXxx because a diverging call
+    // can be nested ARBITRARILY DEEP inside a larger expression, and the
+    // enclosing builder keeps emitting after the seal:
+    //     foo(panic("x"), other())   // the `other()` call + the foo call
+    //     [panic("x"), 2, 3]         // the remaining array elements
+    //     s.m(panic("x"))            // the receiver borrow + the method call
+    // Per-statement guards would have to be repeated at every such site (and a
+    // new builder would silently miss one). Emitting into a sealed block would
+    // append statements AFTER a terminator, which LLVM's verifier rejects (or
+    // worse, would type-mismatch a `never` temp against the real slot type).
+    //
+    // Dropping the statement is correct, not merely safe: it is provably
+    // unreachable, since the only way to seal with Diverge is a call that never
+    // returns to its caller.
+    if (std::holds_alternative<MIRTermDiverge>(currentBlock().terminator))
+        return;
+
     currentBlock().stmts.push_back(std::move(stmt));
 }
 
@@ -368,13 +398,35 @@ MIRRValueBinaryOp::Op MIRBuilder::convertBinOp(HIRBinaryOp::OpKind kind)
 // Top-level entry point
 // ═════════════════════════════════════════════════════════════════════════════
 
+void MIRBuilder::logAtItem(const SourcePosition &pos, size_t length, const std::string &msg)
+{
+    Logger::LogInfo info{};
+    info.codePath = currentItemFilePath_.empty() ? context->filePath : currentItemFilePath_;
+    info.code = &context->fileValue;
+    info.col = pos.col;
+    info.line = pos.line;
+    info.length = length;
+    info.beginPosition = pos.lineStart;
+    info.msg = msg;
+    info.errorId = E_SemanticError;
+    info.exit = false; // reported, counted, and gated by run()
+    Logger::Log(Logger::LogLevel::ERROR, info);
+}
+
 MIRProgram MIRBuilder::buildProgram(HIRProgram *prog)
 {
     MIRProgram out;
 
-    for (auto &item : prog->items)
+    for (size_t itemIndex = 0; itemIndex < prog->items.size(); ++itemIndex)
     {
+        auto &item = prog->items[itemIndex];
         HIRNode *raw = item.get();
+
+        // Module attribution (parallel to hirProgram->items) so a MIR-level
+        // diagnostic against a stdlib/module function names the right file.
+        currentItemFilePath_ = itemIndex < context->stmtAttributions.size()
+                                   ? context->stmtAttributions[itemIndex].filePath
+                                   : std::string();
 
         if (auto *fn = dynamic_cast<HIRFunction *>(raw))
         {
@@ -515,6 +567,29 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
 
     // ── lower body ───────────────────────────────────────────────────────────
     buildBlock(fn->body.get());
+
+    // ── a `never` function must contain a diverging point ────────────────────
+    // The declared return type is uninhabited, i.e. the function promises not to
+    // return. The check is deliberately CONSERVATIVE: the built MIR must contain
+    // at least one diverging terminator (a call whose result type is `never` —
+    // today `panic` — seals its block with MIRTermDiverge). Proving "every path
+    // diverges" needs a full dataflow analysis and would false-positive on
+    // `while true { panic("..."); }`, whose exit edge exists statically; so the
+    // compiler catches the common mistake (a body that just falls off its end),
+    // and per-path correctness stays the language's documented UB rule.
+    if (isNeverType(freshBody.returnType))
+    {
+        bool diverges = false;
+        for (const auto &bb : freshBody.blocks)
+            if (std::holds_alternative<MIRTermDiverge>(bb.terminator))
+            {
+                diverges = true;
+                break;
+            }
+        if (!diverges)
+            logAtItem(fn->position, fn->length,
+                "function '" + fn->name + "' is declared to return 'never' but never diverges; call panic(...) (directly or through another 'never' function) on every path.");
+    }
 
     // ── ensure the last block has a terminator ────────────────────────────────
     // If control falls off the end of a void function, add an implicit return.
@@ -917,7 +992,18 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
             else
             {
                 ownedLocalsStack_.back().push_back(localPlace(idx));
-                emitAssign(bindPlace, MIRRValueUse{MIROperand(MIRMove{payload})});
+                // Transfer the payload through placeToOperand() instead of
+                // building MIRMove by hand: placeToOperand also RECORDS the
+                // move (a simple Field chain becomes a partial-move entry on
+                // the scrutinee temp, a complex one marks it fully moved).
+                // Without that record an early exit from THIS arm — `ret v;`
+                // inside the arm body — reaches buildReturn's
+                // dropOwnedLocalsFrom(0) BEFORE buildMatch marks the temp moved
+                // at the end of the match, so the temp was dropped WHOLESALE and
+                // freed the payload the binding now owns (double free, e.g.
+                // `Option<String>`); the field-decomposing emitDropPartial only
+                // runs when the partial move is on record.
+                emitAssign(bindPlace, MIRRValueUse{placeToOperand(std::move(payload))});
             }
         }
 
@@ -931,9 +1017,22 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
         }
 
         if (arm.body)
+        {
             buildBlock(arm.body.get());
+        }
         else if (arm.tailValue)
-            emitAssign(resultSlot, MIRRValueUse{exprToOperand(arm.tailValue.get())});
+        {
+            // A DIVERGING value arm (`None => panic("...")`) produces no value:
+            // lower the call for its effect, but write nothing to the result
+            // slot — the arm's `never` temp has no compatible type for the slot,
+            // and control never reaches the read anyway. emit()'s guard would
+            // already drop the store; skipping it here keeps the MIR dump clean
+            // (no dead store after `diverge`).
+            if (isNeverType(arm.tailValue->type))
+                (void)buildExpr(arm.tailValue.get());
+            else
+                emitAssign(resultSlot, MIRRValueUse{exprToOperand(arm.tailValue.get())});
+        }
 
         // Drop this arm's non-Copy bindings on the fall-through path (a return
         // already dropped them via buildReturn's dropOwnedLocalsFrom). The
@@ -1085,9 +1184,22 @@ void MIRBuilder::buildReturn(HIRReturn *ret)
         // into the slot (marking it moved), so the drop sweep below must NOT
         // drop `x` itself — otherwise the returned value would be dropped
         // before the caller ever receives it.
-        MIROperand val = exprToOperand(ret->value->get());
-        MIRPlace ret0{.base = PlaceBase::Local, .index = 0, .name = "_0", .projections = {}, .type = body_->returnType};
-        emitAssign(ret0, MIRRValueUse{.operand = std::move(val)});
+        //
+        // A `never` value has no value to store, so only its side effects are
+        // lowered. That is not just an optimisation:
+        // `ret match o { Some(v) => panic("s"), None => panic("n") };` — every
+        // arm diverges, so the match is `never` — hands back buildMatch's
+        // result-slot block, which MIRTermDiverge does NOT seal. Routing the
+        // value there would store a never operand into the (differently typed)
+        // return slot and reach codegen as an ill-typed store.
+        if (isNeverType((*ret->value)->type))
+            (void)buildExpr(ret->value->get());
+        else
+        {
+            MIROperand val = exprToOperand(ret->value->get());
+            MIRPlace ret0{.base = PlaceBase::Local, .index = 0, .name = "_0", .projections = {}, .type = body_->returnType};
+            emitAssign(ret0, MIRRValueUse{.operand = std::move(val)});
+        }
     }
 
     // Drop all owned locals (except any moved into the return slot) before
@@ -1402,6 +1514,18 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         .funcName = funcName,
         .args = std::move(args),
         .genericParams = std::move(call->typedGenericParams)});
+
+    // 5. A call whose return type is `never` (today: the `panic` builtin) does
+    //    not return to its caller — seal the block so everything after it is
+    //    treated as dead code. buildBlock sees the sealed terminator and routes
+    //    the following statements into a "dead" block (skipping the block-end
+    //    drop sweep, exactly like an early `ret`), and emit()'s guard drops
+    //    anything the enclosing expression would still have appended here.
+    //
+    //    Must come AFTER the emit above, or the guard would drop the panic call
+    //    itself.
+    if (isNeverType(call->type))
+        sealBlock(curBB_, MIRTermDiverge{});
 
     return dest;
 }

@@ -222,8 +222,21 @@ private:
     bool isToStringBuiltin(const std::string &name);
 
     /// Declare libc `void abort(void)` — the runtime trap for out-of-bounds
-    /// array indexing.
+    /// array indexing and the second half of a panic.
     llvm::Function *getOrDeclareAbort();
+
+    /// Builtin panic: `fprintf(stderr, "panicked: %s\n", msg)` then `abort()`.
+    /// Declares libc `fprintf` and resolves the stderr FILE* (MinGW/UCRT has no
+    /// `stderr` data symbol — it is `__acrt_iob_func(2)`, the same mechanism the
+    /// read builtins use for stdin).
+    llvm::Function *getOrDeclareFprintf();
+    llvm::Value *getStderrFilePtr();
+    /// Emit the panic message + abort. `msgPtr` is an i8* message.
+    void emitPanicMessage(llvm::Value *msgPtr);
+    /// Lower the builtin `panic(&i8)` call. Never returns (the MIR block is
+    /// sealed with MIRTermDiverge, so the terminator emits `unreachable`).
+    void emitPanicCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    bool isPanicBuiltin(const std::string &name);
 
     /// Get-or-declare an external libc function. If `name` already exists in
     /// the module but with a DIFFERENT type, report an internal error (a user

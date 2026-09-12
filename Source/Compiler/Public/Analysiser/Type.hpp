@@ -70,7 +70,17 @@ public:
         F64,
         BOOL,
         CHAR,
-        VOID
+        VOID,
+        /// The uninhabited type: no value of it can ever exist. It is the return
+        /// type of a diverging call (`panic("...")`), which never returns to its
+        /// caller. Because it has no values, it is compatible with EVERY
+        /// expected type (see typesCompatible in HIRSemanticAnalyzer.cpp) — that
+        /// is what lets `ret panic("x")` satisfy an `-> i32` signature and a
+        /// `None => panic("x")` arm sit next to a `Some(v) => v` arm.
+        ///
+        /// Appended AFTER VOID deliberately: integerBitWidth() states widths
+        /// explicitly (P4) so no cast/narrowing logic depends on this ordering.
+        NEVER
     };
 
     explicit PrimitiveType(PrimKind pk);

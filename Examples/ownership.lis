@@ -1,4 +1,5 @@
 impt drop { Drop };
+
 struct Box
 {
     pub value: i32

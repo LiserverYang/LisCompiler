@@ -11,14 +11,14 @@
 
 ## 关键字
 
-Lis 共有 32 个关键字：
+Lis 共有 33 个关键字：
 
 | 类别 | 关键字 |
 |---|---|
 | 声明 | `struct` `enum` `trait` `impl` `fn` `let` `pub` `impt` |
 | 控制流 | `if` `else` `while` `for` `in` `match` `ret` `break` `continue` |
 | 引用/借用 | `self` `mut` `as` `move` |
-| 类型关键字 | `i8` `i16` `i32` `i64` `f32` `f64` `bool` `char` `void` |
+| 类型关键字 | `i8` `i16` `i32` `i64` `f32` `f64` `bool` `char` `void` `never` |
 | 布尔字面量 | `true` `false` |
 
 说明：
@@ -28,6 +28,7 @@ Lis 共有 32 个关键字：
   **不能是关键字**（字符分类模块名为 `chars`，`impt char` 会报「expected module name」）。
 - `move` 关键字的设计语义为「每次使用时在使用处移动构建」（类似 Rust 的相关语法），
   **未实现**；当前全局 `let move x = ...` 可解析但无效果，见[已知限制](./limitations.md)。
+- `never` 是 uninhabited（bottom）类型关键字，见[类型系统](./types.md)。
 - 无 `const` 关键字；无 `^`/`<<`/`>>` 运算符 token（见[运算符](./operators.md)）。
 
 ## 标识符

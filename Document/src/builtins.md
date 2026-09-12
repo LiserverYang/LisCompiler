@@ -5,6 +5,20 @@
 编译器内置函数（不在标准库声明）。这些名字**保留**：用户 `fn` 与内置名或 libc 名同名
 （`malloc`/`free`/`memcpy`/`strlen`/`sprintf`/`printf`/`fgets`/`strcspn`/`atoi`/`strtod`/`abort`）
 会被拒绝（「function name 'X' is reserved by the compiler」）。
+## 终止 panic
+
+| 函数 | 签名 | 行为 |
+|---|---|---|
+| `panic(msg: &i8)` | `-> never` | 向 **stderr** 写 `panicked: <msg>`，随后调用 libc `abort()` 终止进程 |
+
+`panic` 的返回类型是 **`never`**（uninhabited / bottom 类型，见[类型系统](./types.md)），
+因此它可以出现在任何需要值的位置（`ret panic("...")`、实参、match 臂、`let` 初始化器、
+赋值、数组元素），而这些位置都不会产生值。同一语句序列中 `panic` 之后的语句不可达。
+反过来，**声明返回 `never` 的函数必须发散**：函数体里必须至少有一个发散调用（直接或间接
+调用 `panic`），否则编译期报错。
+
+注意：`abort()` **不会刷新 stdio**，所以 `panic` 之前打印到 stdout 的内容会丢失；panic 的
+可观测输出只有 stderr。
 
 ## 输出 print
 

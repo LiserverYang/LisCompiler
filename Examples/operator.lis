@@ -1,4 +1,3 @@
-impt math { Add, PartialEq };
 // Copyright 2026, LiserverYang. All rights reserved.
 // MIT License.
 //
@@ -8,6 +7,8 @@ impt math { Add, PartialEq };
 // method. The operator traits are declared in the stdlib (math.lis); primitives
 // auto-implement them. `fn sum<T: Add>` is generic over any type that supports
 // `+` — a struct (method call) or a primitive (direct add).
+
+impt math { Add, PartialEq };
 
 struct Vec2
 {

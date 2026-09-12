@@ -1,10 +1,11 @@
-impt option { Option };
-impt iterator { Iterator, sum, count, first };
 // Copyright 2026, LiserverYang. All rights reserved.
 // MIT License.
 //
 // iterator.lis — demonstrates the Iterator protocol and for-loops with a custom
 // iterator type. Everything here COMPILES.
+
+impt option { Option };
+impt iterator { Iterator, sum, count, first };
 
 struct Countdown
 {

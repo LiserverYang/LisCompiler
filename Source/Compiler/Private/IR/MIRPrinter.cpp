@@ -356,6 +356,12 @@ static std::string fmtTerminator(const MIRTerminator &term)
         {
             s << col(C::KW) << "unreachable" << col(C::RST);
         }
+        else if constexpr (std::is_same_v<T, MIRTermDiverge>)
+        {
+            // Distinguished from `unreachable` in the dump: this block ENDED in
+            // a diverging call (panic), it is not an unsealed block.
+            s << col(C::KW) << "diverge" << col(C::RST);
+        }
 
         return s.str(); },
         term);

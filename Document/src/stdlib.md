@@ -39,7 +39,16 @@ enum Option<T> { Some(T), None }
 | `and<T>(a: Option<T>, b: Option<T>) -> Option<T>` | Some 时取 b（丢弃 a 载荷） |
 | `or<T>(a: Option<T>, b: Option<T>) -> Option<T>` | None 时取 b（保留载荷） |
 
-`unwrap`/`expect` **故意不提供**（需要 panic 机制，见[已知限制](./limitations.md)）。
+方法（`impl Option`，按值消费接收者）：
+
+| 方法 | 签名 | 说明 |
+|---|---|---|
+| `o.unwrap()` | `-> T` | 取 `Some` 载荷；`None` 时 `panic("called unwrap on a None value")` |
+| `o.expect(msg: &i8)` | `-> T` | 同上，但用调用者传入的消息 panic |
+
+两者都**消费** option（按值 `self`），并且只可能有两种结局：拿到载荷，或进程终止。
+它们能实现的前提是 `panic` 的返回类型是 `never` —— `None` 臂不产生值，方法因此仍然
+类型检查为返回 `T`。需要回退值时用 `unwrap_or`。
 
 ## Iterator 与 Range
 

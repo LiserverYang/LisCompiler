@@ -68,6 +68,17 @@ static const char *kStdlibPrologue =
 static const char *kMathPrologue =
     "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
 
+/// Exit status of a child process that reached the builtin panic: libc
+/// abort(). UCRT maps its __fastfail(FAST_FAIL_FATAL_APP_EXIT) to 0xC0000409;
+/// on POSIX abort() raises SIGABRT (128 + 6). Asserted rather than merely
+/// "non-zero" so a runtime/toolchain change is noticed instead of silently
+/// accepted.
+#ifdef _WIN32
+static const int kPanicExitCode = (int)0xC0000409;
+#else
+static const int kPanicExitCode = 134;
+#endif
+
 /// Locate the preloaded stdlib (`Build/Binaries/lstdlib`). test.exe lives at
 /// `Build/Intermediate/`, so it is the exe dir's parent + `Binaries/lstdlib`.
 fs::path findStdlibDir()
@@ -186,7 +197,11 @@ protected:
         if (Logger::GetErrorCount() > 0) return false;
 
         MIRBuilder mir(context);
-        mir.run();
+        // buildProgram() rather than run(): run() gates MIR-level diagnostics
+        // (a `-> never` function that never diverges) with exit(1), which would
+        // kill the whole test process. Mirror the sema handling above.
+        context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
+        if (Logger::GetErrorCount() > 0) return false;
         MIRMonomorphization mono(context);
         mono.run();
         LLVMIRBuilder llvm(context, context->llvmContext, "test.lis");
@@ -266,7 +281,11 @@ protected:
         }
 
         MIRBuilder mir(context);
-        mir.run();
+        // buildProgram() rather than run(): run() gates MIR-level diagnostics
+        // (a `-> never` function that never diverges) with exit(1), which would
+        // kill the whole test process. Mirror the sema handling above.
+        context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
+        if (Logger::GetErrorCount() > 0) return false;
         MIRMonomorphization mono(context);
         mono.run();
         LLVMIRBuilder llvm(context, context->llvmContext, "test.lis");
@@ -283,9 +302,12 @@ protected:
 
     /// Link objPath → exePath with the MinGW toolchain, then run it and return
     /// the process exit code (-1 if linking or launching failed). If `out` is
-    /// non-null the child's stdout is captured into it; if `in` is non-null its
-    /// bytes are fed to the child's stdin (via a pipe) before it runs.
-    int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr)
+    /// non-null the child's stdout is captured into it; if `err` is non-null its
+    /// stderr is captured (the builtin `panic` writes its message there); if
+    /// `in` is non-null its bytes are fed to the child's stdin (via a pipe)
+    /// before it runs.
+    int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr,
+        std::string *err = nullptr)
     {
         std::string linkCmd = "g++ -o \"" + exePath.string() + "\" \"" + objPath.string() + "\"";
         if (std::system(linkCmd.c_str()) != 0)
@@ -302,6 +324,22 @@ protected:
             {
                 dup2(fds[1], _fileno(stdout));
                 close(fds[1]); // child inherits the write end; we close ours
+            }
+        }
+
+        // Same for stderr — SEPARATE pipe: draining one pipe to EOF blocks
+        // until the child exits, so a shared pipe would lose whichever stream
+        // was still unread. The builtin panic writes its message here.
+        int savedErr = -1;
+        int fdsErr[2] = {-1, -1};
+        if (err)
+        {
+            fflush(stderr);
+            savedErr = dup(_fileno(stderr));
+            if (_pipe(fdsErr, 65536, _O_BINARY) == 0)
+            {
+                dup2(fdsErr[1], _fileno(stderr));
+                close(fdsErr[1]);
             }
         }
 
@@ -334,6 +372,16 @@ protected:
                 out->append(buf, (size_t)n);
             close(fds[0]);
         }
+        if (err && savedErr != -1)
+        {
+            dup2(savedErr, _fileno(stderr));
+            close(savedErr);
+            char buf[4096];
+            ssize_t n;
+            while ((n = read(fdsErr[0], buf, sizeof(buf))) > 0)
+                err->append(buf, (size_t)n);
+            close(fdsErr[0]);
+        }
         if (in && savedIn != -1)
         {
             dup2(savedIn, _fileno(stdin));
@@ -341,7 +389,26 @@ protected:
         }
         return code;
 #else
-        int st = std::system(exePath.string().c_str());
+        if (!err)
+        {
+            int st = std::system(exePath.string().c_str());
+            return WEXITSTATUS(st);
+        }
+        // POSIX: no fd juggling needed for one stream — redirect stderr to a
+        // sibling temp file and read it back. (A signal death reports status 0
+        // here, exactly as it already does for stdout-only runs.)
+        fs::path errPath = exePath;
+        errPath += ".err";
+        std::string cmd = "\"" + exePath.string() + "\" 2> \"" + errPath.string() + "\"";
+        int st = std::system(cmd.c_str());
+        {
+            std::ifstream fe(errPath);
+            err->assign((std::istreambuf_iterator<char>(fe)), std::istreambuf_iterator<char>());
+        }
+        {
+            std::error_code ec;
+            fs::remove(errPath, ec);
+        }
         return WEXITSTATUS(st);
 #endif
     }
@@ -365,6 +432,27 @@ protected:
         int code = linkAndRun();
         EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
                                       << source;
+    }
+    /// Compile, link, run, and assert the process reached the builtin panic:
+    /// it must abort (kPanicExitCode) and its stderr must contain
+    /// `expectedStderr`.
+    ///
+    /// stderr — not stdout — is the panic channel, and stdout must NOT be
+    /// asserted around a panic: abort() does not flush stdio, so anything the
+    /// program printed before diverging is simply lost.
+    void expectPanic(const std::string &source, const std::string &expectedStderr)
+    {
+        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
+                                     << source;
+        std::string err;
+        int code = linkAndRun(nullptr, nullptr, &err);
+        EXPECT_EQ(code, kPanicExitCode)
+            << "expected the process to abort on panic (exit " << kPanicExitCode
+            << "), got " << code << " for:\n"
+            << source;
+        EXPECT_NE(err.find(expectedStderr), std::string::npos)
+            << "expected stderr containing \"" << expectedStderr << "\", got:\n"
+            << err;
     }
 
     /// Compile, link, run, and assert both the exit code AND the captured stdout.
@@ -4370,3 +4458,296 @@ TEST_F(RuntimeTest, ModuleImportAfterLexErrorStillRejected)
         &diag);
     EXPECT_FALSE(ok) << "a lex error before an import must still fail the compile";
 }
+
+// ── G: panic / never (the uninhabited type) ───────────────────────────────────
+//
+// panic(&i8) is a compiler builtin: it writes "panicked: <msg>" to stderr and
+// calls libc abort(). Its result type is never, the uninhabited type, so it
+// type-checks in ANY position (an argument, a return value, a match arm) while
+// never producing a value. Everything after a diverging call in the same
+// statement list is unreachable, and MIRBuilder::emit() drops it.
+//
+// ASSERTION NOTE: stdout must not be compared around a panic. abort() does not
+// flush stdio, so whatever the program printed before diverging is lost; stderr
+// is the observable channel (see expectPanic).
+
+TEST_F(RuntimeTest, PanicAbortsWithMessage)
+{
+    expectPanic("fn main() -> i32 { panic(\"boom\"); ret 0; }", "panicked: boom");
+}
+
+// The statement after a diverging call must not run: reaching 'ret 7' would
+// exit 7 instead of aborting.
+TEST_F(RuntimeTest, PanicSkipsFollowingStatements)
+{
+    expectPanic("fn main() -> i32 { panic(\"stop\"); ret 7; }", "panicked: stop");
+}
+
+TEST_F(RuntimeTest, NeverFunctionDiverges)
+{
+    expectPanic("fn boom() -> never { panic(\"never returns\"); }\n"
+                "fn main() -> i32 { boom(); ret 0; }",
+        "panicked: never returns");
+}
+
+// panic takes a &i8, so a never function can forward its own parameter.
+TEST_F(RuntimeTest, NeverFunctionForwardsItsMessage)
+{
+    expectPanic("fn die(m: &i8) -> never { panic(m); }\n"
+                "fn main() -> i32 { die(\"via a param\"); ret 0; }",
+        "panicked: via a param");
+}
+
+// ret panic(...) in a VALUE-returning function: never coerces to any type.
+TEST_F(RuntimeTest, ReturnOfPanicSatisfiesAnyReturnType)
+{
+    expectPanic("fn classify(n: i32) -> i32 { if n > 0 { ret 1; } ret panic(\"negative\"); }\n"
+                "fn main() -> i32 { ret classify(0 - 1); }",
+        "panicked: negative");
+}
+
+// A diverging BLOCK arm (statement match) next to a normal arm.
+TEST_F(RuntimeTest, DivergingBlockArmInMatch)
+{
+    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
+                "fn get(o: Option<i32>) -> i32 { match o { Some(v) => { ret v; }, None => { panic(\"none arm\"); }, } }\n"
+                "fn main() -> i32 { let n = nothing(); ret get(n); }",
+        "panicked: none arm");
+}
+
+// A diverging VALUE arm must not fix the match's type: 'None => panic(..)' is
+// never, so the match is still i32 (fixed by the Some arm).
+TEST_F(RuntimeTest, DivergingValueArmDoesNotFixMatchType)
+{
+    expectRun("fn main() -> i32 {\n"
+              "    let o = Option::Some(5);\n"
+              "    let x = match o { Some(v) => v, None => panic(\"unreachable\"), };\n"
+              "    ret x;\n"
+              "}",
+        5);
+    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
+                "fn main() -> i32 {\n"
+                "    let n = nothing();\n"
+                "    let x = match n { Some(v) => v, None => panic(\"no value\"), };\n"
+                "    ret x;\n"
+                "}",
+        "panicked: no value");
+}
+
+// When EVERY value arm diverges the match itself is never and still coerces to
+// the declared return type. (This used to store a valueless operand and trap
+// inside LLVM.)
+TEST_F(RuntimeTest, AllDivergingArmsMakeTheMatchNever)
+{
+    expectPanic("fn pick(o: Option<i32>) -> i32 {\n"
+                "    ret match o { Some(v) => panic(\"some\"), None => panic(\"none\"), };\n"
+                "}\n"
+                "fn main() -> i32 { let o = Option::Some(1); ret pick(o); }",
+        "panicked: some");
+}
+
+// Divergence nested inside a larger expression: the enclosing builder keeps
+// emitting (the remaining argument, the call itself) and emit() drops those
+// unreachable statements.
+TEST_F(RuntimeTest, DivergenceInsideNestedCallArguments)
+{
+    expectPanic("fn add(a: i32, b: i32) -> i32 { ret a + b; }\n"
+                "fn main() -> i32 { ret add(panic(\"in an argument\"), 5); }",
+        "panicked: in an argument");
+}
+
+// never is a legal type for a binding (the language's bottom type): the binding
+// can simply never hold a value.
+TEST_F(RuntimeTest, NeverTypedBindingDeclarationAllowed)
+{
+    expectRun("fn main() -> i32 { let x: never; ret 0; }", 0);
+}
+
+// ...but READING such a binding is an error: no value of an uninhabited type can
+// exist.
+TEST_F(RuntimeTest, NeverBindingCannotBeRead)
+{
+    expectCompileFail("fn main() -> i32 { let x: never; print_int(x); ret 0; }",
+        "uninhabited type 'never'");
+}
+
+// Bottom coercion is uniform across the value positions: a never-valued
+// initialiser, assignment and array element all satisfy the surrounding type.
+TEST_F(RuntimeTest, NeverCoercesInLetInitializer)
+{
+    expectPanic("fn main() -> i32 { let x: i32 = panic(\"let-init\"); ret 0; }",
+        "panicked: let-init");
+}
+
+TEST_F(RuntimeTest, NeverCoercesInAssignment)
+{
+    expectPanic("fn main() -> i32 { let mut x = 0; x = panic(\"assign\"); ret x; }",
+        "panicked: assign");
+}
+
+TEST_F(RuntimeTest, NeverCoercesAsArrayElement)
+{
+    expectPanic("fn main() -> i32 { let a = [panic(\"elem\"), 2, 3]; ret 0; }",
+        "panicked: elem");
+}
+
+// A function declared to return never must actually diverge; the check lives in
+// MIRBuilder (conservative: the body must contain at least one diverging call).
+TEST_F(RuntimeTest, NeverFunctionMustDiverge)
+{
+    expectCompileFail("fn boom() -> never { print_str(\"side\"); }\nfn main() -> i32 { ret 0; }",
+        "but never diverges");
+    expectCompileFail("fn boom() -> never { }\nfn main() -> i32 { ret 0; }",
+        "but never diverges");
+}
+
+// ...and it must NOT reject a body that diverges through another never function,
+// nor one that diverges inside a while-true loop (whose exit edge exists
+// statically — that is exactly why the check is not a full path analysis).
+TEST_F(RuntimeTest, NeverFunctionDivergingIndirectly)
+{
+    expectPanic("fn inner() -> never { panic(\"inner\"); }\n"
+                "fn outer() -> never { inner(); }\n"
+                "fn main() -> i32 { outer(); ret 0; }",
+        "panicked: inner");
+}
+
+TEST_F(RuntimeTest, NeverFunctionDivergingInsideWhileTrue)
+{
+    expectPanic("fn spin() -> never {\n"
+                "    let mut i = 0;\n"
+                "    while true { i = i + 1; if i > 3 { panic(\"stop\"); } }\n"
+                "}\n"
+                "fn main() -> i32 { spin(); ret 0; }",
+        "panicked: stop");
+}
+
+// A value whose generic arguments cannot be inferred keeps the type DEFINITION
+// (whose fields still contain the bare parameter). That is rejected with an
+// explanation instead of reaching codegen.
+TEST_F(RuntimeTest, UninferredGenericArgumentInCallRejected)
+{
+    expectCompileFail("fn get(o: Option<i32>) -> i32 { ret 0; }\n"
+                      "fn main() -> i32 { ret get(Option::None); }",
+        "cannot infer the generic argument(s) of 'Option'");
+}
+
+TEST_F(RuntimeTest, UninferredGenericArgumentInLetRejected)
+{
+    expectCompileFail("fn main() -> i32 { let n: Option<i32> = Option::None; ret 0; }",
+        "cannot infer the generic argument(s) of 'Option'");
+    expectCompileFail("fn main() -> i32 { let n = Option::None; ret 0; }",
+        "cannot infer the generic argument(s) of 'Option'");
+}
+
+TEST_F(RuntimeTest, BareGenericParameterTypeRejected)
+{
+    expectCompileFail("fn f(o: Option) -> i32 { ret 0; }\nfn main() -> i32 { ret f(Option::Some(1)); }",
+        "without its argument(s)");
+}
+
+// The inferred forms still work when the arguments ARE inferable.
+TEST_F(RuntimeTest, GenericInferenceStillWorks)
+{
+    expectRun("fn get(o: Option<i32>) -> i32 { match o { Some(v) => { ret v; }, None => { ret 0; }, } }\n"
+              "fn main() -> i32 { let o = Option::Some(9); ret get(o); }",
+        9);
+}
+
+TEST_F(RuntimeTest, PanicArgumentTypeIsChecked)
+{
+    expectCompileFail("fn main() -> i32 { panic(42); ret 0; }",
+        "builtin 'panic' expects an argument of type '&int8'");
+}
+
+TEST_F(RuntimeTest, PanicArityIsChecked)
+{
+    expectCompileFail("fn main() -> i32 { panic(); ret 0; }",
+        "builtin 'panic' expects 1 argument, got 0");
+}
+
+TEST_F(RuntimeTest, PanicNameIsReserved)
+{
+    expectCompileFail("fn panic() { }\nfn main() -> i32 { ret 0; }",
+        "is reserved by the compiler");
+}
+
+// void is a no-value type: a void-typed binding could never be read.
+TEST_F(RuntimeTest, VoidTypedVariableRejected)
+{
+    expectCompileFail("fn side() { }\nfn main() -> i32 { let x = side(); ret 0; }",
+        "cannot have type 'void'");
+}
+
+// ── H: Option::unwrap / expect (stdlib) ───────────────────────────────────────
+//
+// Methods on Option<T> (Source/Std/option.lis): both consume the option and
+// return the payload, aborting through panic when it is None. They are
+// implementable only because panic returns never — the None arm produces no
+// value, so the method still type-checks as returning T.
+
+TEST_F(RuntimeTest, OptionUnwrapReturnsThePayload)
+{
+    expectRun("fn main() -> i32 { let a = Option::Some(7); ret a.unwrap(); }", 7);
+}
+
+TEST_F(RuntimeTest, OptionExpectReturnsThePayload)
+{
+    expectRun("fn main() -> i32 { let a = Option::Some(41); ret a.expect(\"must be some\"); }", 41);
+}
+
+TEST_F(RuntimeTest, OptionUnwrapOnNoneAborts)
+{
+    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
+                "fn main() -> i32 { let n = nothing(); ret n.unwrap(); }",
+        "panicked: called unwrap on a None value");
+}
+
+TEST_F(RuntimeTest, OptionExpectOnNoneUsesTheCallerMessage)
+{
+    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
+                "fn main() -> i32 { let n = nothing(); ret n.expect(\"the config value must be present\"); }",
+        "panicked: the config value must be present");
+}
+
+// unwrap takes self BY VALUE, so the option is moved (and could not be unwrapped
+// twice).
+TEST_F(RuntimeTest, OptionUnwrapMovesTheOption)
+{
+    expectCompileFail("fn main() -> i32 {\n"
+                      "    let a = Option::Some(1);\n"
+                      "    let x = a.unwrap();\n"
+                      "    let y = a.unwrap();\n"
+                      "    ret x + y;\n"
+                      "}",
+        "use of moved value: 'a'");
+}
+
+// A non-Copy payload is moved out of the enum and owned by the caller
+// (exactly one drop of the String buffer).
+TEST_F(RuntimeTest, OptionUnwrapNonCopyPayload)
+{
+    expectOutput("fn main() -> i32 {\n"
+                 "    let o = Option::Some(String::from_lit(\"payload\"));\n"
+                 "    let s = o.unwrap();\n"
+                 "    print_str(s.to_cstr());\n"
+                 "    println();\n"
+                 "    ret 0;\n"
+                 "}",
+        "payload\n", 0);
+}
+
+// Chained directly on a construction, and on the Option a stdlib helper returns.
+TEST_F(RuntimeTest, OptionUnwrapChained)
+{
+    expectRun("fn main() -> i32 { ret Option::Some(3).unwrap(); }", 3);
+}
+
+TEST_F(RuntimeTest, OptionUnwrapOnHelperResult)
+{
+    // first(range(1, 5)) is Option<i32> holding 1.
+    expectRun("fn main() -> i32 { ret first(range(1, 5)).unwrap(); }", 1);
+    // unwrap_or stays available (and non-panicking) alongside unwrap.
+    expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(4), 0) + Option::Some(5).unwrap(); }", 9);
+}
+

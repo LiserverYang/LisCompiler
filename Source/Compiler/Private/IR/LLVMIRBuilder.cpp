@@ -245,7 +245,10 @@ void LLVMIRBuilder::lowerFunctionBody(const MIRFunction &mirFn)
     {
         size_t localIdx = argIdx + 1; // skip the return slot at index 0
         llvm::AllocaInst *alloca = fs.allocas.at(localIdx);
-        builder_->CreateStore(&arg, alloca);
+        // A VOID-typed parameter has no storage (createAllocas stores NULL);
+        // storing into it would pass a null pointer to CreateStore.
+        if (alloca)
+            builder_->CreateStore(&arg, alloca);
         arg.setName(body.locals[localIdx].name);
         ++argIdx;
     }
@@ -372,6 +375,13 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     if (isToStringBuiltin(s.funcName))
     {
         emitToStringCall(fs, s, args);
+        return;
+    }
+
+    // Builtin panic lowers to fprintf(stderr, ...) + abort(); it never returns.
+    if (isPanicBuiltin(s.funcName))
+    {
+        emitPanicCall(fs, s, args);
         return;
     }
 
@@ -521,19 +531,33 @@ void LLVMIRBuilder::lowerTerminator(FunctionState &fs, const MIRTerminator &term
                 llvm::Value* retVal = lowerOperand(fs, *t.value);
                 builder_->CreateRet(retVal);
             }
-            else if (fs.body->returnType && !fs.body->returnType->equals(context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID)))
-            {
-                // Return slot (locals[0]) holds the return value — load it.
-                MIRPlace retSlot;
-                retSlot.index = 0;
-                retSlot.type  = fs.body->returnType;
-                retSlot.base = PlaceBase::Return;
-                llvm::Value* retVal = loadPlace(fs, retSlot);
-                builder_->CreateRet(retVal);
-            }
             else
             {
-                builder_->CreateRetVoid();
+                // Fall-through: the return value (if any) was stored into the
+                // return slot (locals[0]) by buildReturn — load it and return it.
+                //
+                // Gate on the SLOT existence, not on the semantic return type:
+                // both VOID and NEVER lower to the LLVM void type, and
+                // createAllocas() gives such a local a NULL slot. The old test
+                // (returnType != VOID) let NEVER through, so a `fn f() -> never`
+                // whose body diverges (panic(...)) ended its dead fall-through
+                // block with a load of void from a null pointer — an IRBuilder
+                // crash (SIGTRAP), not a diagnostic. The LLVM signature of such a
+                // function is `void @f()`, so `ret void` is the right terminator.
+                llvm::AllocaInst* slot = fs.allocas.count(0) ? fs.allocas.at(0) : nullptr;
+                if (slot)
+                {
+                    MIRPlace retSlot;
+                    retSlot.index = 0;
+                    retSlot.type  = fs.body->returnType;
+                    retSlot.base = PlaceBase::Return;
+                    llvm::Value* retVal = loadPlace(fs, retSlot);
+                    builder_->CreateRet(retVal);
+                }
+                else
+                {
+                    builder_->CreateRetVoid();
+                }
             }
         }
         else if constexpr (std::is_same_v<T, MIRTermCall>)
@@ -547,6 +571,14 @@ void LLVMIRBuilder::lowerTerminator(FunctionState &fs, const MIRTerminator &term
         }
         else if constexpr (std::is_same_v<T, MIRTermUnreachable>)
         {
+            builder_->CreateUnreachable();
+        }
+        else if constexpr (std::is_same_v<T, MIRTermDiverge>)
+        {
+            // The block ended in a diverging call (panic → abort), which never
+            // returns. `unreachable` is the correct terminator: it tells LLVM
+            // control cannot flow past this point, so no successor edge (and no
+            // bogus return-slot load) is emitted.
             builder_->CreateUnreachable();
         } },
         term);
@@ -945,6 +977,15 @@ llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
 {
     std::shared_ptr<Type> finalTy;
     llvm::Value *ptr = lowerPlaceAsPtr(fs, p, &finalTy);
+    // A place with no storage cannot be loaded: createAllocas() gives a VOID
+    // local a NULL slot. Returning undefined behaviour from LLVM here (a load
+    // of a null pointer, which traps inside DataLayout::getAlignment rather
+    // than reporting anything) helped nobody — report it as the internal
+    // inconsistency it is. (sema rejects reading an uninhabited `never` binding,
+    // so reaching this means a `void`-typed local.)
+    if (!ptr)
+        throw std::runtime_error("internal: load of a value-less place of type "
+                                 + (finalTy ? finalTy->toString() : std::string("?")));
     return builder_->CreateLoad(toLLVMType(finalTy), ptr, "load");
 }
 
@@ -1307,6 +1348,69 @@ llvm::Function *LLVMIRBuilder::getOrDeclareAbort()
 {
     return getOrDeclareLibcFunction("abort",
         llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), {}, /*isVarArg=*/false));
+}
+
+// ── Builtin panic: message to stderr, then abort ─────────────────────────────
+
+bool LLVMIRBuilder::isPanicBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::Panic;
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareFprintf()
+{
+    // int fprintf(FILE* stream, const char* format, ...)
+    return getOrDeclareLibcFunction("fprintf",
+        llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(ctx_),
+            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
+            /*isVarArg=*/true));
+}
+
+llvm::Value *LLVMIRBuilder::getStderrFilePtr()
+{
+    // Same split as the read builtins' stdin (see emitInputCall): MinGW/UCRT
+    // exposes stderr as the macro `__acrt_iob_func(2)` (no `stderr` data
+    // symbol → linking against one fails); other libcs export a global.
+#ifdef _WIN32
+    llvm::Function *iob = getOrDeclareAcrtIobFunc();
+    return builder_->CreateCall(iob->getFunctionType(), iob,
+        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 2)});
+#else
+    llvm::GlobalVariable *g = context->module->getNamedGlobal("stderr");
+    if (!g)
+        g = new llvm::GlobalVariable(*context->module,
+            llvm::PointerType::getUnqual(ctx_),
+            /*isConstant=*/false,
+            llvm::GlobalValue::ExternalLinkage,
+            nullptr,
+            "stderr");
+    return builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), g);
+#endif
+}
+
+void LLVMIRBuilder::emitPanicMessage(llvm::Value *msgPtr)
+{
+    llvm::Function *fprintfFn = getOrDeclareFprintf();
+    llvm::Value *stream = getStderrFilePtr();
+    llvm::Value *fmt = builder_->CreateGlobalStringPtr("panicked: %s\n", ".panicfmt");
+    builder_->CreateCall(fprintfFn->getFunctionType(), fprintfFn, {stream, fmt, msgPtr});
+
+    llvm::Function *abortFn = getOrDeclareAbort();
+    builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
+}
+
+void LLVMIRBuilder::emitPanicCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
+{
+    (void)fs;
+    // sema guarantees exactly one `&i8` argument; be defensive anyway so a
+    // malformed MIR can't index out of bounds.
+    llvm::Value *msg = args.empty()
+                           ? builder_->CreateGlobalStringPtr("", ".panicempty")
+                           : args[0];
+    emitPanicMessage(msg);
+    // No store to s.dest: `panic` returns `never`, so there is no value. The
+    // block's MIRTermDiverge terminator emits the `unreachable` that follows.
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareLibcFunction(

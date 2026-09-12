@@ -52,9 +52,10 @@ enum class TokenCode
     I64,  // "i64"
     F32,  // "f32"
     F64,  // "f64"
-    BOOL, // "bool"
-    CHAR, // "char"
-    VOID, // "void"
+    BOOL,  // "bool"
+    CHAR,  // "char"
+    VOID,  // "void"
+    NEVER, // "never" (uninhabited: the return type of a diverging call)
 
     /* Literal */
     BOOLEAN_TRUE,   // "true"
@@ -108,7 +109,9 @@ const size_t KEYWORDS_LENGTH = (size_t)TokenCode::BOOLEAN_FALSE - (size_t)TokenC
 
 // The length of all type keywords
 const size_t TYPE_KEYWORD_BEGIN = (size_t)TokenCode::I8;
-const size_t TYPE_KEYWORD_END = (size_t)TokenCode::VOID;
+// NEVER is the last type keyword — parseType accepts the whole range, so `never`
+// is writable as a return type (`fn f() -> never`).
+const size_t TYPE_KEYWORD_END = (size_t)TokenCode::NEVER;
 
 // The procedure keyword list
 const std::array<std::string, KEYWORDS_LENGTH> keywords = {
@@ -142,6 +145,7 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "bool",
     "char",
     "void",
+    "never",
     "true",
     "false"};
 

@@ -61,6 +61,12 @@ private:
      *  internal top-level name, (3) the root module's bare name. Names already
      *  carrying a `$` prefix (module-qualified) are looked up directly. */
     Symbol *lookupModuleAware(const std::string &name);
+    /** True when monomorphization will substitute generic parameters in the body
+     *  currently being analyzed — a generic function, or a method of a generic
+     *  struct. A bare generic type there is still substituted later, so it is not
+     *  the un-inferrable-definition error the same code is outside such a
+     *  context. */
+    bool inGenericContext() const;
 
     /// Set currentModule_ from Context::stmtAttributions for the item at `index`.
     void setModuleForItem(size_t index);
@@ -233,6 +239,19 @@ private:
      *  and return true. These lower to malloc + sprintf + strlen in
      *  LLVMIRBuilder. */
     bool handleToStringBuiltin(HIRCall *node, const std::string &name);
+
+    /** Recognize the builtin `panic(&i8)` call by callee name, validate its
+     *  arg, set the call's type to `never` (the diverging/uninhabited type),
+     *  and return true. Lowers to `fprintf(stderr, ...)` + `abort()` in
+     *  LLVMIRBuilder; the MIR block that contains the call is sealed with
+     *  MIRTermDiverge so everything after it is unreachable. */
+    bool handlePanicBuiltin(HIRCall *node, const std::string &name);
+
+    /** True if `ty` is the `never` primitive (the return type of `panic`). A
+     *  `never`-typed expression coerces to ANY expected type — it produces no
+     *  value, so nothing about the expected type is violated. Central place
+     *  so match-arm unification and typesCompatible can't drift apart. */
+    static bool isNeverType(const std::shared_ptr<Type> &ty);
 
     // ── operator overloading ──────────────────────────────────────────────
     /// Trait name for a binary op (`+`→"Add"), or nullptr for logical ops

@@ -52,6 +52,7 @@ TypeContext::TypeContext()
     primitives[PrimitiveType::PrimKind::BOOL] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::BOOL);
     primitives[PrimitiveType::PrimKind::CHAR] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::CHAR);
     primitives[PrimitiveType::PrimKind::VOID] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::VOID);
+    primitives[PrimitiveType::PrimKind::NEVER] = std::make_shared<PrimitiveType>(PrimitiveType::PrimKind::NEVER);
 }
 
 std::shared_ptr<PrimitiveType> TypeContext::getPrimitive(PrimitiveType::PrimKind kind)

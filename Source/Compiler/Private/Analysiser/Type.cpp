@@ -88,6 +88,7 @@ std::string PrimitiveType::toString() const
     case PrimKind::BOOL: return "bool";
     case PrimKind::CHAR: return "char";
     case PrimKind::VOID: return "void";
+    case PrimKind::NEVER: return "never";
     default: return "unknown";
     }
 }
@@ -102,6 +103,7 @@ PrimitiveType::PrimKind PrimitiveType::getKind(std::string str)
     if (str == "f64") return PrimKind::F64;
     if (str == "bool") return PrimKind::BOOL;
     if (str == "char") return PrimKind::CHAR;
+    if (str == "never") return PrimKind::NEVER;
     return PrimKind::VOID;
 }
 

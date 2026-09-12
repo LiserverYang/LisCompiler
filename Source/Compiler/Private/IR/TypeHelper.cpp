@@ -38,6 +38,17 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
         {
         case PrimitiveType::PrimKind::VOID:
             return llvm::Type::getVoidTy(ctx);
+        // NEVER (the uninhabited type) gets the EMPTY STRUCT, not void. void is
+        // not a storable type: createAllocas() skips it (NULL slot), a load from
+        // that slot traps inside LLVM (DataLayout::getAlignment on void), a void
+        // PARAMETER or a [void; N] array is rejected by LLVM outright, and an
+        // alloca of a void-bearing aggregate traps too. Since `never` is legal in
+        // every position the language allows it (function return, local
+        // declaration, and — via the never-to-anything coercion — an argument),
+        // a real zero-sized type keeps every alloca/load/store/signature
+        // well-formed instead of crashing the compiler.
+        case PrimitiveType::PrimKind::NEVER:
+            return llvm::StructType::get(ctx);
         case PrimitiveType::PrimKind::BOOL:
             return llvm::Type::getInt1Ty(ctx);
         case PrimitiveType::PrimKind::CHAR:

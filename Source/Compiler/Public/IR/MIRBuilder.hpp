@@ -8,6 +8,7 @@
 #include "Core/Pass.hpp"
 #include "IR/HIR.hpp"
 #include "IR/MIR.hpp"
+#include "Logger/Logger.hpp"
 #include "IR/MIRPrinter.hpp"
 
 #include <stdexcept>
@@ -53,6 +54,14 @@ public:
     virtual void run() override
     {
         context->mirProgram = std::make_unique<MIRProgram>(buildProgram(context->hirProgram.get()));
+
+        // MIR-level diagnostics (a `-> never` function whose body never
+        // diverges) must stop the pipeline HERE: the later stages lower the
+        // well-formed-but-wrong body without complaint and the compiler would
+        // exit 0 on an invalid program. Tests call buildProgram() instead (this
+        // gate exits the process, mirroring HIRSemanticAnalyzer::run()).
+        if (Logger::GetErrorCount() > 0)
+            exit(1);
     }
 
     /** Entry point. Consumes an HIRProgram and returns a fully built MIRProgram. */
@@ -63,6 +72,15 @@ private:
     MIRBody *body_ = nullptr;
     size_t tempCtr_ = 0;
     BasicBlockId curBB_ = 0;
+
+    /** Source FILE of the top-level item currently being lowered (from
+     *  Context::stmtAttributions). MIR-level diagnostics use it so a module
+     *  (stdlib) function is reported against its own file — Context::filePath is
+     *  the main file by the time MIR runs. */
+    std::string currentItemFilePath_;
+
+    /** Emit a diagnostic at `pos` (in the current item file) and count it. */
+    void logAtItem(const SourcePosition &pos, size_t length, const std::string &msg);
 
     /** Maps user variable name → local index inside the current function. */
     std::unordered_map<std::string, size_t> varMap_;
@@ -205,4 +223,10 @@ private:
 
     // ── copy-semantics predicate ──────────────────────────────────────────────
     static bool isCopyType(const std::shared_ptr<Type> &type);
+
+    /** True if `type` is the `never` (uninhabited) type — the return type of a
+     *  diverging call like `panic("...")`. buildCall seals such a block with
+     *  MIRTermDiverge, and buildMatch skips the result-slot write for a
+     *  diverging arm (there is no value to write). */
+    static bool isNeverType(const std::shared_ptr<Type> &type);
 };

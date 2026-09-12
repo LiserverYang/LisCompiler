@@ -234,12 +234,28 @@ struct MIRTermUnreachable
 {
 };
 
+/// Control flow DIVERGES here: the preceding statement was a call to a
+/// `never`-returning function (`panic("...")`), which never returns to its
+/// caller. Everything after it in the block is unreachable.
+///
+/// This is a SEPARATE terminator from MIRTermUnreachable even though both lower
+/// to LLVM `unreachable`: MIRTermUnreachable is the "not yet sealed" sentinel
+/// every fresh block starts with (MIRBuilder::newBlock), and the builders test
+/// for it to decide whether a block still needs a terminator. Reusing it for
+/// divergence would make a diverged block look unsealed, so the fall-through
+/// paths would append a `goto`/`ret` after it and the dead statements would
+/// execute.
+struct MIRTermDiverge
+{
+};
+
 using MIRTerminator = std::variant<
     MIRTermGoto,
     MIRTermBranch,
     MIRTermReturn,
     MIRTermCall,
-    MIRTermUnreachable>;
+    MIRTermUnreachable,
+    MIRTermDiverge>;
 
 // ─── Basic Block ─────────────────────────────────────────────────────────────
 

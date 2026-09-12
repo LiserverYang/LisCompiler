@@ -21,6 +21,42 @@ enum Option<T>
     None
 }
 
+// ── unwrap / expect: the panicking accessors ─────────────────────────────────
+//
+// Both consume the option (by-value `self`) and return the payload; on `None`
+// they call the compiler builtin `panic(&i8)`, which writes the message to
+// stderr and aborts the process. `panic` returns `never` (the uninhabited
+// type), so the `None` arm produces no value and the method still type-checks
+// as returning `T` — that is what makes these implementable without an
+// unwinding / error-propagation mechanism.
+//
+// There is no third outcome: either the payload or a crash. Use `unwrap_or`
+// when a fallback value is acceptable.
+impl Option
+{
+    // The `Some` payload; aborts the program on `None`.
+    //
+    //     Option::Some(7).unwrap()   // 7
+    fn unwrap(self) -> T
+    {
+        match self {
+            Some(v) => { ret v; },
+            None => { panic("called unwrap on a None value"); },
+        }
+    }
+
+    // Like `unwrap`, but aborts with the caller-supplied message.
+    //
+    //     o.expect("the config value must be present")
+    fn expect(self, msg: &i8) -> T
+    {
+        match self {
+            Some(v) => { ret v; },
+            None => { panic(msg); },
+        }
+    }
+}
+
 // True if `o` carries a value (`Some`).
 //
 //     if is_some(Option::Some(1)) { ... }
@@ -41,9 +77,8 @@ fn is_none<T>(o: Option<T>) -> bool
     }
 }
 
-// Unwrap the `Some` payload, falling back to `dflt` on `None`. The safe
-// alternative to `unwrap` (which needs a panic mechanism the language does
-// not have yet).
+// Unwrap the `Some` payload, falling back to `dflt` on `None`. The
+// non-panicking alternative to `unwrap` / `expect`.
 //
 //     unwrap_or(Option::Some(7), 0)  // 7
 //     unwrap_or(Option::None, 0)     // 0
