@@ -269,7 +269,11 @@ protected:
         context->args->setArg("filePath", "test.lis");
 
         // Write the module files and expose them via searchPaths.
-        fs::path modDir = fs::temp_directory_path() / ("lis_mods_" + std::to_string(gRtCounter++));
+        // Per (process, test): the counter alone is per-process, so two sharded
+        // runners would otherwise share a directory name and delete each
+        // other's module files mid-test (seen as "cannot find module 'baz.qux'").
+        fs::path modDir = fs::temp_directory_path()
+                          / ("lis_mods_" + std::to_string(rtProcessId()) + "_" + std::to_string(gRtCounter++));
         fs::create_directories(modDir);
         for (auto &[name, src] : modules)
         {
