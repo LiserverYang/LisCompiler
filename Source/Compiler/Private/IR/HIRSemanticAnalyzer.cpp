@@ -2407,6 +2407,51 @@ void HIRSemanticAnalyzer::checkCallArgs(
             handleMoveSource(args[i].get(), call);
     }
 }
+std::shared_ptr<CustomType> HIRSemanticAnalyzer::dropTypePartiallyMovedBy(HIRExpr *source)
+{
+    // Walk the member-access chain root-first: for `s.a.b` the chain is
+    // [s.a, s.a.b], so chain[i-1]->type is the type of the place chain[i]
+    // projects out of.
+    std::vector<HIRMemberAccess *> chain;
+    for (HIRExpr *cur = source; cur != nullptr;)
+    {
+        auto *ma = dynamic_cast<HIRMemberAccess *>(cur);
+        if (!ma)
+            break;
+        chain.push_back(ma);
+        cur = ma->object.get();
+    }
+    if (chain.empty())
+        return nullptr;
+    std::reverse(chain.begin(), chain.end());
+
+    // Moving a field out THROUGH a reference leaves no owned value behind —
+    // whether that is legal is the borrow checker's question, not this rule's.
+    if (isReferenceType(chain[0]->object->type))
+        return nullptr;
+
+    auto containerOf = [](const std::shared_ptr<Type> &ty) -> std::shared_ptr<CustomType>
+    {
+        std::shared_ptr<Type> base = ty;
+        while (auto ref = std::dynamic_pointer_cast<ReferenceType>(base))
+            base = ref->getBaseType();
+        return std::dynamic_pointer_cast<CustomType>(base);
+    };
+
+    // Every place the move takes a field OUT of: the receiver of the first
+    // projection, plus each intermediate projection. All of them are left
+    // partially initialized.
+    std::vector<std::shared_ptr<CustomType>> containers;
+    containers.push_back(containerOf(chain[0]->object->type));
+    for (size_t i = 0; i + 1 < chain.size(); ++i)
+        containers.push_back(containerOf(chain[i]->type));
+
+    for (const auto &ct : containers)
+        if (ct && ct->implementsTrait("Drop"))
+            return ct;
+    return nullptr;
+}
+
 void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
 {
     // A source whose analysis FAILED has no type, so it is not a move of
@@ -2460,8 +2505,25 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
             log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'", E_UseOfMovedValue);
             return;
         }
-        // Copy fields never move (mirrors MIR's isCopyType).
+        // Copy fields never move (mirrors MIR's isCopyType). A copy is a read:
+        // nothing is left half-initialized, so the Drop rule below cannot
+        // apply to it either (Rust allows `let n = p.count;` on a Drop type).
         if (ma->type && ma->type->isCopyable()) return;
+
+        // E0509: a non-Copy field may not leave a value whose type implements
+        // Drop. The destructor releases that type's fields as a whole, so the
+        // partially-initialized value it would be handed is not a value it can
+        // legally touch — and the field cannot be released twice. Rust rejects
+        // the same move; whole-value moves are unaffected (nothing is left
+        // behind).
+        if (auto dropOwner = dropTypePartiallyMovedBy(source))
+        {
+            log(*ma,
+                "cannot move out of '" + displayName(dropOwner->getName())
+                    + "': the type implements Drop, so its fields are released together by its own destructor.",
+                E_MoveOutOfDropType);
+            return;
+        }
 
         // Reject re-reading a moved field or an ancestor of it.
         for (const auto &existing : sym->movedFields)
@@ -3182,6 +3244,16 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
 void HIRSemanticAnalyzer::visit(HIRExprStmt *node)
 {
     analyzeExpr(node->expr.get());
+
+    // A discarded expression statement CONSUMES its value: `p.a;` releases the
+    // field right away and `d;` drops the whole value (MIR's buildExprStmt
+    // lowers exactly that). Without the move bookkeeping here the value looked
+    // untouched to every later check, so
+    //     p.s; let y = p.s;        // s: String
+    // compiled and moved a buffer that had already been freed (double free),
+    // and a partial move out of a Drop type written in this form skipped the
+    // E0509 check entirely.
+    handleMoveSource(node->expr.get(), *node);
 
     // `panic("...");` (or any call returning the uninhabited type) never returns,
     // so the rest of this statement sequence is unreachable.

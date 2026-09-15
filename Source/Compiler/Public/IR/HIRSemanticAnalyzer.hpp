@@ -291,6 +291,16 @@ private:
      *  `explainUninferredGeneric` is set, a context-free generic value
      *  (`f(Option::None)` with an `Option<i32>` parameter) is explained as an
      *  inference failure instead of a bare mismatch. */
+    /** Rust's E0509 as a language decision (2026-09-15): a non-Copy field may
+     *  not be moved OUT of a value whose type implements Drop, because that
+     *  leaves the value partially initialized while its own destructor owns all
+     *  of its fields. Returns the type that would be left behind, or nullptr
+     *  when the move is legal (a Copy field is a read; a move through a
+     *  reference leaves no owned value behind; a whole-value move leaves
+     *  nothing behind). For `s.a.b` the containers are the types of `s` and of
+     *  `s.a`, and EITHER of them implementing Drop is enough to reject. */
+    std::shared_ptr<CustomType> dropTypePartiallyMovedBy(HIRExpr *source);
+
     void checkCallArgs(const std::vector<std::unique_ptr<HIRExpr>> &args,
         const std::vector<std::shared_ptr<Type>> &params,
         size_t paramOffset,

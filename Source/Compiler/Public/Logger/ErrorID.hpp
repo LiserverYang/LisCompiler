@@ -53,6 +53,7 @@ ERRORID E_UninitializedNonCopyBinding = 3012; // `let x: <Move>;` without an ini
 ERRORID E_UnsafeBuiltinOutsideStdlib = 3013;  // heap primitive called outside the stdlib
 ERRORID E_PointerOpOutsideStdlib = 3014;      // raw-pointer indexing/deref outside the stdlib
 ERRORID E_PrivateFieldAccess = 3015;          // private field read/constructed outside its type
+ERRORID E_MoveOutOfDropType = 3016;           // non-Copy field moved out of a type with impl Drop
 
 // Borrow-checker errors (4000 series)
 

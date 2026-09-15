@@ -760,6 +760,89 @@ TEST_F(RuntimeTest, FailedMemberAccessReportsNoCascade)
                          << diag;
 }
 
+
+// ── E0509: a field cannot leave a type that implements Drop ────────────────────
+//
+// Language decision (2026-09-15): follow Rust. The type's own destructor
+// releases its fields as a whole, so a partially-initialized value would either
+// skip that destructor or hand it memory it must not touch (and the moved field
+// would be released twice).
+
+TEST_F(RuntimeTest, PartialMoveOutOfDropTypeRejected)
+{
+    expectCompileFail("struct A { pub v: i32 } impl Drop for A { fn drop(self) { } }"
+                      " struct P { pub a: A, pub n: i32 } impl Drop for P { fn drop(self) { } }"
+                      " fn main() -> i32 { let p = P { a: A { v: 1 }, n: 2 };"
+                      " let x = p.a; ret p.n; }",
+        "implements Drop");
+}
+
+TEST_F(RuntimeTest, MoveOutOfDropTypeBehindPlainStructRejected)
+{
+    // The type that must not be left partially initialized is the one the move
+    // takes the field OUT of — here `Inner`, even though the root `Outer` has no
+    // destructor of its own.
+    expectCompileFail("struct Inner { pub s: String } impl Drop for Inner { fn drop(self) { } }"
+                      " struct Outer { pub i: Inner }"
+                      " fn main() -> i32 { let o = Outer { i: Inner { s: String::from_lit(\"x\") } };"
+                      " let s = o.i.s; ret s.len(); }",
+        "implements Drop");
+}
+
+TEST_F(RuntimeTest, DiscardedFieldIsAMove)
+{
+    // `p.s;` releases the field on the spot, so the value is gone: using it
+    // again used to compile and hand out an already-freed buffer (double free).
+    expectCompileFail("struct P { pub s: String }"
+                      " fn main() -> i32 { let p = P { s: String::from_lit(\"hi\") };"
+                      " p.s; let y = p.s; ret y.len(); }",
+        "use of moved value");
+}
+
+TEST_F(RuntimeTest, DiscardedWholeValueIsAMove)
+{
+    expectCompileFail("struct D { pub v: i32 } impl Drop for D { fn drop(self) { } }"
+                      " fn main() -> i32 { let d = D { v: 1 }; d; let e = d; ret 0; }",
+        "use of moved value");
+}
+
+TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
+{
+    // The E0509 rule covers the discarded spelling too — the field still leaves
+    // a value whose destructor owns it.
+    expectCompileFail("struct A { pub v: i32 } impl Drop for A { fn drop(self) { } }"
+                      " struct P { pub a: A } impl Drop for P { fn drop(self) { } }"
+                      " fn main() -> i32 { let p = P { a: A { v: 1 } }; p.a; ret 0; }",
+        "implements Drop");
+}
+TEST_F(RuntimeTest, CopyFieldMoveOutOfDropTypeAllowed)
+{
+    // A Copy field is a read, not a move: nothing is left half-initialized.
+    expectRun("struct P { pub v: i32 } impl Drop for P { fn drop(self) { } }"
+              " fn main() -> i32 { let p = P { v: 7 }; let x = p.v; ret x; }",
+        7);
+}
+
+TEST_F(RuntimeTest, PartialMoveOutOfNonDropTypeAllowed)
+{
+    // No destructor of its own on `P`, so the move is legal — and the moved A
+    // must still be released exactly once (by its new owner, at scope end).
+    expectRun("let g = 0;"
+              " struct A { pub v: i32 } impl Drop for A { fn drop(self) { g = g + 1; } }"
+              " struct P { pub a: A, pub n: i32 }"
+              " fn main() -> i32 { let p = P { a: A { v: 1 }, n: 2 }; let x = p.a; ret p.n + g; }",
+        2);
+}
+
+TEST_F(RuntimeTest, WholeValueMoveOfDropTypeAllowed)
+{
+    // The rule is about a value being LEFT partially moved; moving the whole
+    // value leaves nothing behind, so it stays legal.
+    expectRun("let g = 0;"
+              " struct P { pub v: i32 } impl Drop for P { fn drop(self) { g = g + 1; } }"
+              " fn main() -> i32 { let p = P { v: 1 }; let q = p; ret g; }",
+        0);
+}
 TEST_F(RuntimeTest, ConditionalMoveKeepsUntrackedAliasAlive)
 {
     // The early drop was a use-after-free through an alias the borrow checker

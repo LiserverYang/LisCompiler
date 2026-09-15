@@ -8,7 +8,7 @@
 |---|---|---|
 | E1xxx | 1001–1004 | 词法 |
 | E2xxx | 2001–2017 | 语法 |
-| E3xxx | 3001–3015 | 语义（HIR） |
+| E3xxx | 3001–3016 | 语义（HIR） |
 | E4xxx | 4001–4007 | 借用检查 |
 | E5xxx | 5001–5005 | 枚举 / match |
 | E6xxx | 6001–6003 | 错误传播（`?` / Result） |
@@ -62,6 +62,7 @@
 | 3013 | the heap primitive '__alloc' can only be called from the standard library (it is the compiler's unsafe core; user code goes through stdlib types such as String) |
 | 3014 | indexing the raw pointer '*mut int8' is only allowed inside the standard library: it is unchecked C pointer arithmetic（`__deref`/`__deref_mut` 同码） |
 | 3015 | field 'v' of 'S' is private; add 'pub', or access it inside a method of that type |
+| 3016 | cannot move out of 'P': the type implements Drop, so its fields are released together by its own destructor（非 Copy 字段不可移出实现 `Drop` 的类型；Copy 字段与整值移动不受限） |
 
 > 3006–3010 已废弃（Arg mismatch / Generic / Trait / Return type / Cast 各自预留过一号，
 > 但从未发出过）：实参/泛型/trait/返回/cast 类错误一律用 3001/3002 加具体消息，

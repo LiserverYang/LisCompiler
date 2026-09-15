@@ -29,7 +29,7 @@ lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，通过引�
 | **模块系统** | **2026-08-13 完成**：`impt lib.nums;` / `impt math as m;` / `impt math { max };`，模块隔离命名空间、循环导入检测、搜索路径（lstdlib 优先 → `-I` → 主文件目录） |
 | 内置 | print/read/堆（`__alloc` 系）/`to_string_*`；`#[i_know]` 属性放行窄化 cast |
 | 诊断 | GCC 风格带源码上下文的错误（E1xxx 词法 ~ E6xxx 错误传播），解析错误可恢复 |
-| 测试 | **1141 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片，全量约 18 s）；13 个 Examples 输出为回归基线（borrow 55/iterator 23/match 8/result 42/…） |
+| 测试 | **1149 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片，全量约 18 s）；13 个 Examples 输出为回归基线（borrow 55/iterator 23/match 8/result 42/…） |
 
 **已完成**：panic/`never`（2026-09-12）→ `Result<T, E>` + 后缀 `?` 错误传播 +
 编译期定值分析（2026-09-13）→ **堆安全化**（2026-09-15：裸指针类型、堆原语/裸指针操作
@@ -85,7 +85,7 @@ python build.py --llvm-position F:/LLVM/ --build-type Debug --enable-tests --thr
 - IR：最大的文件夹，HIR/MIR/LLVM IR 的定义与构建器、语义分析、泛型单态化
 - Analysiser：类型、符号表、作用域
 - Argparser：自研命令行参数解析器
-- Tests：1141 个 gtest（词法/语法/借用/运行时端到端），测试源分 4 个 TU 并行编译、测试按物理核分片并行跑
+- Tests：1149 个 gtest（词法/语法/借用/运行时端到端），测试源分 4 个 TU 并行编译、测试按物理核分片并行跑
 
 这个项目的模块化做的很清晰，你看一眼文件夹的名字就会知道这个模块在干什么，
 建议你从 `./Source/Compiler/Private/Core/CompilePipeline.cpp` 这个文件入手，会知道
