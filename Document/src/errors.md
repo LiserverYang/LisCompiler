@@ -63,6 +63,7 @@
 | 3014 | indexing the raw pointer '*mut int8' is only allowed inside the standard library: it is unchecked C pointer arithmetic（`__deref`/`__deref_mut` 同码） |
 | 3015 | field 'v' of 'S' is private; add 'pub', or access it inside a method of that type |
 | 3016 | cannot move out of 'P': the type implements Drop, so its fields are released together by its own destructor（非 Copy 字段不可移出实现 `Drop` 的类型；Copy 字段与整值移动不受限） |
+| 3017 | cannot move out of 'r.s': it is behind the reference '&mut P', so the value is only borrowed here and the referent still owns it（非 Copy 字段不可穿过引用移出；Copy 字段读取、引用本身的移动不受限） |
 
 > 3006–3010 已废弃（Arg mismatch / Generic / Trait / Return type / Cast 各自预留过一号，
 > 但从未发出过）：实参/泛型/trait/返回/cast 类错误一律用 3001/3002 加具体消息，

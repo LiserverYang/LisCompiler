@@ -93,7 +93,13 @@ void CaptureStdout(int &Saved, std::string &Path)
 
 std::string RestoreStdout(int Saved, const std::string &Path)
 {
-    std::fflush(stdout);
+    // Flush EVERY stream, not just stdout. The program under test can reach the
+    // redirected descriptor through any FILE object (the CRT's stdout, a stream
+    // the input shim returned, ...), and anything still buffered in one of them
+    // would be written AFTER the file below is read — which is exactly how a
+    // sharded run once lost the trailing newline of one test's output
+    // (MathFabsNegative saw "3.500000" instead of "3.500000\n").
+    std::fflush(nullptr);
     if (Saved >= 0)
     {
         LIS_DUP2(Saved, 1);

@@ -815,6 +815,38 @@ TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
                       " fn main() -> i32 { let p = P { a: A { v: 1 } }; p.a; ret 0; }",
         "implements Drop");
 }
+TEST_F(RuntimeTest, MoveOutOfReferenceRejected)
+{
+    // Rust's E0507 (language decision 2026-09-15): a field cannot be moved out
+    // of a place the function only borrows. The borrow owns nothing, so the
+    // value would go to the receiver while the referent keeps releasing it —
+    // two owners of one buffer. Measured before the rule: heap corruption
+    // (0xC0000374) on exit for exactly this snippet.
+    expectCompileFail("struct P { pub s: String }"
+                      " fn main() -> i32 { let mut p = P { s: String::from_lit(\"hi\") };"
+                      " let r = &mut p; let x = r.s; ret x.len(); }",
+        "behind the reference");
+}
+
+TEST_F(RuntimeTest, CopyFieldReadThroughReferenceAllowed)
+{
+    // A Copy field through a reference is a read, not a move: nothing is
+    // handed over, so the rule does not apply.
+    expectRun("struct P { pub n: i32 }"
+              " fn main() -> i32 { let mut p = P { n: 7 }; let r = &mut p; let x = r.n; ret x; }",
+        7);
+}
+
+TEST_F(RuntimeTest, MovingAReferenceItselfIsStillAllowed)
+{
+    // The rule is about moving a value OUT of a borrowed place, not about the
+    // reference: `&mut T` is non-Copy, so `let q = r;` moves the reference
+    // itself (locked semantics) and stays legal.
+    expectRun("struct P { pub n: i32 }"
+              " fn main() -> i32 { let mut p = P { n: 5 }; let r = &mut p; let q = r;"
+              " q.n = 9; ret p.n; }",
+        9);
+}
 TEST_F(RuntimeTest, CopyFieldMoveOutOfDropTypeAllowed)
 {
     // A Copy field is a read, not a move: nothing is left half-initialized.

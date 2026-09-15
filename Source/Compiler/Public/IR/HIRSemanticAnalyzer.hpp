@@ -291,14 +291,26 @@ private:
      *  `explainUninferredGeneric` is set, a context-free generic value
      *  (`f(Option::None)` with an `Option<i32>` parameter) is explained as an
      *  inference failure instead of a bare mismatch. */
+    /** Every place a move out of the member-access chain `source` would take a
+     *  field OUT of: the receiver of the first projection, then each
+     *  intermediate projection (`s.a.b` → the types of `s` and of `s.a`). Empty
+     *  when `source` is not a field access. A move leaves all of them behind,
+     *  which is what the two rules below test. */
+    std::vector<std::shared_ptr<Type>> moveOutContainers(HIRExpr *source);
+
+    /** Rust's E0507 as a language decision (2026-09-15): a field cannot be moved
+     *  out of a place the function only BORROWS. A borrow owns nothing, so the
+     *  value would go to the receiver while the referent keeps releasing it —
+     *  two owners of one buffer. Returns the reference the move would go
+     *  through, or nullptr. (Reading a Copy field through a reference is a copy,
+     *  not a move, and never reaches this.) */
+    std::shared_ptr<ReferenceType> referenceMovedOutOf(HIRExpr *source);
+
     /** Rust's E0509 as a language decision (2026-09-15): a non-Copy field may
      *  not be moved OUT of a value whose type implements Drop, because that
      *  leaves the value partially initialized while its own destructor owns all
-     *  of its fields. Returns the type that would be left behind, or nullptr
-     *  when the move is legal (a Copy field is a read; a move through a
-     *  reference leaves no owned value behind; a whole-value move leaves
-     *  nothing behind). For `s.a.b` the containers are the types of `s` and of
-     *  `s.a`, and EITHER of them implementing Drop is enough to reject. */
+     *  of its fields. Returns the type that would be left behind, or nullptr.
+     *  Whole-value moves leave nothing behind and stay legal. */
     std::shared_ptr<CustomType> dropTypePartiallyMovedBy(HIRExpr *source);
 
     void checkCallArgs(const std::vector<std::unique_ptr<HIRExpr>> &args,

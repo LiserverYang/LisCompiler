@@ -2407,7 +2407,7 @@ void HIRSemanticAnalyzer::checkCallArgs(
             handleMoveSource(args[i].get(), call);
     }
 }
-std::shared_ptr<CustomType> HIRSemanticAnalyzer::dropTypePartiallyMovedBy(HIRExpr *source)
+std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::moveOutContainers(HIRExpr *source)
 {
     // Walk the member-access chain root-first: for `s.a.b` the chain is
     // [s.a, s.a.b], so chain[i-1]->type is the type of the place chain[i]
@@ -2422,33 +2422,39 @@ std::shared_ptr<CustomType> HIRSemanticAnalyzer::dropTypePartiallyMovedBy(HIRExp
         cur = ma->object.get();
     }
     if (chain.empty())
-        return nullptr;
+        return {};
     std::reverse(chain.begin(), chain.end());
 
-    // Moving a field out THROUGH a reference leaves no owned value behind —
-    // whether that is legal is the borrow checker's question, not this rule's.
-    if (isReferenceType(chain[0]->object->type))
-        return nullptr;
+    std::vector<std::shared_ptr<Type>> containers;
+    containers.push_back(chain[0]->object->type);
+    for (size_t i = 0; i + 1 < chain.size(); ++i)
+        containers.push_back(chain[i]->type);
+    return containers;
+}
 
-    auto containerOf = [](const std::shared_ptr<Type> &ty) -> std::shared_ptr<CustomType>
+std::shared_ptr<ReferenceType> HIRSemanticAnalyzer::referenceMovedOutOf(HIRExpr *source)
+{
+    for (const auto &ty : moveOutContainers(source))
+        if (auto ref = std::dynamic_pointer_cast<ReferenceType>(ty))
+            return ref;
+    return nullptr;
+}
+
+std::shared_ptr<CustomType> HIRSemanticAnalyzer::dropTypePartiallyMovedBy(HIRExpr *source)
+{
+    for (const auto &ty : moveOutContainers(source))
     {
+        // Look THROUGH references: `r.a` where `r: &mut P` is rejected as a move
+        // out of a borrow (referenceMovedOutOf) before this rule is consulted,
+        // but `r.a.b` must still see the type behind `r.a` when that field is
+        // itself a reference.
         std::shared_ptr<Type> base = ty;
         while (auto ref = std::dynamic_pointer_cast<ReferenceType>(base))
             base = ref->getBaseType();
-        return std::dynamic_pointer_cast<CustomType>(base);
-    };
-
-    // Every place the move takes a field OUT of: the receiver of the first
-    // projection, plus each intermediate projection. All of them are left
-    // partially initialized.
-    std::vector<std::shared_ptr<CustomType>> containers;
-    containers.push_back(containerOf(chain[0]->object->type));
-    for (size_t i = 0; i + 1 < chain.size(); ++i)
-        containers.push_back(containerOf(chain[i]->type));
-
-    for (const auto &ct : containers)
+        auto ct = std::dynamic_pointer_cast<CustomType>(base);
         if (ct && ct->implementsTrait("Drop"))
             return ct;
+    }
     return nullptr;
 }
 
@@ -2509,6 +2515,21 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
         // nothing is left half-initialized, so the Drop rule below cannot
         // apply to it either (Rust allows `let n = p.count;` on a Drop type).
         if (ma->type && ma->type->isCopyable()) return;
+
+        // E0507: a field cannot be moved out of a place we only BORROW. The
+        // borrow owns nothing, so the value would be handed to the receiver
+        // while the referent keeps releasing it — two owners of one buffer.
+        // Measured before this rule: `let x = r.s;` with `r: &mut P` and
+        // `s: String` corrupted the heap (0xC0000374) on exit.
+        if (auto refTy = referenceMovedOutOf(source))
+        {
+            log(*ma,
+                "cannot move out of '" + root + "." + joinPath(path)
+                    + "': it is behind the reference '" + refTy->toString()
+                    + "', so the value is only borrowed here and the referent still owns it.",
+                E_MoveOutOfReference);
+            return;
+        }
 
         // E0509: a non-Copy field may not leave a value whose type implements
         // Drop. The destructor releases that type's fields as a whole, so the
