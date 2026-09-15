@@ -30,6 +30,7 @@ public:
         Self,
         GenericParam,
         Array,
+        Pointer,
     };
 
     explicit Type(Kind kind);
@@ -39,12 +40,32 @@ public:
     virtual bool equals(const std::shared_ptr<Type> &other) const = 0;
     virtual std::string toString() const = 0;
 
-    /// Copy semantics: primitives and references are Copy (non-owning); structs
-    /// and trait objects are Move. Single source of truth for the three former
+    /// Copy semantics: primitives, raw pointers and SHARED references are Copy;
+    /// `&mut T` is NOT (duplicating an exclusive reference would break the very
+    /// exclusivity the borrow checker guarantees), and the owned aggregates
+    /// (struct / enum / array) are Move. Single source of truth for the former
     /// isCopyType copies (sema / MIRBuilder / codegen).
-    bool isCopyable() const
+    ///
+    /// Defined in Type.cpp: deciding this needs ReferenceType::isMutableRef(),
+    /// and ReferenceType is only complete there.
+    bool isCopyable() const;
+
+    /// True for the NON-OWNING indirections (`&T`/`&mut T`/`*T`/`*mut T`).
+    /// Their storage is an address the holder does not own: it must never be
+    /// dropped, and it is never the reason a value needs drop glue. This is
+    /// deliberately NOT the same as isCopyable(): `&mut T` is not Copy
+    /// (duplicating it would break exclusivity) yet still owns nothing.
+    bool isPointerLike() const
     {
-        return kind == Kind::Primitive || kind == Kind::Reference;
+        return kind == Kind::Reference || kind == Kind::Pointer;
+    }
+
+    /// True when dropping a value of this type must run destructor logic — the
+    /// owned aggregates (struct / enum / array). Primitives and raw pointers
+    /// copy, references borrow: nothing to release for any of them.
+    bool needsDrop() const
+    {
+        return !isCopyable() && !isPointerLike();
     }
 
     /// True if this type's implTrait contains a trait named `name` (e.g. "Drop").
@@ -117,6 +138,28 @@ private:
     bool isMutable;
 };
 
+// --- 2a. 裸指针类型 *T / *mut T ---
+// The type of an explicit heap buffer. Unlike `&T`/`&mut T` it is NOT a
+// borrow: the borrow checker does not track it, it carries no lifetime, and it
+// is Copy even when mutable (duplicating a raw pointer is exactly what makes it
+// "raw"). It is also not bounds-checked — `p[i]` is C pointer arithmetic, and
+// is therefore only legal inside the standard library, where the heap lives and
+// where the invariants are audited. `*mut T` coerces to `*T` implicitly; the
+// reverse needs the stdlib-only builtin `__deref`/`__deref_mut`.
+class PointerType : public Type
+{
+public:
+    PointerType(std::shared_ptr<Type> base, bool isMutable);
+    std::shared_ptr<Type> getBaseType() const;
+    bool isMutablePtr() const;
+    bool equals(const std::shared_ptr<Type> &other) const override;
+    std::string toString() const override;
+
+private:
+    std::shared_ptr<Type> baseType;
+    bool isMutable;
+};
+
 // --- 2b. 数组类型 [T; N] ---
 // A fixed-size array of `size` elements of `elementType`. Arrays are ALWAYS
 // Move (never Copy), even when the element is Copy — this keeps single
@@ -144,6 +187,12 @@ public:
     {
         std::string name;
         std::shared_ptr<Type> type;
+        /// Field VISIBILITY (`pub`). A private field is only accessible inside a
+        /// non-static method of the declaring type (see the sema's member-access
+        /// check) — that is what lets a stdlib type keep an invariant such as
+        /// String's `len`/cap`/`data` triple consistent. Method PARAMETERS reuse
+        /// this struct and are always public.
+        bool isPublic = false;
         bool operator==(const Field &other) const;
         bool operator==(const std::string &other) const;
     };

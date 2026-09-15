@@ -40,6 +40,10 @@ struct HIRRawType
     bool isArray = false;
     std::shared_ptr<HIRRawType> element;
     int64_t arraySize = 0;
+
+    // Pointer type `*T` / `*mut T`: when isPtr, `element` is the pointee.
+    bool isPtr = false;
+    bool isMutPtr = false;
 };
 
 /** A trait bound on a generic param, with optional concrete args. */
@@ -317,6 +321,21 @@ public:
     std::vector<std::unique_ptr<HIRExpr>> args;
     std::vector<HIRRawType> genericArgs;
     std::vector<std::shared_ptr<Type>> typedGenericParams;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+/// `expr?` — error propagation. Sema requires `expr` to be a `Result<_, E>` value
+/// and the enclosing function to return a `Result<_, E>` with a compatible error
+/// type; `type` is the `Ok` payload type. MIRBuilder lowers it to a tag test: the
+/// `Ok` block yields the payload, the `Err` block builds `Err(payload)` into the
+/// return slot and returns from the function.
+class HIRTry : public HIRExpr
+{
+public:
+    std::unique_ptr<HIRExpr> expr;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);

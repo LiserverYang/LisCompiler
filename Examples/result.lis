@@ -1,0 +1,56 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// result.lis — Result<T, E> and the postfix error-propagation operator `?`.
+//
+// `Result` (Source/Std/result.lis) is Option's fallible counterpart: `Ok(v)`
+// carries the value, `Err(e)` carries the error. The `?` operator unwraps an Ok
+// payload and, on Err, immediately returns `Result::Err(e)` from the ENCLOSING
+// function — which therefore has to return a Result with a compatible error
+// type. There is no implicit error conversion: the types must line up.
+//
+// Exit code: 42 (the first successful parse), so the example doubles as a
+// regression test.
+
+impt result { Result, is_ok, is_err };
+impt string { String };
+
+// A one-character digit parser: the number, or an error message.
+fn parse_digit(c: char) -> Result<i32, String>
+{
+    if (c < '0') || (c > '9') {
+        ret Result::Err(String::from_lit("not a digit"));
+    }
+    ret Result::Ok((c as i32) - ('0' as i32));
+}
+
+// Two digits -> a number. Each `?` returns Err early, so the Ok path below is
+// only reached when BOTH digits parsed.
+fn parse_two(a: char, b: char) -> Result<i32, String>
+{
+    let x = parse_digit(a)?;
+    let y = parse_digit(b)?;
+    ret Result::Ok(x * 10 + y);
+}
+
+// Print the outcome and return its value (or -1 for an error).
+fn report(r: Result<i32, String>) -> i32
+{
+    match r {
+        Ok(v) => { print_str("ok "); print_int(v); println(); ret v; },
+        Err(e) => { print_str("err "); print_str(e.to_cstr()); println(); ret 0 - 1; },
+    }
+}
+
+fn main() -> i32
+{
+    let good = report(parse_two('4', '2'));   // ok 42
+    let bad = report(parse_two('4', 'x'));    // err not a digit  (-1)
+
+    // The helpers: is_ok / is_err (and unwrap_or / unwrap / expect).
+    let saw_ok = is_ok(parse_two('1', '1'));
+    let saw_err = is_err(parse_two('1', 'z'));
+    if saw_ok { if saw_err { ret good; } }
+
+    ret bad + 100; // not reached in this example
+}

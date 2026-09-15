@@ -21,7 +21,7 @@ fn main() -> i32
     name.push_str("语言");
     print_str(name.to_cstr());
     println();
-    print_int(name.len);
+    print_int(name.len());
     println();
 
     // Indexed access returns Option<char> (None when out of bounds).

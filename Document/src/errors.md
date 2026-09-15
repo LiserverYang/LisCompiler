@@ -8,9 +8,10 @@
 |---|---|---|
 | E1xxx | 1001–1004 | 词法 |
 | E2xxx | 2001–2017 | 语法 |
-| E3xxx | 3001–3010 | 语义（HIR） |
+| E3xxx | 3001–3015 | 语义（HIR） |
 | E4xxx | 4001–4007 | 借用检查 |
 | E5xxx | 5001–5005 | 枚举 / match |
+| E6xxx | 6001–6003 | 错误传播（`?` / Result） |
 
 ## E1xxx 词法
 
@@ -55,6 +56,11 @@
 | 3003 | Undefined identifier（模块错误也归此码：cannot find module 'x' / circular import: module 'x' / module 'x' has no member 'y' / selective import of 'y' conflicts with an existing name） |
 | 3004 | cannot assign to immutable variable 'x'（及字段/元素/共享引用变体） |
 | 3005 | use of moved value: 'x'（含 partially moved / moved inside loop 变体） |
+| 3011 | use of uninitialized value: 'x'（读取/借用/移动未定值的 `let x;` 绑定） |
+| 3012 | cannot declare 'x' without an initializer: 'T' is not a Copy type, so the binding could be released while uninitialized |
+| 3013 | the heap primitive '__alloc' can only be called from the standard library (it is the compiler's unsafe core; user code goes through stdlib types such as String) |
+| 3014 | indexing the raw pointer '*mut int8' is only allowed inside the standard library: it is unchecked C pointer arithmetic（`__deref`/`__deref_mut` 同码） |
+| 3015 | field 'v' of 'S' is private; add 'pub', or access it inside a method of that type |
 
 > 3006–3010（Arg mismatch / Generic / Trait / Return type / Cast）在 ErrorID.hpp 中定义，
 > 但语义分析器实际未使用 —— 实参/泛型/trait/返回/cast 类错误均落到 3001/3002 或带消息
@@ -81,6 +87,14 @@
 | 5003 | match scrutinee must be an enum (got '...') |
 | 5004 | match is not exhaustive: variant 'v' is not covered (add an arm or a '_' wildcard) |
 | 5005 | variant 'v' pattern expects N binding(s), got M |
+
+## E6xxx 错误传播
+
+| ID | 消息 |
+|---|---|
+| 6001 | the '?' operator requires a 'Result' value, got 'T' |
+| 6002 | the '?' operator requires the enclosing function to return 'Result<_, E>' (it returns 'T') |
+| 6003 | the error type of '?' ('A') does not match the function error type ('B') |
 
 ## 其它
 

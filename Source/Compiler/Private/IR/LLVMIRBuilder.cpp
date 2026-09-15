@@ -371,6 +371,13 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         return;
     }
 
+    // Builtin raw-pointer → reference conversions: the identity at this level.
+    if (isPtrBuiltin(s.funcName))
+    {
+        emitPtrBuiltin(fs, s, args);
+        return;
+    }
+
     // Builtin to_string calls lower to malloc + sprintf + strlen → String.
     if (isToStringBuiltin(s.funcName))
     {
@@ -897,9 +904,10 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
         {
         case ProjectionKind::Deref:
         {
-            assert(currentTy->getKind() == Type::Kind::Reference);
-            auto refTy = std::static_pointer_cast<ReferenceType>(currentTy);
-            auto innerTy = refTy->getBaseType();
+            assert(currentTy->isPointerLike() && "Deref requires a reference or a raw pointer");
+            auto innerTy = currentTy->getKind() == Type::Kind::Reference
+                               ? std::static_pointer_cast<ReferenceType>(currentTy)->getBaseType()
+                               : std::static_pointer_cast<PointerType>(currentTy)->getBaseType();
 
             // A reference is a pointer value stored in an addressable slot
             // (alloca / global). Dereferencing must LOAD that pointer to get
@@ -929,7 +937,7 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
 
             // Runtime bounds check for ARRAY indexing only. An array's length
             // is known here, so `i < 0 || i >= N` traps via libc abort(). A
-            // C-style pointer index (`s.data[i]` — currentTy is a primitive,
+            // C-style pointer index (`p[i]` — currentTy is a primitive,
             // not an ArrayType) has no length to check and is left unchecked
             // (documented in string.lis). sema already rejected empty/oversized
             // arrays, so N >= 1 here.
@@ -1257,6 +1265,22 @@ bool LLVMIRBuilder::isHeapBuiltin(const std::string &name)
     return classifyBuiltin(name) == BuiltinCategory::Heap;
 }
 
+// ── Builtin pointer conversion: __deref / __deref_mut ────────────────────────
+
+bool LLVMIRBuilder::isPtrBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::Ptr;
+}
+
+void LLVMIRBuilder::emitPtrBuiltin(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
+{
+    // Identity: a *T and a &T are both opaque `ptr`. The stdlib asks for the
+    // conversion only so the TYPE SYSTEM sees a borrow (and its lifetime rules)
+    // instead of an unverified address.
+    if (s.dest.has_value())
+        storePlace(fs, *s.dest, args[0]);
+}
+
 llvm::Function *LLVMIRBuilder::getOrDeclareMalloc()
 {
     // void* malloc(size_t n)  (n passed as i32, widened at the call site)
@@ -1559,10 +1583,13 @@ LLVMIRBuilder::getElementType(const std::shared_ptr<Type> &ty)
     case Type::Kind::Reference:
         return std::static_pointer_cast<ReferenceType>(ty)->getBaseType();
 
+    case Type::Kind::Pointer:
+        return std::static_pointer_cast<PointerType>(ty)->getBaseType();
+
     case Type::Kind::Array:
         return std::static_pointer_cast<ArrayType>(ty)->getElementType();
 
-    // A deref'd pointer to a primitive (e.g. `s.data: &mut i8` → i8 after the
+    // A deref'd pointer to a primitive (e.g. `data: *mut i8` → i8 after the
     // Deref projection) is indexed as `T*` — the element type is the pointee.
     case Type::Kind::Primitive:
         return ty;
@@ -1681,7 +1708,10 @@ void LLVMIRBuilder::generateDropGlue()
                 for (size_t j = 0; j < enumVariants[vi].payloadTypes.size(); ++j)
                 {
                     auto pt = enumVariants[vi].payloadTypes[j];
-                    if (!pt->isCopyable())
+                    // needsDrop() — NOT !isCopyable(): a `&mut T` payload is
+                    // non-Copy (exclusive) yet owns nothing, so it must never get
+                    // drop glue.
+                    if (pt->needsDrop())
                         slots.push_back({enumVariants[vi].name + "_" + std::to_string(j), pt});
                 }
                 if (slots.empty()) continue;
@@ -1719,8 +1749,9 @@ void LLVMIRBuilder::generateDropGlue()
         // ── Case 2 (struct): recurse into every non-Copy field ─────────────
         for (const auto &[fieldName, fieldType] : fields)
         {
-            // Primitives and references are Copy / borrowed — no drop needed.
-            if (fieldType->isCopyable())
+            // Primitives, references and raw pointers are Copy / borrowed — no
+            // drop needed (`needsDrop()` is false for all of them).
+            if (!fieldType->needsDrop())
                 continue;
             // Arrays of Copy elements (v1) own nothing — skip their glue.
             if (fieldType->getKind() == Type::Kind::Array)

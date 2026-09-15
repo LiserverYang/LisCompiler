@@ -96,5 +96,6 @@ public:
     virtual void visit(CastExpr *node) override;
     virtual void visit(ParenExpr *node) override;
     virtual void visit(BorrowExpr *node) override;
+    virtual void visit(TryExpr *node) override;
     virtual void visit(GenericParam *node) override {}
 };

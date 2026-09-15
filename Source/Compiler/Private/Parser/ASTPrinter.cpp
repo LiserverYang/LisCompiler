@@ -79,6 +79,8 @@ void ASTPrinter::visit(TypeNode *node)
     os << "\033[38;5;14m";
 
     std::string reference = node->isReference ? (" \033[38;5;14mreference\033[0m ") : "";
+    if (node->isPointer)
+        reference += std::string(" \033[38;5;14mpointer\033[0m ") + (node->isMutPointer ? "\033[38;5;2m'*mut'\033[0m " : "\033[38;5;2m'*'\033[0m ");
 
     switch (node->kind)
     {
@@ -458,6 +460,12 @@ void ASTPrinter::visit(BorrowExpr *node)
     }
 }
 
+void ASTPrinter::visit(TryExpr *node)
+{
+    printCommon(node);
+    os << " [TryExpr] postfix ? (error propagation)";
+}
+
 // 获取节点的子节点列表
 std::vector<ASTNode *> getChildren(ASTNode *node)
 {
@@ -712,6 +720,11 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
     {
         if (borrow->expression)
             children.push_back(borrow->expression.get());
+    }
+    else if (auto tryExpr = dynamic_cast<TryExpr *>(node))
+    {
+        if (tryExpr->expression)
+            children.push_back(tryExpr->expression.get());
     }
 
     return children;

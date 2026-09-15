@@ -170,6 +170,12 @@ public:
            << " (" << detail::literalKindToString(node->kind) << ")";
     }
 
+    void visit(HIRTry *node)
+    {
+        printCommon(node);
+        os << " [Try] postfix ? (propagate Err)";
+    }
+
     void visit(HIRBinaryOp *node)
     {
         printCommon(node);
@@ -418,6 +424,8 @@ public:
             visit(e);
         else if (auto e = dynamic_cast<HIRVariantInit *>(node))
             visit(e);
+        else if (auto e = dynamic_cast<HIRTry *>(node))
+            visit(e);
         else if (auto s = dynamic_cast<HIRBlock *>(node))
             visit(s);
         else if (auto s = dynamic_cast<HIRVarDecl *>(node))
@@ -517,6 +525,10 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
         {
             children.push_back(arg.get());
         }
+    }
+    else if (auto e = dynamic_cast<HIRTry *>(node))
+    {
+        if (e->expr) children.push_back(e->expr.get());
     }
     else if (auto e = dynamic_cast<HIREnum *>(node))
     {

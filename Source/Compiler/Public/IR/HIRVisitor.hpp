@@ -17,6 +17,7 @@ class HIRArrayLiteral;
 class HIRStructInit;
 class HIRVariantInit;
 class HIRRef;
+class HIRTry;
 class HIRBlock;
 class HIRVarDecl;
 class HIRAssign;
@@ -50,6 +51,7 @@ public:
     virtual void visit(HIRStructInit *node) = 0;
     virtual void visit(HIRVariantInit *node) = 0;
     virtual void visit(HIRRef *node) = 0;
+    virtual void visit(HIRTry *node) = 0;
     virtual void visit(HIRBlock *node) = 0;
     virtual void visit(HIRVarDecl *node) = 0;
     virtual void visit(HIRAssign *node) = 0;

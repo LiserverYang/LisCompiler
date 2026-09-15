@@ -46,7 +46,8 @@ field_access_name_expression = expression "." identifier
 </grammar>
 
 用于获取结构体实例中某个字段的值。expression 的类型必须是结构体类型，且必须存在以 identifier
-为名称的有效字段。私有字段只能在非静态成员函数上下文访问，否则字段必须为 `pub`。
+为名称的有效字段。私有字段只能在本类型自己的方法（含静态方法）内访问，否则字段必须为
+`pub`（访问与结构体字面量构造都受此约束，见[声明](./declarations.md)）。
 
 ## 运算表达式
 
@@ -146,6 +147,34 @@ let truncated: i32 = big as i32;   // warning,不是 error
 ```
 
 目前只定义 `i_know` 一种属性；属性只作用于紧随其后的那一条语句。
+
+## 错误传播表达式（后缀 `?`）
+
+<grammar>
+try_expression = expression "?"
+</grammar>
+
+```lis
+fn parse_two(a: char, b: char) -> Result<i32, String>
+{
+    let x = parse_digit(a)?;   // Err(e) => ret Result::Err(e)
+    let y = parse_digit(b)?;
+    ret Result::Ok(x * 10 + y);
+}
+```
+
+- **操作数必须是 `Result<T, E>`**（标准库 `result` 模块的类型），否则 E6001。
+- **外层函数必须返回 `Result<_, E2>`**，否则 E6002；`E2` 必须与操作数的 `E` 兼容，否则 E6003。
+  **没有隐式错误转换**（无 `From`/`Into`）—— 错误类型必须直接对上。
+- Ok 路径：表达式的值就是 `Ok` 的载荷，类型为载荷类型，控制流继续。
+- Err 路径：**立刻从外层函数返回** `Result::Err(e)`（`e` 被移动进返回值），该语句之后的代码不执行。
+- 操作数被**消费**（移动）：`expr?` 之后不能再使用 `expr` 指向的绑定。
+- 参与优先级：它是**后缀**运算符，绑定强于所有二元运算符（`a + b?` = `a + (b?)`），
+  且后面可以继续 `.field` / `[i]`（`f()?.field` 合法）。
+- 不限位置：可以作为语句（丢弃 Ok 值）、实参、`match` 臂内、循环体内使用。
+
+> 目前只支持 `Result`（不支持 `Option`），也只认标准库的 `result::Result`；自定义的
+> `Ok`/`Err` 枚举不参与 `?`（需要 `Try` 之类的 trait 才能泛化，见[已知限制](./limitations.md)）。
 
 ## 结构体初始化表达式
 

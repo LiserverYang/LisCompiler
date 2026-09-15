@@ -21,17 +21,20 @@ lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，通过引�
 | 能力 | 状态 |
 |------|------|
 | 类型系统 | struct、enum（fat tagged union + `match`）、泛型（单态化）、trait 与约束、引用 `&T`/`&mut T`、函数指针、数组 `[T; N]`、String 堆字符串 |
-| 安全模型 | move 语义、borrow checker（NLL + 字段级精度）、悬垂引用检测（E4007）、drop glue（RAII，tag-aware）、数组越界运行时检查（abort） |
-| 运算符 | 12 个运算符 trait 重载，泛型算子（`fn sum<T: Add>` 对 struct 与原语分流） |
-| 标准库 | 6 个模块（drop/option/iterator/math/string/chars），**显式 `impt` 导入** |
+| 安全模型 | move 语义、borrow checker（NLL + 字段级精度）、悬垂引用检测（E4007）、drop glue（RAII，tag-aware）、数组越界运行时检查（abort）、**定值分析（未初始化读取是编译错误）**、**字段可见性 `pub` 强制（E3015）**、**`&mut T` 非 Copy + 隐式重借用** |
+| 堆 | **裸指针类型 `*T`/`*mut T`**；堆原语与裸指针操作**只在标准库内可用**（E3013/E3014），`String.data` 是 `*mut i8`，用户代码只能走带检查的 stdlib API |
+| 运算符 | 12 个运算符 trait 重载，泛型算子（`fn sum<T: Add>` 对 struct 与原语分流），**后缀 `?` 错误传播** |
+| 错误处理 | **`Result<T, E>` + `?`（2026-09-13）**：`unwrap`/`expect`/`unwrap_or`/`is_ok`/`is_err`；`panic` + `never`（2026-09-12） |
+| 标准库 | 7 个模块（drop/option/result/iterator/math/string/chars），**显式 `impt` 导入** |
 | **模块系统** | **2026-08-13 完成**：`impt lib.nums;` / `impt math as m;` / `impt math { max };`，模块隔离命名空间、循环导入检测、搜索路径（lstdlib 优先 → `-I` → 主文件目录） |
 | 内置 | print/read/堆（`__alloc` 系）/`to_string_*`；`#[i_know]` 属性放行窄化 cast |
-| 诊断 | GCC 风格带源码上下文的错误（E1xxx 词法 ~ E5xxx match），解析错误可恢复 |
-| 测试 | **1035 个 gtest 全绿**；12 个 Examples 输出为回归基线（borrow 55/iterator 23/match 8/…） |
+| 诊断 | GCC 风格带源码上下文的错误（E1xxx 词法 ~ E6xxx 错误传播），解析错误可恢复 |
+| 测试 | **1131 个 gtest 全绿**；13 个 Examples 输出为回归基线（borrow 55/iterator 23/match 8/result 42/…） |
 
-**下一步**（按可用性优先级，详见 `Document/src/limitations.md`）：panic/never 类型
-（解锁 `unwrap`/`expect`/`Result`）→ 编译期拒绝未初始化读取 → `move` 语义 →
-Vec/堆集合 → 数组精确索引路径 → extern/FFI → 一元运算符。
+**已完成**：panic/`never`（2026-09-12）→ `Result<T, E>` + 后缀 `?` 错误传播 +
+编译期定值分析（2026-09-13）→ **堆安全化**（2026-09-15：裸指针类型、堆原语/裸指针操作
+仅限标准库、`&mut T` 独占语义、字段可见性强制）。**下一步**（详见 `Document/src/limitations.md`）：
+`move` 关键字 → Vec/堆集合（前置已就位）→ 数组精确索引路径 → extern/FFI → 一元运算符。
 
 ## lis compiler 编译器
 
@@ -82,7 +85,7 @@ python build.py --llvm-position F:/LLVM/ --build-type Debug --enable-tests --thr
 - IR：最大的文件夹，HIR/MIR/LLVM IR 的定义与构建器、语义分析、泛型单态化
 - Analysiser：类型、符号表、作用域
 - Argparser：自研命令行参数解析器
-- Tests：1035 个 gtest（词法/语法/借用/运行时端到端）
+- Tests：1131 个 gtest（词法/语法/借用/运行时端到端）
 
 这个项目的模块化做的很清晰，你看一眼文件夹的名字就会知道这个模块在干什么，
 建议你从 `./Source/Compiler/Private/Core/CompilePipeline.cpp` 这个文件入手，会知道
@@ -114,7 +117,7 @@ impt string { String };
 | `math.lis` | `Numeric`/`Integer` marker trait、12 个运算符重载 trait（`Add` … `Shr`）、`min` `max` `clamp` `abs` `fabs` `gcd` `lcm` `ipow` `sign` `is_even` `is_odd` `deg_to_rad` `rad_to_deg` `lerp` |
 | `chars.lis` | `is_digit` `is_alpha` `is_alphanumeric` `is_whitespace` `digit_to_int` |
 | `iterator.lis` | `Iterator<T>` trait、`Range` 迭代器、`range` `sum` `count` `first` `last` `nth` `product` |
-| `string.lis` | `String` 堆字符串（`new`/`from_lit`/`push_char`/`push_str`/`index`/`to_cstr`，`impl Drop` 恰一次释放） |
+| `string.lis` | `String` 堆字符串（`new`/`from_lit`/`push_char`/`push_str`/`index`/`to_cstr`/`len`/`cap`，`impl Drop` 恰一次释放；`data`/`len`/`cap` **私有**） |
 
 此外编译器内置一组 I/O 函数（所有模块裸名可用，无需声明）：
 
@@ -137,9 +140,11 @@ impt string { String };
 
 - **类型系统**：struct、enum（带载荷的 tagged union，配合 `match`）、泛型函数与泛型
   类型（单态化）、trait 与泛型约束（`T: Numeric` / `T: Iterator<i32>`）、引用
-  `&T` / `&mut T`、函数指针、数组 `[T; N]`
+  `&T` / `&mut T`、**裸指针 `*T` / `*mut T`**、函数指针、数组 `[T; N]`；
+  字段可见性 `pub` / 私有由编译器强制（E3015）
 - **所有权与安全**：move 语义、borrow checker（NLL 非词法生命周期）、悬垂引用检测、
-  字段级借用精度、drop glue（RAII，含枚举 tag-aware 析构）、数组越界运行时 abort
+  字段级借用精度、drop glue（RAII，含枚举 tag-aware 析构）、数组越界运行时 abort、
+  `&mut T` 独占（非 Copy，配套隐式重借用）、堆的不安全操作收敛在标准库内
 - **控制流**：`if` / `while` / `for`（走 `Iterator` trait）/ `match`（穷尽性检查、
   载荷绑定、match 表达式）
 - **运算符重载**：12 个运算符 trait，`a + b` 对实现 `Add` 的 struct 自动改写为

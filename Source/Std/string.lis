@@ -9,7 +9,7 @@
 // (`__alloc` / `__free` / `__memcpy` / `__strlen`) are compiler builtins that
 // lower to libc malloc/free/memcpy/strlen.
 //
-// Because `data` is a `&mut i8` buffer, a String is NEVER Copy: `let b = a;`
+// Because `data` is a `*mut i8` (raw) heap buffer, a String is NEVER Copy: `let b = a;`
 // moves `a` (a is then unusable), and `let r = &mut s.data` keeps `s` from
 // being moved while `r` is live. Read its length via the `len` field, grow it
 // with `s.push_char(c)` / `s.push_str(...)`, and index it safely with
@@ -30,9 +30,15 @@ impt option { Option };
 
 struct String
 {
-    pub data: &mut i8,   // heap buffer (C-string, null-terminated)
-    pub len: i32,
-    pub cap: i32
+    // The heap buffer (C-string, null-terminated). A RAW pointer: the standard
+    // library is the one place allowed to do unchecked pointer arithmetic on it
+    // (`data[i]`) and to turn it back into a borrow (`__deref`).
+    // PRIVATE, all three: `data`/`len`/`cap` must stay consistent with each
+    // other (that is the type's invariant) and only this type's own methods can
+    // guarantee it. Read them through `len()` / `cap()`.
+    data: *mut i8,
+    len: i32,
+    cap: i32
 }
 
 impl String
@@ -62,7 +68,9 @@ impl String
     // caller: do not use the returned `&i8` past the owner's lifetime.
     fn to_cstr(self: &String) -> &i8
     {
-        ret self.data;
+        // `__deref` is the audited bridge from the raw buffer to a borrow; the
+        // implicit coercions only ever go the other way (`&T` → `*T`).
+        ret __deref(self.data);
     }
 
     // Append one character. Grows the buffer (double capacity) when full; the
@@ -100,7 +108,9 @@ impl String
             self.data = new_data;
             self.cap = new_cap;
         }
-        __memcpy(&self.data[self.len], other, on + 1);
+        // `&mut` — not `&`: memcpy's destination is a *mut i8, and the type
+        // system no longer lets a shared pointer stand in for a writable one.
+        __memcpy(&mut self.data[self.len], other, on + 1);
         self.len = self.len + on;
     }
 
@@ -117,6 +127,18 @@ impl String
     fn is_empty(self: &String) -> bool
     {
         ret self.len == 0;
+    }
+
+    // The length in bytes (excluding the null terminator).
+    fn len(self: &String) -> i32
+    {
+        ret self.len;
+    }
+
+    // The allocated capacity in bytes.
+    fn cap(self: &String) -> i32
+    {
+        ret self.cap;
     }
 }
 

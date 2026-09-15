@@ -214,6 +214,12 @@ private:
     void emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
     bool isHeapBuiltin(const std::string &name);
 
+    /// Builtin raw-pointer → reference conversion: `__deref` / `__deref_mut`.
+    /// Both a raw pointer and a reference ARE an address at this level, so the
+    /// conversion is the identity — only the result slot has to be written.
+    void emitPtrBuiltin(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    bool isPtrBuiltin(const std::string &name);
+
     /// Builtin to_string: declare libc `sprintf` and lower
     /// `to_string_i32/i64/f64/bool/char` to malloc + sprintf + strlen, wrapping
     /// the result in a stdlib `String` struct.

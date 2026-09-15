@@ -33,6 +33,7 @@ enum class BuiltinCategory
     Print,     // print_str / println / print_int / print_float / print_bool / print_char
     Input,     // read_line / read_int / read_f64
     Heap,      // __alloc / __free / __memcpy / __strlen
+    Ptr,       // __deref / __deref_mut  (raw pointer → reference)
     ToString,  // to_string_i32/i64/f64/bool/char
     Panic,     // panic
     NotBuiltin // any other name
@@ -61,6 +62,14 @@ inline BuiltinCategory classifyBuiltin(const std::string &name)
         "__memcpy",
         "__strlen",
     };
+    // Raw-pointer → reference conversion. The reverse of the implicit
+    // `&T → *T` coercion, and deliberately NOT implicit: turning an unverified
+    // address into a borrow would let raw pointers bypass the borrow checker, so
+    // it is a stdlib-only builtin instead.
+    static const std::unordered_set<std::string> ptr = {
+        "__deref",
+        "__deref_mut",
+    };
     static const std::unordered_set<std::string> toString = {
         "to_string_i32",
         "to_string_i64",
@@ -74,6 +83,7 @@ inline BuiltinCategory classifyBuiltin(const std::string &name)
     if (print.count(name)) return BuiltinCategory::Print;
     if (input.count(name)) return BuiltinCategory::Input;
     if (heap.count(name)) return BuiltinCategory::Heap;
+    if (ptr.count(name)) return BuiltinCategory::Ptr;
     if (toString.count(name)) return BuiltinCategory::ToString;
     if (panic.count(name)) return BuiltinCategory::Panic;
     return BuiltinCategory::NotBuiltin;

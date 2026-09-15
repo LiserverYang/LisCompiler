@@ -76,6 +76,21 @@ std::shared_ptr<ReferenceType> TypeContext::getReference(std::shared_ptr<Type> b
     return refType;
 }
 
+std::shared_ptr<PointerType> TypeContext::getPointer(std::shared_ptr<Type> base, bool isMutable)
+{
+    auto key = std::make_pair((void *)base.get(), isMutable);
+
+    auto it = ptrCache.find(key);
+    if (it != ptrCache.end())
+    {
+        return it->second;
+    }
+
+    auto ptrType = std::make_shared<PointerType>(base, isMutable);
+    ptrCache[key] = ptrType;
+    return ptrType;
+}
+
 std::shared_ptr<ArrayType> TypeContext::getArray(std::shared_ptr<Type> elementType, size_t size)
 {
     auto key = std::make_pair((void *)elementType.get(), size);
@@ -404,6 +419,11 @@ std::shared_ptr<Type> TypeContext::substitute(
         auto r = std::static_pointer_cast<ReferenceType>(ty);
         return getReference(substitute(r->getBaseType(), subst, strict), r->isMutableRef());
     }
+    case Type::Kind::Pointer:
+    {
+        auto p = std::static_pointer_cast<PointerType>(ty);
+        return getPointer(substitute(p->getBaseType(), subst, strict), p->isMutablePtr());
+    }
     case Type::Kind::Array:
     {
         auto a = std::static_pointer_cast<ArrayType>(ty);
@@ -494,6 +514,8 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
         case Type::Kind::GenericParam: return true;
         case Type::Kind::Reference:
             return hasGenericParam(std::static_pointer_cast<ReferenceType>(t)->getBaseType());
+        case Type::Kind::Pointer:
+            return hasGenericParam(std::static_pointer_cast<PointerType>(t)->getBaseType());
         case Type::Kind::Array:
             return hasGenericParam(std::static_pointer_cast<ArrayType>(t)->getElementType());
         case Type::Kind::Custom:
@@ -543,7 +565,7 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
 
     std::vector<CustomType::Field> newFields;
     for (auto &f : generic->getFields())
-        newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst)});
+        newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst), f.isPublic});
 
     // Substitute enum variant payload types too (empty for plain structs).
     std::vector<CustomType::EnumVariantInfo> newVariants;
@@ -579,7 +601,7 @@ void TypeContext::reSyncFields(CustomType *inst, const std::shared_ptr<CustomTyp
         return; // origin still an empty shell — nothing to sync yet
     std::vector<CustomType::Field> newFields;
     for (auto &f : generic->getFields())
-        newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst)});
+        newFields.push_back(CustomType::Field{f.name, substitute(f.type, subst), f.isPublic});
     inst->setFields(std::move(newFields));
 
     // Re-sync enum variant payload types too (a cached instance created while

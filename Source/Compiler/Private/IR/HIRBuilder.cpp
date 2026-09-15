@@ -27,6 +27,13 @@ static HIRRawType toRaw(const TypeNode *n)
         r.element = std::make_shared<HIRRawType>(toRaw(n->elementType.get()));
         r.arraySize = n->arraySize;
     }
+    // Pointer type `*T` / `*mut T` (r.element is the pointee).
+    if (n->isPointer)
+    {
+        r.isPtr = true;
+        r.isMutPtr = n->isMutPointer;
+        r.element = std::make_shared<HIRRawType>(toRaw(n->pointee.get()));
+    }
     return r;
 }
 
@@ -1171,6 +1178,22 @@ void HIRBuilder::visit(ParenExpr *node)
     {
         node->expression->accept(this);
     }
+}
+
+// ---------------------------------------------------------------------------
+// `expr?` — error propagation; the operand keeps its shape, sema does the
+// Result typing and MIRBuilder the early return.
+void HIRBuilder::visit(TryExpr *node)
+{
+    auto result = std::make_unique<HIRTry>();
+    result->position = node->position;
+    result->length = node->length;
+
+    node->expression->accept(this);
+    result->expr.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    nodeStack.push(std::move(result));
 }
 
 // ---------------------------------------------------------------------------

@@ -108,6 +108,11 @@ public:
     std::unique_ptr<TypeNode> elementType;
     int64_t arraySize = 0;
 
+    // Pointer type `*T` / `*mut T`: when isPointer, pointee holds T.
+    bool isPointer = false;
+    bool isMutPointer = false;
+    std::unique_ptr<TypeNode> pointee;
+
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);
@@ -630,6 +635,23 @@ public:
 };
 
 class ParenExpr : public Expr
+{
+public:
+    std::unique_ptr<Expr> expression;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+/// `expr?` — error propagation. The operand must be a `Result<_, E>` value; the
+/// expression yields the `Ok` payload and, in the `Err` case, returns `Err(e)`
+/// from the enclosing function (which must therefore return a Result with a
+/// compatible error type). Parsed as a POSTFIX operator in the member-access
+/// chain, so it binds tighter than every binary operator and may be followed by
+/// `.field` / `[i]`.
+class TryExpr : public Expr
 {
 public:
     std::unique_ptr<Expr> expression;

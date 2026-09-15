@@ -7,6 +7,8 @@
 #include "IR/BuiltinNames.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <unordered_set>
 
 // ============================================================
@@ -44,6 +46,27 @@ bool typesCompatible(const std::shared_ptr<Type> &expected, const std::shared_pt
     if (re && ra && !re->isMutableRef() && ra->isMutableRef()
         && re->getBaseType()->equals(ra->getBaseType()))
         return true;
+
+    // ── implicit indirection coercions (all in the SOUND direction) ──────────
+    //   &T     → *T        a shared borrow decays to a read-only raw pointer
+    //   &mut T → *mut T    a mutable borrow decays to a writable raw pointer
+    //   &mut T → *T        (mutability simply dropped)
+    //   *mut T → *T        (mutability simply dropped)
+    // The REVERSE (*T → &T) is deliberately NOT a coercion: turning an
+    // unverified address into a borrow would let a raw pointer bypass the borrow
+    // checker entirely. The stdlib does that explicitly with `__deref`.
+    auto pe = std::dynamic_pointer_cast<PointerType>(expected);
+    auto pa = std::dynamic_pointer_cast<PointerType>(actual);
+    if (pe)
+    {
+        if (pa && !pe->isMutablePtr() && pa->isMutablePtr()
+            && pe->getBaseType()->equals(pa->getBaseType()))
+            return true; // *mut T → *T
+        if (ra && pe->getBaseType()->equals(ra->getBaseType())
+            && (ra->isMutableRef() || !pe->isMutablePtr()))
+            return true; // &mut T → *mut T / *T, and &T → *T
+    }
+
     return expected->equals(actual);
 }
 
@@ -126,6 +149,21 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
 
     std::shared_ptr<Type> base;
 
+    // Pointer type `*T` / `*mut T`. Handled before everything else: the base is
+    // the pointee, and the generic-instantiation path below (which is about
+    // `Foo<T>` naming a CustomType) must never see a pointer. Returning early is
+    // safe because a pointer never carries genericArgs of its own.
+    if (raw.isPtr)
+    {
+        auto pointeeTy = raw.element ? resolveType(*raw.element, errorNode)
+                                     : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        std::shared_ptr<Type> ptrTy = context->typeContext->getPointer(pointeeTy, raw.isMutPtr);
+        // `&*T` (a reference to a raw pointer) still wraps.
+        if (raw.isRef)
+            return context->typeContext->getReference(ptrTy, raw.isMutRef);
+        return ptrTy;
+    }
+
     // Array type `[T; N]`. Elements must be Copy and must NOT be references
     // (v1 — no element drop glue / origin tracking, so a reference element
     // could escape its owner without being caught). The array itself is always
@@ -146,10 +184,10 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
         }
         auto elemTy = raw.element ? resolveType(*raw.element, errorNode)
                                   : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-        if (elemTy && isReferenceType(elemTy))
+        if (elemTy && (isReferenceType(elemTy) || elemTy->getKind() == Type::Kind::Pointer))
         {
             if (!suppressTypeErrors_)
-                log(errorNode, "array element type '" + elemTy->toString() + "' cannot be a reference (reference elements are not supported yet).");
+                log(errorNode, "array element type '" + elemTy->toString() + "' cannot be a reference or a raw pointer (indirection elements are not supported yet).");
             return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         }
         if (elemTy && !elemTy->isCopyable())
@@ -267,7 +305,21 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
 
         std::vector<std::shared_ptr<Type>> typeArgs;
         for (auto &g : raw.genericArgs)
-            typeArgs.push_back(resolveType(g, errorNode));
+        {
+            auto argTy = resolveType(g, errorNode);
+            // `void` has no value, so it cannot be STORED — and a generic argument
+            // becomes a field of the instantiated struct/enum (`Result<void, E>`
+            // would be a struct with a void field, which LLVM rejects outright).
+            // Use an empty struct (e.g. the stdlib `Unit`) for a result that
+            // carries no value.
+            if (argTy && argTy->getKind() == Type::Kind::Primitive
+                && std::static_pointer_cast<PrimitiveType>(argTy)->getPrimKind() == PrimitiveType::PrimKind::VOID)
+            {
+                log(errorNode, "the type 'void' cannot be a generic argument (void has no value).");
+                argTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::NEVER);
+            }
+            typeArgs.push_back(argTy);
+        }
 
         // Constraint check
         for (size_t i = 0; i < typeArgs.size(); ++i)
@@ -1056,7 +1108,11 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
         seen.insert(member.name);
 
         member.type = resolveType(member.rawType, *node);
-        fields.emplace_back(member.name, member.type);
+        CustomType::Field f;
+        f.name = member.name;
+        f.type = member.type;
+        f.isPublic = member.isPublic;
+        fields.push_back(std::move(f));
     }
 
     std::shared_ptr<Type> ty;
@@ -1514,8 +1570,32 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
 }
 
 // ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::canAccessPrivateFieldsOf(const std::shared_ptr<CustomType> &type) const
+{
+    // Any method of the declaring type qualifies — including the STATIC ones,
+    // which are how a type constructs itself (`String::new` builds the private
+    // data/len/cap triple). A free function does not.
+    if (!type || !currentStructType)
+        return false;
+    auto current = std::dynamic_pointer_cast<CustomType>(currentStructType);
+    if (!current)
+        return false;
+    // Origin names match for a generic definition and all of its instantiations.
+    return current->getOriginName() == type->getOriginName();
+}
+
+void HIRSemanticAnalyzer::checkFieldAccess(const CustomType::Field &field, const std::shared_ptr<CustomType> &type, HIRNode &errNode)
+{
+    if (field.isPublic || canAccessPrivateFieldsOf(type))
+        return;
+    log(errNode,
+        "field '" + field.name + "' of '" + displayName(type->getOriginName()) + "' is private; add 'pub', or access it inside a method of that type.",
+        E_PrivateFieldAccess);
+}
+
 void HIRSemanticAnalyzer::visit(HIRFunction *node)
 {
+
     // Duplicate check for top-level functions (methods are checked by HIRImpl)
     if (!node->isMethod)
     {
@@ -1532,6 +1612,8 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
     promotedBorrows_.clear();
     holderLastUseStmt_.clear();
     pendingBorrowConflicts_.clear();
+    sequenceTerminated_ = false; // per-function: reachability is not inherited
+    loopBodyBreaks_.clear();
 
     functionInfo.isInFunction = true;
     functionInfo.gParams.clear();
@@ -1715,8 +1797,18 @@ void HIRSemanticAnalyzer::visit(HIRBlock *node)
     // Block-scope borrow marker: all borrows created in this block (variable and
     // temporary) end when the block exits (`{ let r = &x; } x.v = 5;` is legal).
     blockBorrowMarkers_.push_back(activeBorrows_.size());
+
+    // Reachability is tracked PER STATEMENT SEQUENCE: a `ret`/`break`/`continue`
+    // (or a diverging call) inside this block does not make the ENCLOSING
+    // sequence unreachable, so the flag is saved on entry and OR-ed back out.
+    // It only suppresses definite-assignment diagnostics in dead code.
+    bool savedTerminated = sequenceTerminated_;
+    sequenceTerminated_ = false;
     for (auto &stmt : node->stmts)
         analyzeStmt(stmt.get());
+    bool blockTerminated = sequenceTerminated_;
+    sequenceTerminated_ = savedTerminated || blockTerminated;
+
     activeBorrows_.resize(blockBorrowMarkers_.back());
     blockBorrowMarkers_.pop_back();
 
@@ -2248,6 +2340,31 @@ void HIRSemanticAnalyzer::checkStructReturn(HIRExpr *value,
 // ---------------------------------------------------------------------------
 // Move semantics of consuming `source` (whole variable or field path).
 // ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Type> &paramTy, HIRNode &errNode)
+{
+    auto paramRef = std::dynamic_pointer_cast<ReferenceType>(paramTy);
+    if (!paramRef || !arg || !arg->type)
+        return false;
+    // Only references reborrow. A raw pointer is Copy and is not tracked by the
+    // borrow checker at all, so there is nothing to register for it.
+    if (!isReferenceType(arg->type))
+        return false;
+    std::string root;
+    std::vector<std::string> path;
+    if (!extractRootAndPath(arg, root, path))
+        return false; // a temporary value: nothing to reuse, a move is fine
+    if (!SymbolTable::getInstance().lookupSymbol(root))
+        return false;
+    // Register the temporary borrow against the argument's own root, exactly as
+    // the method-receiver path does: the callee's access ends when the call
+    // returns, so the borrow dies with the call and the binding stays usable.
+    // (Like the rest of the borrow checker this is deliberately permissive: a
+    // conflict routed through a *different* alias of the same referent is missed
+    // rather than falsely rejected.)
+    registerBorrow(root, path, paramRef->isMutableRef(), /*isPromoted=*/false, errNode);
+    return true;
+}
+
 void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
 {
     // Borrow-check: moving a place that is currently borrowed would leave the
@@ -2399,11 +2516,27 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         log(*node, "variable '" + node->name + "' cannot have type 'void': void has no value.", E_TypeMismatch);
     }
 
+    // Definite assignment: a declaration WITHOUT an initializer is the only
+    // source of a maybe-uninitialized binding. It is allowed for Copy types
+    // (every use is checked), but NOT for Move types: such a binding owns a
+    // value that the scope-exit drop glue would release although it was never
+    // constructed. Reporting here (rather than tracking drop points) is what
+    // keeps the analysis small.
+    bool initialized = node->init.has_value();
+    if (!initialized && node->type && !node->type->isCopyable())
+    {
+        log(*node,
+            "cannot declare '" + node->name + "' without an initializer: '" + node->type->toString() + "' is not a Copy type, so the binding could be released while uninitialized.",
+            E_UninitializedNonCopyBinding);
+        initialized = true; // reported once; avoid cascading uninitialized-use errors
+    }
+
     auto sym = std::make_unique<Symbol>();
     sym->kind = node->isGlobal ? SymbolKind::GlobalVar : SymbolKind::LocalVar;
     sym->name = node->name;
     sym->type = node->type;
     sym->isMutable = node->isMutable;
+    sym->initialized = initialized;
     SymbolTable::getInstance().insertSymbol(node->name, std::move(sym));
 
     node->varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
@@ -2415,8 +2548,21 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRAssign *node)
 {
+    // The write TARGET is not a read: `let x: i32; x = 1;` must not be reported as
+    // a use of an uninitialized value (the assignment is what initializes it).
+    bool savedInAssignTarget = inAssignTarget_;
+    inAssignTarget_ = true;
     analyzeExpr(node->target.get());
+    inAssignTarget_ = savedInAssignTarget;
     analyzeExpr(node->value.get());
+
+    // Definite assignment on the TARGET side: assigning the whole binding
+    // initializes it, but writing a FIELD/ELEMENT requires it to be initialized
+    // already — the language tracks whole bindings, not individual fields, so a
+    // partially constructed struct would otherwise be released half-built at
+    // scope exit.
+    if (dynamic_cast<HIRMemberAccess *>(node->target.get()) || dynamic_cast<HIRIndexAccess *>(node->target.get()))
+        checkInitializedUse(node->target.get(), *node);
 
     // Borrow-check: writing to a borrowed place is forbidden. A write THROUGH a
     // reference (`r.v = 5` where r = &mut x) roots on `r`, which is not itself
@@ -2493,14 +2639,25 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     }
     else if (auto *idx = dynamic_cast<HIRIndexAccess *>(node->target.get()))
     {
-        // `a[i] = ...` / `s.data[i] = ...`.
+        // `a[i] = ...` / `h.buf[i] = ...` / `p[i] = ...`.
         //
-        // Write-through: when the indexed object is itself a `&mut T` reference
-        // (`s.data: &mut i8`), writing through it is allowed even if the root
-        // binding `s` is not `mut` — the write targets the referent, not the
-        // struct field. A shared reference is rejected. Otherwise the root
-        // binding's mutability rules.
-        if (auto refTy = std::dynamic_pointer_cast<ReferenceType>(idx->object->type))
+        // Write-through: when the indexed object is itself an indirection
+        // (`&mut T`, or a `*mut T` heap buffer), writing through it is allowed
+        // even if the root binding is not `mut` — the write targets the
+        // referent, not the holder. A shared reference or a `*T` is rejected.
+        // Otherwise the root binding's mutability rules apply.
+        if (auto ptrTy = std::dynamic_pointer_cast<PointerType>(idx->object->type))
+        {
+            // `p[i] = x` through a raw pointer: `*mut T` targets the referent (as
+            // with `&mut T`, the root binding's mutability is irrelevant), while a
+            // `*T` must not be writable through.
+            if (!ptrTy->isMutablePtr())
+            {
+                log(*node, "cannot assign through a shared raw pointer.", E_AssignToImmutable);
+                return;
+            }
+        }
+        else if (auto refTy = std::dynamic_pointer_cast<ReferenceType>(idx->object->type))
         {
             if (!refTy->isMutableRef())
             {
@@ -2535,6 +2692,8 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         {
             tsym->state = VarState::Valid;
             tsym->movedFields.clear();
+            // A whole-binding write also satisfies definite assignment.
+            tsym->initialized = true;
         }
     }
     else if (auto *targetMa = dynamic_cast<HIRMemberAccess *>(node->target.get()))
@@ -2570,8 +2729,49 @@ void HIRSemanticAnalyzer::visit(HIRIf *node)
     if (node->cond->type && !node->cond->type->equals(boolTy))
         log(*node, "if condition must be bool.");
 
+    // Definite assignment across the branch: snapshot at the join point, run each
+    // branch from that snapshot, then combine. A branch that cannot FALL THROUGH
+    // (it always returns / breaks / diverges) contributes no state at all — the
+    // other branch decides. Otherwise the join is the element-wise AND, and a
+    // missing `else` counts as an empty branch that assigns nothing.
+    const bool reachable = !sequenceTerminated_;
+    InitState entry = reachable ? snapshotInitState() : InitState{};
+
+    sequenceTerminated_ = !reachable;
     if (node->thenBlock) visit(node->thenBlock.get());
+    const bool thenTerminates = sequenceTerminated_;
+    InitState thenState = reachable ? captureInitState(entry) : InitState{};
+
+    // The else side starts from the ENTRY state again — otherwise a variable the
+    // then-branch assigned would leak its "initialized" into a branch that never
+    // touched it.
+    if (reachable) restoreInitState(entry);
+    sequenceTerminated_ = !reachable;
     if (node->elseBlock.has_value()) visit(node->elseBlock.value().get());
+    const bool elseTerminates = sequenceTerminated_ && node->elseBlock.has_value();
+    InitState elseState = reachable ? captureInitState(entry) : InitState{};
+
+    if (reachable)
+    {
+        if (thenTerminates && !elseTerminates)
+        {
+            // Only the else path reaches the join (the implicit empty else when
+            // there is none: it assigns nothing, i.e. the entry state).
+            restoreInitState(elseState);
+        }
+        else if (elseTerminates && !thenTerminates)
+        {
+            restoreInitState(thenState);
+        }
+        else if (!thenTerminates && !elseTerminates)
+        {
+            mergeInitState(thenState, elseState);
+            restoreInitState(thenState);
+        }
+    }
+
+    // The statement after the if is reachable unless BOTH branches terminate.
+    sequenceTerminated_ = !reachable || (thenTerminates && elseTerminates);
 }
 
 // ---------------------------------------------------------------------------
@@ -2606,10 +2806,22 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
     bool hasValueArm = false;
     std::shared_ptr<Type> matchResultType = nullptr;
 
+    // Definite assignment across the arms: a binding is initialized after the
+    // match only if EVERY arm that can fall through initialized it. Arms that
+    // cannot fall through (ret / break / a diverging tail) contribute nothing.
+    const bool reachable = !sequenceTerminated_;
+    InitState entry = reachable ? snapshotInitState() : InitState{};
+    InitState mergedArms;
+    bool haveMergedArm = false;
+
     for (auto &arm : node->arms)
     {
         auto armScope = SymbolTable::getInstance().getCurrentScope()->createChild();
         SymbolTable::getInstance().enterScope(armScope);
+
+        // Every arm starts from the match ENTRY state: one arm assignments must
+        // never leak into a later arm.
+        if (reachable) restoreInitState(entry);
 
         if (arm.isWildcard)
         {
@@ -2696,6 +2908,25 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
             log(*node, "match arm has neither a block body nor a value.");
         }
         SymbolTable::getInstance().exitScope(); // armScope
+
+        if (reachable)
+        {
+            const bool armTerminates = sequenceTerminated_
+                                      || (arm.tailValue && isNeverType(arm.tailValue->type));
+            if (!armTerminates)
+            {
+                InitState armState = captureInitState(entry);
+                if (!haveMergedArm)
+                {
+                    mergedArms = armState;
+                    haveMergedArm = true;
+                }
+                else
+                {
+                    mergeInitState(mergedArms, armState);
+                }
+            }
+        }
     }
 
     // Mixed block arms (void) and value arms are inconsistent.
@@ -2727,6 +2958,14 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
     else
         node->type = voidTy;
 
+    if (reachable)
+    {
+        if (haveMergedArm)
+            restoreInitState(mergedArms);
+        // Every arm terminates: nothing after the match can run.
+        sequenceTerminated_ = !haveMergedArm;
+    }
+
     SymbolTable::getInstance().exitScope(); // matchScope
 }
 
@@ -2752,9 +2991,34 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
             if (sym->type && !sym->type->isCopyable())
                 preBodyMoves[name] = {sym->state == VarState::Moved, !sym->movedFields.empty()};
 
+    // Definite assignment across a loop: the body may run ZERO times, so the
+    // state after the loop is the state before it (assignments inside do not
+    // count). This is the standard conservative rule.
+    const bool reachable = !sequenceTerminated_;
+    InitState entry = reachable ? snapshotInitState() : InitState{};
+
     loopDepth_++;
+    loopBodyBreaks_.push_back(false);
     if (node->body) visit(node->body.get());
+    const bool bodyBreaks = loopBodyBreaks_.back();
+    loopBodyBreaks_.pop_back();
     loopDepth_--;
+
+    if (reachable) restoreInitState(entry);
+
+    // `while true { ... }` with no break in the body never falls through, so the
+    // statements after it are unreachable (which also suppresses their
+    // definite-assignment diagnostics).
+    bool neverFallsThrough = false;
+    if (node->kind == HIRLoop::Kind::While && node->cond.has_value())
+    {
+        if (auto *lit = dynamic_cast<HIRLiteral *>(node->cond.value().get());
+            lit && lit->kind == HIRLiteral::Kind::Bool)
+        {
+            neverFallsThrough = std::get<bool>(lit->value) && !bodyBreaks;
+        }
+    }
+    sequenceTerminated_ = !reachable || neverFallsThrough;
 
     for (auto s = SymbolTable::getInstance().getCurrentScope(); s; s = s->getParent())
         for (const auto &[name, sym] : s->getSymbols())
@@ -2776,6 +3040,11 @@ void HIRSemanticAnalyzer::visit(HIRBreak *node)
 {
     if (loopDepth_ == 0)
         log(*node, "break can only be used inside a loop.");
+    // Statements after a break are unreachable; the enclosing loop can exit (so it
+    // must not be treated as an infinite loop by visit(HIRLoop)).
+    sequenceTerminated_ = true;
+    if (!loopBodyBreaks_.empty())
+        loopBodyBreaks_.back() = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2783,6 +3052,7 @@ void HIRSemanticAnalyzer::visit(HIRContinue *node)
 {
     if (loopDepth_ == 0)
         log(*node, "continue can only be used inside a loop.");
+    sequenceTerminated_ = true; // statements after a continue are unreachable
 }
 
 // (break/continue share the single rule "must be inside a loop" — the two
@@ -2839,12 +3109,21 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
         // — the program is already invalid; the type error is the real one.
         checkDanglingReturn(node);
     }
+
+    // Nothing after a return in this sequence runs; the enclosing sequence OR-s
+    // this into its own state.
+    sequenceTerminated_ = true;
 }
 
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRExprStmt *node)
 {
     analyzeExpr(node->expr.get());
+
+    // `panic("...");` (or any call returning the uninhabited type) never returns,
+    // so the rest of this statement sequence is unreachable.
+    if (node->expr && isNeverType(node->expr->type))
+        sequenceTerminated_ = true;
 }
 
 // ============================================================
@@ -2903,6 +3182,67 @@ bool HIRSemanticAnalyzer::inGenericContext() const
         return true; // a generic function: mono rewrites this body
     auto ct = std::dynamic_pointer_cast<CustomType>(currentStructType);
     return ct && ct->isGeneric(); // a method of a generic struct: mono prepends its params
+}
+// ── definite assignment (`let x;` has no initializer) ────────────────────────
+
+HIRSemanticAnalyzer::InitState HIRSemanticAnalyzer::snapshotInitState()
+{
+    InitState state;
+    // Locals and params only: stop at the global scope (the only scope without a
+    // parent) — top-level symbols are always initialized.
+    for (auto scope = SymbolTable::getInstance().getCurrentScope(); scope && scope->getParent();
+         scope = scope->getParent())
+        for (const auto &[name, sym] : scope->getSymbols())
+        {
+            (void)name;
+            state[sym.get()] = sym->initialized;
+        }
+    return state;
+}
+
+HIRSemanticAnalyzer::InitState HIRSemanticAnalyzer::captureInitState(const InitState &keys) const
+{
+    InitState state;
+    state.reserve(keys.size());
+    for (const auto &[sym, wasInitialized] : keys)
+    {
+        (void)wasInitialized;
+        if (sym) state[sym] = sym->initialized;
+    }
+    return state;
+}
+
+void HIRSemanticAnalyzer::restoreInitState(const InitState &state)
+{
+    for (const auto &[sym, initialized] : state)
+        if (sym) sym->initialized = initialized;
+}
+
+void HIRSemanticAnalyzer::mergeInitState(InitState &dst, const InitState &other)
+{
+    for (auto &[sym, initialized] : dst)
+    {
+        auto it = other.find(sym);
+        if (it == other.end()) continue; // outside the key set: nothing to merge
+        initialized = initialized && it->second;
+    }
+}
+
+void HIRSemanticAnalyzer::checkInitializedUse(HIRExpr *placeExpr, HIRNode &errNode)
+{
+    // Unreachable code cannot read anything: after a `ret`/`break`/`continue`, a
+    // diverging call, or a branch that never falls through, the definite-
+    // assignment state is meaningless. MIRBuilder drops those statements too.
+    if (!placeExpr || sequenceTerminated_) return;
+
+    std::string root;
+    std::vector<std::string> path;
+    if (!extractRootAndPath(placeExpr, root, path)) return;
+
+    Symbol *sym = SymbolTable::getInstance().lookupSymbol(root);
+    if (!sym || sym->initialized) return;
+
+    log(errNode, "use of uninitialized value: '" + root + "'", E_UseOfUninitializedValue);
 }
 
 Symbol *HIRSemanticAnalyzer::lookupModuleAware(const std::string &name)
@@ -2992,6 +3332,13 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
         log(*node, "cannot use '" + node->name + "': it has the uninhabited type 'never'.", E_UndefinedIdentifier);
         return;
     }
+
+    // Definite assignment: reading a `let x;` binding before every path has
+    // assigned it. Assignment targets are exempt (visit(HIRAssign) sets
+    // inAssignTarget_ and checks the field/element rule itself), because the
+    // write is what initializes the binding.
+    if (!inAssignTarget_)
+        checkInitializedUse(node, *node);
 
     // Borrow-check: a Copy read of a whole variable conflicts with active &mut
     // borrows. Non-Copy uses are moves and are checked at the consuming sites
@@ -3550,8 +3897,10 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
             analyzeExpr(node->args[i].get());
             if (node->args[i]->type && !typesCompatible(paramTypes[i + 1], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
-            // By-value non-Copy arg consumes the source.
-            handleMoveSource(node->args[i].get(), *node);
+            // A reference argument to a reference parameter is REBORROWED (no
+            // move); anything else follows the by-value copy/move rules.
+            if (!tryReborrowArg(node->args[i].get(), paramTypes[i + 1], *node))
+                handleMoveSource(node->args[i].get(), *node);
         }
 
         // Insert self as arg[0] (a &mut/& reference to the receiver).
@@ -3671,30 +4020,44 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
 {
     auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
     auto i8Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8);
-    auto mutI8Ptr = context->typeContext->getReference(i8Ty, /*isMutable=*/true);
-    auto shI8Ptr = context->typeContext->getReference(i8Ty, /*isMutable=*/false);
+    auto mutI8Ptr = context->typeContext->getPointer(i8Ty, /*isMutable=*/true);
+    auto shI8Ptr = context->typeContext->getPointer(i8Ty, /*isMutable=*/false);
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    // The unsafe core is stdlib-only. These take RAW pointers and lower straight
+    // to libc malloc/free/memcpy/strlen with no bounds, lifetime or aliasing
+    // checking anywhere; keeping every call site inside <lstdlib> is what makes
+    // the language's heap use auditable.
+    if (!inStdLib())
+    {
+        log(*node, "the heap primitive '" + name + "' can only be called from the standard library (it is the compiler's unsafe core; user code goes through stdlib types such as String).", E_UnsafeBuiltinOutsideStdlib);
+        node->type = voidTy;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = voidTy;
+        return true;
+    }
 
     std::shared_ptr<Type> retTy = nullptr;
     std::vector<std::shared_ptr<Type>> argTys;
     if (name == "__alloc")
     {
-        retTy = mutI8Ptr; // &mut i8 — the caller gets a writable buffer
+        retTy = mutI8Ptr; // *mut i8 — the caller gets a writable heap buffer
         argTys = {i32Ty}; // size
     }
     else if (name == "__free")
     {
-        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-        argTys = {shI8Ptr}; // &i8 — free only needs the address
+        retTy = voidTy;
+        argTys = {shI8Ptr}; // *i8 — free only needs the address
     }
     else if (name == "__memcpy")
     {
-        retTy = mutI8Ptr;                   // returns dst (unused in .lis)
-        argTys = {shI8Ptr, shI8Ptr, i32Ty}; // dst, src, n — both shared pointers
+        retTy = mutI8Ptr;                    // returns dst (unused in .lis)
+        argTys = {mutI8Ptr, shI8Ptr, i32Ty}; // dst (*mut i8), src (*i8), n
     }
     else if (name == "__strlen")
     {
         retTy = i32Ty;      // length (truncated from size_t)
-        argTys = {shI8Ptr}; // &i8
+        argTys = {shI8Ptr}; // *i8
     }
     else
         return false; // not a heap builtin
@@ -3710,6 +4073,94 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
             log(*node->args[i], "builtin '" + name + "' expects argument of type '" + argTys[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
     }
 
+    node->type = retTy;
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = retTy;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::inStdLib() const
+{
+    // The FILE of the item being analyzed decides (module items keep their own
+    // path). Both sides are canonicalized so mixed separators or relative
+    // segments cannot defeat the check, and an unresolvable path is treated as
+    // NOT stdlib — the gate fails closed, never open.
+    if (currentFilePath_.empty())
+        return false;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path file = fs::weakly_canonical(fs::path(currentFilePath_), ec);
+    if (ec)
+        return false;
+    for (const auto &dir : context->stdLibDirs)
+    {
+        std::error_code ec2;
+        fs::path base = fs::weakly_canonical(fs::path(dir), ec2);
+        if (ec2)
+            continue;
+        auto rel = file.lexically_relative(base);
+        if (rel.empty())
+            continue; // not comparable (different drive / no relation)
+        // `rel` starting with ".." means the file is OUTSIDE `base`. Compare the
+        // first component as a path (never as a narrow string: this toolchain
+        // builds with -DUNICODE, so native() is a wstring).
+        if (*rel.begin() == "..")
+            continue;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handlePtrBuiltin(HIRCall *node, const std::string &name)
+{
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    // Same unsafe-core boundary as the heap primitives: converting an address
+    // into a borrow is exactly the step the borrow checker cannot verify.
+    if (!inStdLib())
+    {
+        log(*node, "the raw-pointer conversion '" + name + "' can only be used inside the standard library (user code cannot turn an address into a reference).", E_PointerOpOutsideStdlib);
+        node->type = voidTy;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = voidTy;
+        return true;
+    }
+
+    if (node->args.size() != 1)
+    {
+        log(*node, "builtin '" + name + "' expects 1 argument, got " + std::to_string(node->args.size()) + ".");
+        node->type = voidTy;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = voidTy;
+        return true;
+    }
+
+    analyzeExpr(node->args[0].get());
+    auto argTy = node->args[0]->type;
+    auto pt = std::dynamic_pointer_cast<PointerType>(argTy);
+    bool bad = false;
+    if (!pt)
+    {
+        log(*node->args[0], "builtin '" + name + "' expects a raw pointer argument, got '" + (argTy ? argTy->toString() : std::string("?")) + "'.");
+        bad = true;
+    }
+    else if (name == "__deref_mut" && !pt->isMutablePtr())
+    {
+        log(*node->args[0], "builtin '__deref_mut' expects a '*mut T' argument (a '*T' cannot produce a mutable reference).");
+        bad = true;
+    }
+    if (bad)
+    {
+        node->type = voidTy;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = voidTy;
+        return true;
+    }
+
+    // The pointee drives the result type — no generics machinery needed.
+    auto retTy = context->typeContext->getReference(pt->getBaseType(), /*isMutable=*/name == "__deref_mut");
     node->type = retTy;
     if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
         nr->type = retTy;
@@ -3830,6 +4281,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 return;
             case BuiltinCategory::Heap:
                 handleHeapBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::Ptr:
+                handlePtrBuiltin(node, nr->name);
                 return;
             case BuiltinCategory::ToString:
                 handleToStringBuiltin(node, nr->name);
@@ -3956,8 +4410,10 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 log(*node->args[i], "cannot infer the generic argument(s) of '" + displayName(std::static_pointer_cast<CustomType>(node->args[i]->type)->getOriginName()) + "'; write them explicitly (e.g. 'Option<i32>::None').");
             else if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
-            // A by-value non-Copy arg consumes the source (`foo(p)` moves p).
-            handleMoveSource(node->args[i].get(), *node);
+            // A by-value non-Copy arg consumes the source (`foo(p)` moves p); a
+            // reference argument to a reference parameter is reborrowed instead.
+            if (!tryReborrowArg(node->args[i].get(), instantiatedFuncType->getParams()[i], *node))
+                handleMoveSource(node->args[i].get(), *node);
         }
 
         // 设置返回值类型为实例化后的类型
@@ -4145,8 +4601,8 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             // dispatch / regular call paths.
             if (!typesCompatible(instantiatedFuncType->getParams()[i + 1], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
-            // By-value non-Copy arg consumes the source.
-            handleMoveSource(node->args[i].get(), *node);
+            if (!tryReborrowArg(node->args[i].get(), instantiatedFuncType->getParams()[i + 1], *node))
+                handleMoveSource(node->args[i].get(), *node);
         }
 
         // Insert the receiver as arg[0]. A `&self` / `&mut self` method borrows
@@ -4312,8 +4768,8 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             analyzeExpr(node->args[i].get());
             if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
                 log(*node->args[i], "argument type mismatch.");
-            // By-value non-Copy arg consumes the source.
-            handleMoveSource(node->args[i].get(), *node);
+            if (!tryReborrowArg(node->args[i].get(), instantiatedFuncType->getParams()[i], *node))
+                handleMoveSource(node->args[i].get(), *node);
         }
 
         node->type = instantiatedFuncType->getReturnType();
@@ -4352,7 +4808,12 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
     const auto &fields = ct->getFields();
     auto it = std::find(fields.begin(), fields.end(), node->memberName);
     if (it != fields.end())
+    {
+        // Visibility: a private field is only reachable from a non-static method
+        // of the declaring type.
+        checkFieldAccess(*it, ct, *node);
         node->type = it->type;
+    }
     else
         log(*node, "struct '" + ct->getName() + "' has no field '" + node->memberName + "'.");
 
@@ -4377,34 +4838,48 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
 
     node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
-    // The element type: an array `[T; N]` yields T; a REFERENCE to a primitive
-    // (e.g. `s.data: &mut i8` — a heap pointer) is indexed as a C-style pointer
-    // to T elements (`s.data[i]` → i8). A reference to an array auto-derefs.
-    // Deref ALL reference layers (MIR's buildIndexAccess walks the full chain;
-    // sema used to stop at one, causing `&&T` divergence).
-    bool isPointer = false;
+    // The element type comes from the place UNDER the references: an array
+    // [T; N] yields T (bounds-checked), a RAW POINTER *T / *mut T yields T as
+    // unchecked C pointer arithmetic — legal only in the standard library.
+    // A reference to either auto-derefs (all layers: MIR's buildIndexAccess
+    // walks the full chain, and sema used to stop at one, causing `&&T`
+    // divergence), but a reference to a PRIMITIVE is no longer a buffer.
+    bool viaReference = false;
     while (auto ref = std::dynamic_pointer_cast<ReferenceType>(objTy))
     {
         objTy = ref->getBaseType();
-        isPointer = true;
+        viaReference = true;
     }
 
     std::shared_ptr<Type> elemTy;
     if (auto arrTy = std::dynamic_pointer_cast<ArrayType>(objTy))
-        elemTy = arrTy->getElementType();
-    else if (isPointer)
+        elemTy = arrTy->getElementType(); // bounds-checked in codegen
+    else if (auto ptrTy = std::dynamic_pointer_cast<PointerType>(objTy))
     {
-        // C-style pointer indexing `s.data[i]`. Only primitives (a byte/small
-        // buffer) or arrays are legal pointees; a reference to a struct would
-        // hit an llvm_unreachable in codegen (getElementType) and a reference
-        // to a struct would otherwise let `r[0].f = x` write through a shared
-        // reference.
-        if (objTy->getKind() != Type::Kind::Primitive && objTy->getKind() != Type::Kind::Array)
+        // C-style pointer indexing `p[i]`: unchecked address arithmetic. That is
+        // what a raw pointer IS, which is why it is confined to the standard
+        // library (the audited heap implementation) and why only a raw pointer
+        // may do it — a `&i8` must no longer silently become a buffer.
+        if (!inStdLib())
         {
-            log(*node, "cannot index a reference to type '" + objTy->toString() + "' (only references to primitives or arrays).");
+            log(*node, "indexing the raw pointer '" + ptrTy->toString() + "' is only allowed inside the standard library: it is unchecked C pointer arithmetic.", E_PointerOpOutsideStdlib);
             return;
         }
-        elemTy = objTy;
+        // Only primitives (a byte/small buffer) or arrays are legal pointees; a
+        // pointer to a struct would hit an llvm_unreachable in codegen and would
+        // otherwise let `p[0].f = x` write through a shared pointer.
+        if (ptrTy->getBaseType()->getKind() != Type::Kind::Primitive
+            && ptrTy->getBaseType()->getKind() != Type::Kind::Array)
+        {
+            log(*node, "cannot index '" + ptrTy->toString() + "' (only pointers to primitives or arrays).");
+            return;
+        }
+        elemTy = ptrTy->getBaseType();
+    }
+    else if (viaReference)
+    {
+        log(*node, "a reference to '" + objTy->toString() + "' is not indexable: C-style pointer indexing requires a raw pointer ('*" + objTy->toString() + "'), and only the standard library may do it.");
+        return;
     }
     else
     {
@@ -4454,9 +4929,9 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
         return;
     }
 
-    if (isReferenceType(elemTy))
+    if (isReferenceType(elemTy) || elemTy->getKind() == Type::Kind::Pointer)
     {
-        log(*node, "array literal element type '" + elemTy->toString() + "' cannot be a reference (reference elements are not supported yet).");
+        log(*node, "array literal element type '" + elemTy->toString() + "' cannot be a reference or a raw pointer (indirection elements are not supported yet).");
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
@@ -4563,6 +5038,9 @@ void HIRSemanticAnalyzer::visit(HIRStructInit *node)
             log(*node, "struct '" + node->structName + "' has no field '" + mname + "'.");
             continue;
         }
+        // Visibility applies to CONSTRUCTION too — otherwise a private field
+        // could be initialized from outside and its invariant broken at birth.
+        checkFieldAccess(*fIt, finalTy, *node);
         if (mval->type && !typesCompatible(fIt->type, mval->type))
             log(*node, "type mismatch for field '" + mname + "': expected '" + fIt->type->toString() + "', got '" + mval->type->toString() + "'.");
     }
@@ -4720,6 +5198,87 @@ void HIRSemanticAnalyzer::visit(HIRRef *node)
             registerBorrow(root, path, node->isMutable, /*isPromoted=*/false, *node);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `expr?` — error propagation over the stdlib Result.
+//
+// The operator is defined ONLY in terms of `result$Result` (the language has no
+// `Try`-style trait to generalise over): the operand must be a Result value and
+// the enclosing function must return a Result whose error type is compatible
+// with the operand's. That keeps the rewrite a pure match-shaped lowering with
+// no implicit conversion (the manual documents the absence of From/Into).
+void HIRSemanticAnalyzer::visit(HIRTry *node)
+{
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    analyzeExpr(node->expr.get());
+    auto operandTy = node->expr ? node->expr->type : nullptr;
+
+    // The stdlib type must exist: `impt result { Result }`.
+    if (!context->typeContext->getCustom("result$Result").has_value())
+    {
+        log(*node, "the '?' operator requires the stdlib 'Result' type (add 'impt result { Result }').", E_TryNotResult);
+        node->type = voidTy;
+        return;
+    }
+
+    auto operandCt = std::dynamic_pointer_cast<CustomType>(operandTy);
+    if (!operandCt || operandCt->getOriginName() != "result$Result")
+    {
+        log(*node, "the '?' operator requires a 'Result' value, got '" + (operandTy ? operandTy->toString() : std::string("?")) + "'.", E_TryNotResult);
+        node->type = voidTy;
+        return;
+    }
+
+    // Locate the Ok/Err shape on the OPERAND (the layout is the stdlib Result's).
+    std::shared_ptr<Type> okPayloadTy;
+    std::shared_ptr<Type> errPayloadTy;
+    for (const auto &v : operandCt->getVariants())
+    {
+        if (v.name == "Ok" && !v.payloadTypes.empty())
+            okPayloadTy = v.payloadTypes[0];
+        else if (v.name == "Err" && !v.payloadTypes.empty())
+            errPayloadTy = v.payloadTypes[0];
+    }
+    if (!okPayloadTy || !errPayloadTy)
+    {
+        log(*node, "'?' requires a Result with 'Ok(T)' and 'Err(E)' variants.", E_TryNotResult);
+        node->type = voidTy;
+        return;
+    }
+
+    // The enclosing function must return a Result, and its error type must accept
+    // the operand's (no conversion is inserted).
+    auto declaredCt = std::dynamic_pointer_cast<CustomType>(functionInfo.declaredReturnType);
+    if (!declaredCt || declaredCt->getOriginName() != "result$Result")
+    {
+        log(*node, "the '?' operator requires the enclosing function to return 'Result<_, E>' (it returns '"
+                + (functionInfo.declaredReturnType ? functionInfo.declaredReturnType->toString() : std::string("void")) + "').",
+            E_TryNotInResultFn);
+        node->type = okPayloadTy;
+        return;
+    }
+
+    std::shared_ptr<Type> declaredErrTy;
+    for (const auto &v : declaredCt->getVariants())
+        if (v.name == "Err" && !v.payloadTypes.empty())
+            declaredErrTy = v.payloadTypes[0];
+
+    if (!declaredErrTy || !typesCompatible(declaredErrTy, errPayloadTy))
+    {
+        log(*node, "the error type of '?' ('" + errPayloadTy->toString()
+                + "') does not match the function error type ('"
+                + (declaredErrTy ? declaredErrTy->toString() : std::string("?")) + "').",
+            E_TryErrorTypeMismatch);
+        node->type = okPayloadTy;
+        return;
+    }
+
+    // `?` CONSUMES the Result: on the error path its payload is moved into the
+    // value that is returned, and on the ok path the payload is moved out.
+    handleMoveSource(node->expr.get(), *node);
+    node->type = okPayloadTy;
 }
 
 void HIRSemanticAnalyzer::visit(HIRImport *node)

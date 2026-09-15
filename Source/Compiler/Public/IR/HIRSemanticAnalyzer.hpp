@@ -67,6 +67,47 @@ private:
      *  the un-inferrable-definition error the same code is outside such a
      *  context. */
     bool inGenericContext() const;
+    // ── definite assignment (`let x;` has no initializer) ─────────────────────
+
+    /// Symbol → initialized, for every LOCAL binding visible at one point.
+    using InitState = std::unordered_map<Symbol *, bool>;
+
+    /// Snapshot the visible local bindings (locals/params only — the global
+    /// scope holds top-level symbols, which are always initialized).
+    InitState snapshotInitState();
+
+    /// Re-read the SAME key set. Re-walking the scope chain would be wrong here:
+    /// bindings declared inside a branch are out of scope once it exits, so their
+    /// Symbol objects are already destroyed.
+    InitState captureInitState(const InitState &keys) const;
+
+    /// Write a state back onto its symbols.
+    void restoreInitState(const InitState &state);
+
+    /// dst[k] = dst[k] && other[k] — the AND rule for a branch join: a binding is
+    /// definitely initialized after the join only if BOTH paths initialized it.
+    static void mergeInitState(InitState &dst, const InitState &other);
+
+    /// Reject a USE of a binding that is not definitely initialized on this path.
+    /// `placeExpr` is the whole place expression (`x`, `x.f`, `a[i]`); only a plain
+    /// variable root can be uninitialized.
+    void checkInitializedUse(HIRExpr *placeExpr, HIRNode &errNode);
+
+    /// True while the statement sequence being analyzed is already unreachable
+    /// (after `ret`/`break`/`continue`, a diverging call, or a branch that cannot
+    /// fall through). Definite-assignment diagnostics are suppressed there — the
+    /// code cannot run — mirroring MIRBuilder's dead-block handling. Only the new
+    /// check consults it; all other diagnostics keep reporting as before.
+    bool sequenceTerminated_ = false;
+
+    /// Per-loop "its body contains a break" flags (innermost last), used to decide
+    /// whether `while true { ... }` can ever fall through to the code after it.
+    std::vector<bool> loopBodyBreaks_;
+
+    /// Set while the ASSIGNMENT TARGET of an assign statement is being analyzed, so
+    /// visit(HIRNameRef) does not report the write itself as a read of an
+    /// uninitialized value (`let x: i32; x = 1;`).
+    bool inAssignTarget_ = false;
 
     /// Set currentModule_ from Context::stmtAttributions for the item at `index`.
     void setModuleForItem(size_t index);
@@ -216,6 +257,26 @@ private:
      *  partial (field) moves on the root symbol. */
     void handleMoveSource(HIRExpr *source, HIRNode &errNode);
 
+    /** True when the current context may touch a PRIVATE field of `type`: we are
+     *  inside a method of that very type (inherent impl or trait impl, static or
+     *  not — the declaring type is what matters, not which impl block introduced
+     *  the method). The comparison uses the ORIGIN name so a generic method body
+     *  (`impl Box<T>`, whose `currentStructType` is the definition) can access
+     *  private fields of an instantiation (`Box$i32`) and vice versa. */
+    bool canAccessPrivateFieldsOf(const std::shared_ptr<CustomType> &type) const;
+
+    /** Report a private-field access (E3015) unless it is legal here. */
+    void checkFieldAccess(const CustomType::Field &field, const std::shared_ptr<CustomType> &type, HIRNode &errNode);
+
+    /** Implicit reborrow for a reference argument. Returns true when `arg` is a
+     *  reference-typed PLACE passed to a REFERENCE parameter: the callee borrows
+     *  the referent for the duration of the call (a temporary borrow, exactly
+     *  like a method receiver) and the argument is NOT moved — otherwise
+     *  forwarding a `&mut T` would consume it. Returns false for by-value
+     *  parameters and non-place arguments, where the normal copy/move rules
+     *  apply. */
+    bool tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Type> &paramTy, HIRNode &errNode);
+
     /** Recognize a builtin print call (`print_str/int/float/bool/char`, `println`)
      *  by callee name, validate its args, set the call's type to VOID, and return
      *  true if `node` is such a builtin call (skipping normal call resolution).
@@ -228,11 +289,24 @@ private:
      *  These lower to libc `fgets` + parse in LLVMIRBuilder. */
     bool handleInputBuiltin(HIRCall *node, const std::string &name);
 
-    /** Recognize a builtin heap call (`__alloc` → &mut i8, `__free`,
+    /** Recognize a builtin heap call (`__alloc` → `*mut i8`, `__free`,
      *  `__memcpy`, `__strlen`) by callee name, validate args, and return true
      *  if `node` is such a builtin. These lower to libc malloc/free/memcpy/
-     *  strlen in LLVMIRBuilder. */
+     *  strlen in LLVMIRBuilder. STDLIB ONLY: they take and return raw pointers
+     *  and perform no bounds/lifetime/aliasing checking. */
     bool handleHeapBuiltin(HIRCall *node, const std::string &name);
+
+    /** True when the top-level item being analyzed comes from a file inside one
+     *  of Context::stdLibDirs — the compiler's unsafe core. Gates the heap
+     *  primitives, the raw-pointer conversions and raw-pointer indexing. */
+    bool inStdLib() const;
+
+    /** Recognize a raw-pointer → reference conversion (`__deref` → `&T`,
+     *  `__deref_mut` → `&mut T`) by callee name. The result type is derived
+     *  from the argument's pointee, so no generics machinery is involved. This
+     *  is the explicit, stdlib-only way to turn an address into a borrow; the
+     *  opposite direction (`&T` → `*T`) is an implicit coercion. */
+    bool handlePtrBuiltin(HIRCall *node, const std::string &name);
 
     /** Recognize a builtin to_string call (`to_string_i32/i64/f64/bool/char` →
      *  String) by callee name, set the return type to the stdlib String struct,
@@ -364,6 +438,7 @@ public:
     virtual void visit(HIRStructInit *node) override;
     virtual void visit(HIRVariantInit *node) override;
     virtual void visit(HIRRef *node) override;
+    virtual void visit(HIRTry *node) override;
     virtual void visit(HIRImport *node) override;
 
     std::vector<std::shared_ptr<Type>> inferGenericArguments(

@@ -570,6 +570,9 @@ single_char:
     case '.': token.code = TokenCode::DOT; break;
     case '&': token.code = TokenCode::REFERENCE; break;
     case '!': token.code = TokenCode::NOT; break;
+    // `?` is a POSTFIX operator (error propagation, `expr?`): the Parser attaches it
+    // in the member-access suffix chain, so it needs no binary precedence entry.
+    case '?': token.code = TokenCode::QUESTION; break;
     case '|': token.code = TokenCode::BOR; break;
     case '[': token.code = TokenCode::LBRACKET; break;
     case ']': token.code = TokenCode::RBRACKET; break;

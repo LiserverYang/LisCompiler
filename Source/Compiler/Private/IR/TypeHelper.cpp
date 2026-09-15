@@ -69,6 +69,7 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
     }
 
     case Type::Kind::Reference:
+    case Type::Kind::Pointer:
         return llvm::PointerType::getUnqual(ctx); // opaque ptr
 
         // Struct — looked up by name; the body is set in the struct-decl pass.
@@ -132,7 +133,7 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
 bool isPointerLike(const std::shared_ptr<Type> &ty)
 {
     if (!ty) return false;
-    return ty->getKind() == Type::Kind::Reference;
+    return ty->isPointerLike();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

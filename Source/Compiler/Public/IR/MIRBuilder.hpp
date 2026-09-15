@@ -180,6 +180,7 @@ private:
     MIRPlace buildStructInit(HIRStructInit *si);
     MIRPlace buildVariantInit(HIRVariantInit *vi);
     MIRPlace buildRef(HIRRef *ref);
+    MIRPlace buildTry(HIRTry *tryExpr);
 
     // ── operand helpers ───────────────────────────────────────────────────────
     /**

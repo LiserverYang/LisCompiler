@@ -1022,3 +1022,23 @@ TEST_F(LexerTest, NeverKeywordBoundaryNotSubstring)
     expectToken(1, TokenCode::IDENTIFIER, "never_", 1, 11);
     expectToken(2, TokenCode::NEVER, "never", 1, 18);
 }
+
+// A question mark is the POSTFIX error-propagation operator. It used to be an
+// "Unknown character" lexer error; it is now a real token (the Parser attaches it
+// in the member-access suffix chain).
+TEST_F(LexerTest, RecognizesQuestionMarkToken)
+{
+    runLexer("? ?");
+    expectToken(0, TokenCode::QUESTION, "?", 1, 1);
+    expectToken(1, TokenCode::QUESTION, "?", 1, 3);
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(LexerTest, QuestionMarkAmongOtherOperators)
+{
+    runLexer("a? + b");
+    expectToken(0, TokenCode::IDENTIFIER, "a", 1, 1);
+    expectToken(1, TokenCode::QUESTION, "?", 1, 2);
+    expectToken(2, TokenCode::PLUS, "+", 1, 4);
+    expectToken(3, TokenCode::IDENTIFIER, "b", 1, 6);
+}

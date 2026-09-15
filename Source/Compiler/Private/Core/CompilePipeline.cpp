@@ -52,6 +52,9 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         std::runtime_error("could not find the standard library, please check the binary_path/lstdlib!");
     }
     context->searchPaths.push_back(stdLibDir.string());
+    // The same directory is the boundary of the unsafe core: heap primitives and
+    // raw-pointer operations are only accepted from files under it (see Context).
+    context->stdLibDirs.push_back(stdLibDir.string());
     // `-I` may carry several dirs separated by ';' (the argparser keeps only the
     // last value of a repeated flag, so lisbuild packs its include_dirs into one
     // `-I<dir>;<dir>` argument).

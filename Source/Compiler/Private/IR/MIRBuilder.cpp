@@ -33,7 +33,8 @@ std::string mangleName(const MIRFunction &fn)
 
 bool MIRBuilder::isCopyType(const std::shared_ptr<Type> &type)
 {
-    // Single source of truth is Type::isCopyable() (primitives + references).
+    // Single source of truth is Type::isCopyable() (primitives, raw pointers
+    // and SHARED references — `&mut T` is not Copy).
     return !type || type->isCopyable();
 }
 
@@ -78,7 +79,9 @@ MIRPlace MIRBuilder::makeTempPlace(std::shared_ptr<Type> type)
     // transferred (so a moved-out temp is skipped by emitDrop), and
     // buildExprStmt() explicitly drops discarded expression results — the
     // suppression machinery already exists; this just makes temps visible to it.
-    if (!ownedLocalsStack_.empty() && !isCopyType(place.type))
+    // needsDrop(), not "!Copy": a `&mut T` temp is non-Copy yet owns nothing,
+    // so tracking it as an owned local would only queue a no-op drop.
+    if (!ownedLocalsStack_.empty() && place.type && place.type->needsDrop())
         ownedLocalsStack_.back().push_back(place);
 
     return place;
@@ -238,7 +241,9 @@ void MIRBuilder::emitDrop(MIRPlace place)
         }
     }
 
-    if (!isCopyType(place.type))
+    // needsDrop() — a reference is non-Copy (for `&mut`) but owns nothing, and
+    // lowering a drop of one has no glue to call.
+    if (place.type && place.type->needsDrop())
         emit(MIRStmtDrop{.place = std::move(place)});
 }
 
@@ -270,7 +275,7 @@ void MIRBuilder::emitDropPartial(MIRPlace place,
 
     for (const auto &field : ct->getFields())
     {
-        if (isCopyType(field.type)) continue;
+        if (!field.type || !field.type->needsDrop()) continue;
         // Arrays of Copy elements (v1) own nothing — skip their drop.
         if (field.type->getKind() == Type::Kind::Array) continue;
 
@@ -550,8 +555,8 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     ownedLocalsStack_.emplace_back();
     for (auto &[pname, ptype] : fn->params)
     {
-        if (isCopyType(ptype))
-            continue;
+        if (!ptype || !ptype->needsDrop())
+            continue; // Copy values and non-owning references release nothing
         // The Drop trait's `drop(self)` takes self BY VALUE; the drop glue
         // calls X::drop itself. Dropping `self` again at function exit would
         // infinite-recurse (X::drop → __drop_X → X::drop → ...).
@@ -741,7 +746,7 @@ void MIRBuilder::buildVarDecl(HIRVarDecl *decl)
 
     // Non-Copy locals declared in this block are owned by this scope and get
     // dropped when the block ends.
-    if (!ownedLocalsStack_.empty() && !isCopyType(decl->type))
+    if (!ownedLocalsStack_.empty() && decl->type && decl->type->needsDrop())
         ownedLocalsStack_.back().push_back(localPlace(idx));
 
     if (decl->init.has_value())
@@ -771,7 +776,7 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
     // emitDrop respects the partial-move decomposition, so `x = x.field` drops
     // only the other fields.
     if (lhs.base == PlaceBase::Local && lhs.projections.empty()
-        && !isCopyType(lhs.type) && !movedLocals_.count(lhs.index))
+        && lhs.type && lhs.type->needsDrop() && !movedLocals_.count(lhs.index))
         emitDrop(localPlace(lhs.index));
 
     // emitAssign re-arms ownership on a whole-root-local write.
@@ -913,7 +918,7 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
     bool enumHasNonCopy = false;
     for (const auto &v : variants)
         for (const auto &pt : v.payloadTypes)
-            if (!pt->isCopyable())
+            if (pt->needsDrop())
             {
                 enumHasNonCopy = true;
                 break;
@@ -987,25 +992,34 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
             MIRPlace payload = mval;
             payload.projections.push_back(Projection{ProjectionKind::Field, arm.variantName + "_" + std::to_string(i), 0});
             payload.type = ty;
-            if (isCopyType(ty))
+            if (!ty->needsDrop())
                 emitAssign(bindPlace, MIRRValueUse{MIROperand(MIRCopy{payload})});
             else
             {
                 ownedLocalsStack_.back().push_back(localPlace(idx));
-                // Transfer the payload through placeToOperand() instead of
-                // building MIRMove by hand: placeToOperand also RECORDS the
-                // move (a simple Field chain becomes a partial-move entry on
-                // the scrutinee temp, a complex one marks it fully moved).
-                // Without that record an early exit from THIS arm — `ret v;`
-                // inside the arm body — reaches buildReturn's
-                // dropOwnedLocalsFrom(0) BEFORE buildMatch marks the temp moved
-                // at the end of the match, so the temp was dropped WHOLESALE and
-                // freed the payload the binding now owns (double free, e.g.
-                // `Option<String>`); the field-decomposing emitDropPartial only
-                // runs when the partial move is on record.
+                // Transfer the payload through placeToOperand() rather than
+                // building MIRMove by hand: it is the single place that decides
+                // Copy vs Move AND records the transfer, so the ownership
+                // bookkeeping cannot drift from the emitted operand.
                 emitAssign(bindPlace, MIRRValueUse{placeToOperand(std::move(payload))});
             }
         }
+
+        // The scrutinee temp is CONSUMED from here on: this arm took the active
+        // payload (moved into the binding, or copied out for a Copy payload), and
+        // every OTHER variant's slot is uninitialized on this path. Mark the temp
+        // fully moved BEFORE the body so that an early exit from it — ret / break /
+        // continue, all of which run dropOwnedLocalsFrom — cannot drop the temp.
+        // Without this, emitDrop sees the partial-move record of the payload and
+        // decomposes the drop over the remaining fields, emitting a drop for a
+        // SIBLING VARIANT slot that was never written, i.e. freeing uninitialized
+        // memory: `enum P { A(String), B(String) }` matched by an arm that returns
+        // early drops B_0 on the A path. (Observable with a Drop counter: the bogus
+        // drop runs exactly once per early exit.)
+        // The wildcard arm below still drops the whole enum EXPLICITLY through
+        // emit(MIRStmtDrop), which this bookkeeping deliberately does not gate.
+        movedLocals_.insert(mval.index);
+        partiallyMovedFields_.erase(mval.index);
 
         // A wildcard arm over a possibly non-Copy enum releases the active
         // payload via the whole-enum tag-aware drop glue.
@@ -1330,6 +1344,9 @@ MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
     if (auto *ref = dynamic_cast<HIRRef *>(expr))
         return buildRef(ref);
 
+    if (auto *tryExpr = dynamic_cast<HIRTry *>(expr))
+        return buildTry(tryExpr);
+
     throw std::runtime_error("MIRBuilder::buildExpr: unhandled HIRExpr subtype");
 }
 
@@ -1478,6 +1495,125 @@ MIRPlace MIRBuilder::buildRef(HIRRef *ref)
     return tmp;
 }
 
+// ── error propagation: `expr?` ────────────────────────────────────────────────
+// The operand (a Result value, checked by sema) is moved into an owned temp, then:
+//   tag == Ok  → the Ok payload is moved/copied into the result temp, and control
+//                joins the following code;
+//   otherwise  → `Err(payload)` is built into the RETURN SLOT and the function
+//                returns (the enclosing function returns a Result with the same
+//                layout, so the slot type matches the struct init).
+// Both paths CONSUME the scrutinee temp: its active payload belongs to the
+// binding/return value afterwards, and the other variant slot was never written,
+// so the temp must never be dropped (the same rule buildMatch follows).
+MIRPlace MIRBuilder::buildTry(HIRTry *node)
+{
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+
+    MIRPlace scrutinee = makeTempPlace(node->expr->type);
+    emitAssign(scrutinee, MIRRValueUse{exprToOperand(node->expr.get())});
+    movedLocals_.insert(scrutinee.index);
+    partiallyMovedFields_.erase(scrutinee.index);
+
+    MIRPlace result = makeTempPlace(node->type);
+    // The result slot is written only on the Ok path, so mark it consumed up
+    // front: the Err path runs dropOwnedLocalsFrom(0) BEFORE any write, and a
+    // non-Copy payload type would otherwise be dropped uninitialized. The
+    // emitAssign on the Ok path re-arms ownership (it erases this entry).
+    movedLocals_.insert(result.index);
+
+    auto resultTy = std::dynamic_pointer_cast<CustomType>(body_->returnType);
+    auto operandCt = std::dynamic_pointer_cast<CustomType>(node->expr->type);
+    if (!resultTy || !operandCt || !operandCt->isEnum())
+        return result; // sema already reported; keep the MIR well-formed
+
+    int64_t okIndex = -1;
+    int64_t errIndex = -1;
+    std::string okSlot;
+    std::string errSlot;
+    std::shared_ptr<Type> errPayloadTy;
+    for (size_t i = 0; i < operandCt->getVariants().size(); ++i)
+    {
+        const auto &v = operandCt->getVariants()[i];
+        if (v.name == "Ok" && !v.payloadTypes.empty())
+        {
+            okIndex = (int64_t)i;
+            okSlot = v.name + "_0";
+        }
+        else if (v.name == "Err" && !v.payloadTypes.empty())
+        {
+            errIndex = (int64_t)i;
+            errSlot = v.name + "_0";
+            errPayloadTy = v.payloadTypes[0];
+        }
+    }
+    if (okIndex < 0 || errIndex < 0)
+        return result; // sema already reported
+
+    BasicBlockId okId = newBlock("try_ok");
+    BasicBlockId errId = newBlock("try_err");
+    BasicBlockId joinId = newBlock("try_join");
+
+    // Discriminant test: `if __r.__tag == OkIndex`.
+    MIRPlace tagPlace = scrutinee;
+    tagPlace.projections.push_back(Projection{ProjectionKind::Field, "__tag", 0});
+    tagPlace.type = i32Ty;
+    MIRConst tagConst;
+    tagConst.kind = MIRConst::Kind::Int;
+    tagConst.value = okIndex;
+    tagConst.type = i32Ty;
+    MIRPlace cond = makeTempPlace(boolTy);
+    emitAssign(cond, MIRRValueBinaryOp{
+                         .op = MIRRValueBinaryOp::Op::Eq,
+                         .left = MIROperand(MIRCopy{tagPlace}),
+                         .right = MIROperand(tagConst),
+                         .type = boolTy,
+                     });
+    sealBlock(curBB_, MIRTermBranch{
+                          .cond = MIROperand(MIRCopy{cond}),
+                          .thenBlock = okId,
+                          .elseBlock = errId,
+                      });
+
+    // ── Ok: carry the payload on ─────────────────────────────────────────────
+    switchTo(okId);
+    {
+        MIRPlace payload = scrutinee;
+        payload.projections.push_back(Projection{ProjectionKind::Field, okSlot, 0});
+        payload.type = node->type;
+        emitAssign(result, MIRRValueUse{placeToOperand(std::move(payload))});
+    }
+    sealBlock(curBB_, MIRTermGoto{.target = joinId});
+
+    // ── Err: return Err(payload) ─────────────────────────────────────────────
+    switchTo(errId);
+    {
+        MIRPlace payload = scrutinee;
+        payload.projections.push_back(Projection{ProjectionKind::Field, errSlot, 0});
+        payload.type = errPayloadTy;
+
+        std::vector<std::pair<std::string, MIROperand>> fields;
+        MIRConst errTag;
+        errTag.kind = MIRConst::Kind::Int;
+        errTag.value = errIndex;
+        errTag.type = i32Ty;
+        fields.emplace_back("__tag", MIROperand(errTag));
+        fields.emplace_back(errSlot, placeToOperand(std::move(payload)));
+
+        MIRPlace ret0{.base = PlaceBase::Local, .index = 0, .name = "_0", .projections = {}, .type = body_->returnType};
+        emitAssign(ret0, MIRRValueStructInit{
+                            .structName = resultTy->getName(),
+                            .fields = std::move(fields),
+                            .type = body_->returnType,
+                        });
+        dropOwnedLocalsFrom(0);
+        sealBlock(curBB_, MIRTermReturn{.value = std::nullopt});
+    }
+
+    switchTo(joinId);
+    return result;
+}
+
 // ── function / method calls ───────────────────────────────────────────────────
 
 MIRPlace MIRBuilder::buildCall(HIRCall *call)
@@ -1554,10 +1690,11 @@ MIRPlace MIRBuilder::buildMemberAccess(HIRMemberAccess *ma)
     return obj;
 }
 
-// ── array / pointer indexing: a[i], s.data[i] ────────────────────────────────
-// The object's place is built first; if it is a reference (e.g. `s.data:
-// &mut i8`) a Deref projection is APPENDED to load the base pointer, then an
-// Index projection GEPs from it. lowerPlaceAsPtr already lowers Index via GEP.
+// ── array / pointer indexing: a[i], p[i] ─────────────────────────────────────
+// The object's place is built first; if it is an indirection (a reference, or
+// the heap buffer `p: *mut i8`) a Deref projection is APPENDED to load the
+// base pointer, then an Index projection GEPs from it (with a bounds check
+// for real arrays only). lowerPlaceAsPtr already lowers Index via GEP.
 MIRPlace MIRBuilder::buildIndexAccess(HIRIndexAccess *ia)
 {
     MIRPlace base = buildExpr(ia->object.get());
@@ -1565,11 +1702,17 @@ MIRPlace MIRBuilder::buildIndexAccess(HIRIndexAccess *ia)
     // Deref a reference-typed base (append — the reference is the VALUE of the
     // object place, e.g. the `data` field; `&a` / `&mut a` objects get the same
     // treatment via their empty projection prefix).
-    while (base.type->getKind() == Type::Kind::Reference)
+    // A raw pointer base (the heap-buffer case, `data: *mut i8`) is lowered
+    // exactly like a reference: load the pointer VALUE out of the slot, then GEP
+    // from it. No bounds check is generated — that is the documented contract of
+    // a raw pointer, and sema only accepts it inside the standard library.
+    while (base.type->isPointerLike())
     {
         base.projections.push_back(Projection{.kind = ProjectionKind::Deref});
-        auto refTy = std::static_pointer_cast<ReferenceType>(base.type);
-        base.type = refTy->getBaseType();
+        auto baseKind = base.type->getKind();
+        base.type = baseKind == Type::Kind::Reference
+                        ? std::static_pointer_cast<ReferenceType>(base.type)->getBaseType()
+                        : std::static_pointer_cast<PointerType>(base.type)->getBaseType();
     }
 
     // Materialize the index into a fresh temp so the projection can reference a

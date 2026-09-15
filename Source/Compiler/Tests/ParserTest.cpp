@@ -62,13 +62,13 @@ TEST_F(ParserTest, DuplicateTraitRejected)
 
 TEST_F(ParserTest, TraitThenStructSameNameRejected)
 {
-    parseSource("trait A { fn f(); } struct A { x: i32 }");
+    parseSource("trait A { fn f(); } struct A { pub x: i32 }");
     EXPECT_GT(Logger::GetErrorCount(), 0) << "struct after trait with same name must be rejected";
 }
 
 TEST_F(ParserTest, StructThenTraitSameNameRejected)
 {
-    parseSource("struct A { x: i32 } trait A { fn f(); }");
+    parseSource("struct A { pub x: i32 } trait A { fn f(); }");
     EXPECT_GT(Logger::GetErrorCount(), 0) << "trait after struct with same name must be rejected";
 }
 
@@ -88,7 +88,7 @@ TEST_F(ParserTest, DistinctTraitNamesAccepted)
 TEST_F(ParserTest, MethodSelfParamPosition)
 {
     std::string source =
-        "struct S { v: i32 }\n"
+        "struct S { pub v: i32 }\n"
         "impl S {\n"
         "    fn read(self: &S) -> i32 { ret self.v; }\n"
         "}";
@@ -106,11 +106,11 @@ TEST_F(ParserTest, MethodSelfParamPosition)
     ASSERT_TRUE(method->selfParam.has_value());
     auto &selfParam = method->selfParam.value();
 
-    // Line 1 = "struct S { v: i32 }\n" (19 chars incl. the space before `}`, +1
-    // newline = 20), line 2 = "impl S {\n" (8 + 1 = 9), so line 3 starts at index
-    // 29; `self` is col 13 and "self: &S" is 8 chars. The recorder is now built
+    // Line 1 = "struct S { pub v: i32 }\n" (23 chars incl. the space before `}`, +1
+    // newline = 24), line 2 = "impl S {\n" (8 + 1 = 9), so line 3 starts at index
+    // 33; `self` is col 13 and "self: &S" is 8 chars. The recorder is now built
     // before `self` is consumed so the span covers the whole self parameter.
-    checkPosition(selfParam.get(), 3, 13, 29, 8);
+    checkPosition(selfParam.get(), 3, 13, 33, 8);
     EXPECT_EQ(selfParam->isRef, true);
     EXPECT_EQ(selfParam->isMut, false);
 }
@@ -534,7 +534,7 @@ TEST_F(ParserTest, ComplexExpressionPosition)
 
 TEST_F(ParserTest, ValidStructDefinition)
 {
-    parseSource("struct S { a: i32, b: f64 }");
+    parseSource("struct S { pub a: i32, pub b: f64 }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
     auto &stmts = context->program.globalStatements;
     ASSERT_EQ(stmts.size(), 1);
@@ -552,7 +552,7 @@ TEST_F(ParserTest, ValidEnumDefinition)
 
 TEST_F(ParserTest, ValidImplBlock)
 {
-    parseSource("struct S { v: i32 } impl S { fn get(self: &S) -> i32 { ret self.v; } }");
+    parseSource("struct S { pub v: i32 } impl S { fn get(self: &S) -> i32 { ret self.v; } }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
     auto &stmts = context->program.globalStatements;
     ASSERT_EQ(stmts.size(), 2);
@@ -573,7 +573,7 @@ TEST_F(ParserTest, ValidGenericFunction)
 
 TEST_F(ParserTest, ValidGenericStruct)
 {
-    parseSource("struct Box<T> { v: T }");
+    parseSource("struct Box<T> { pub v: T }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -633,6 +633,35 @@ TEST_F(ParserTest, ValidArrayType)
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
+// ── raw pointer types `*T` / `*mut T` ──────────────────────────────────────
+// A leading `*` in TYPE position is unambiguous (the language has no deref
+// operator in expressions), and no new reserved word is introduced for it.
+
+TEST_F(ParserTest, ValidPointerType)
+{
+    parseSource("fn f(p: *mut i8) -> i32 { ret 0; } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidSharedPointerType)
+{
+    parseSource("struct Buf { pub data: *i8, pub len: i32 } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidPointerToPointerType)
+{
+    // The pointee is parsed recursively: **i8 / *mut *i8 are well-formed types.
+    parseSource("fn f(p: *mut *i8, q: **i8) -> i32 { ret 0; } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, ValidPointerReturnType)
+{
+    parseSource("fn f(p: *mut i8) -> *mut i8 { ret p; } fn main() -> i32 { ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
 TEST_F(ParserTest, ValidGlobalVar)
 {
     parseSource("let g = 5; fn main() -> i32 { ret g; }");
@@ -654,7 +683,7 @@ TEST_F(ParserTest, ValidOperatorChain)
 
 TEST_F(ParserTest, ValidNestedStructLiteral)
 {
-    parseSource("struct A { x: i32 } struct B { a: A }"
+    parseSource("struct A { pub x: i32 } struct B { pub a: A }"
                 " fn main() -> i32 { let b = B { a: A { x: 1 } }; ret b.a.x; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
@@ -686,7 +715,7 @@ TEST_F(ParserTest, ValidMultiLineSource)
 
 TEST_F(ParserTest, ValidMethodWithMutSelf)
 {
-    parseSource("struct S { v: i32 } impl S { fn set(self: &mut S, d: i32) { self.v = d; } }");
+    parseSource("struct S { pub v: i32 } impl S { fn set(self: &mut S, d: i32) { self.v = d; } }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -704,7 +733,7 @@ TEST_F(ParserTest, ValidCharStringMix)
 
 TEST_F(ParserTest, ValidStructInitMemberAccess)
 {
-    parseSource("struct P { x: i32, y: i32 } fn main() -> i32 {"
+    parseSource("struct P { pub x: i32, pub y: i32 } fn main() -> i32 {"
                 " let p = P { x: 1, y: 2 }; ret p.x + p.y; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
@@ -732,7 +761,7 @@ TEST_F(ParserTest, MissingLBraceStruct)
 
 TEST_F(ParserTest, MissingStructFieldType)
 {
-    parseSource("struct S { a: }");
+    parseSource("struct S { pub a: }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
@@ -756,7 +785,7 @@ TEST_F(ParserTest, MissingTypeAnnotation)
 
 TEST_F(ParserTest, DuplicateStructName)
 {
-    parseSource("struct S { a: i32 } struct S { b: i32 }");
+    parseSource("struct S { pub a: i32 } struct S { pub b: i32 }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
@@ -776,13 +805,13 @@ TEST_F(ParserTest, DuplicateFunctionNameNoParseError)
 
 TEST_F(ParserTest, StructThenEnumSameName)
 {
-    parseSource("struct S { a: i32 } enum S { A }");
+    parseSource("struct S { pub a: i32 } enum S { A }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
 TEST_F(ParserTest, EnumThenStructSameName)
 {
-    parseSource("enum E { A } struct E { a: i32 }");
+    parseSource("enum E { A } struct E { pub a: i32 }");
     EXPECT_GT(Logger::GetErrorCount(), 0);
 }
 
@@ -868,7 +897,7 @@ TEST_F(ParserTest, FunctionDefHasBodyAndParams)
 
 TEST_F(ParserTest, StructDefHasMembers)
 {
-    parseSource("struct S { a: i32, b: f64 }");
+    parseSource("struct S { pub a: i32, pub b: f64 }");
     auto def = dynamic_cast<StructDef *>(context->program.globalStatements[0].get());
     ASSERT_NE(def, nullptr);
     EXPECT_EQ(def->name, "S");
@@ -908,7 +937,7 @@ TEST_F(ParserTest, IfStmtNoElseHasNoElseBranch)
 
 TEST_F(ParserTest, GenericStructHasParams)
 {
-    parseSource("struct Box<T, U> { a: T, b: U }");
+    parseSource("struct Box<T, U> { pub a: T, pub b: U }");
     auto def = dynamic_cast<StructDef *>(context->program.globalStatements[0].get());
     ASSERT_NE(def, nullptr);
     EXPECT_EQ(def->genericParams.size(), 2);
@@ -969,7 +998,7 @@ TEST_F(ParserTest, BinaryOpIsLeftAssociative)
 
 TEST_F(ParserTest, StructInitHasMembers)
 {
-    parseSource("struct P { x: i32, y: i32 } fn main() -> i32 { let p = P { x: 1, y: 2 }; ret 0; }");
+    parseSource("struct P { pub x: i32, pub y: i32 } fn main() -> i32 { let p = P { x: 1, y: 2 }; ret 0; }");
     auto func = dynamic_cast<FunctionDef *>(context->program.globalStatements[1].get());
     auto body = dynamic_cast<CompoundStmt *>(func->body.get());
     auto decl = dynamic_cast<DeclStmt *>(body->statements[0].get());
@@ -983,7 +1012,7 @@ TEST_F(ParserTest, StructInitHasMembers)
 
 TEST_F(ParserTest, ValidStructWithReferenceField)
 {
-    parseSource("struct S { p: &i32 } fn main() -> i32 { ret 0; }");
+    parseSource("struct S { pub p: &i32 } fn main() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -1008,7 +1037,7 @@ TEST_F(ParserTest, ValidBareReturnInVoid)
 TEST_F(ParserTest, ValidGenericTraitImpl)
 {
     parseSource("trait T<T> { fn get(self: &Self) -> T; }"
-                " struct S { v: i32 } impl T<i32> for S { fn get(self: &S) -> i32 { ret self.v; } }");
+                " struct S { pub v: i32 } impl T<i32> for S { fn get(self: &S) -> i32 { ret self.v; } }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -1020,21 +1049,21 @@ TEST_F(ParserTest, ValidCallGenericSyntax)
 
 TEST_F(ParserTest, ValidDeepMemberChain)
 {
-    parseSource("struct A { x: i32 } struct B { a: A } fn main() -> i32 {"
+    parseSource("struct A { pub x: i32 } struct B { pub a: A } fn main() -> i32 {"
                 " let b = B { a: A { x: 1 } }; ret b.a.x; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
 TEST_F(ParserTest, ValidConditionalBorrowExpression)
 {
-    parseSource("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 };"
+    parseSource("struct S { pub v: i32 } fn main() -> i32 { let s = S { v: 1 };"
                 " let r = &s; ret r.v; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
 TEST_F(ParserTest, ValidMutBorrowExpression)
 {
-    parseSource("struct S { v: i32 } fn main() -> i32 { let mut s = S { v: 1 };"
+    parseSource("struct S { pub v: i32 } fn main() -> i32 { let mut s = S { v: 1 };"
                 " let r = &mut s; r.v = 2; ret r.v; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
@@ -1101,7 +1130,7 @@ TEST_F(ParserTest, MissingInKeyword)
 TEST_F(ParserTest, StructSelfReferenceNoParseError)
 {
     // A recursive struct field parses fine; the sema rejects it later.
-    parseSource("struct S { next: S } fn main() -> i32 { ret 0; }");
+    parseSource("struct S { pub next: S } fn main() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -1149,7 +1178,7 @@ TEST_F(ParserTest, EnumVariantPayloadCount)
 
 TEST_F(ParserTest, StructImplHasMethods)
 {
-    parseSource("struct S { v: i32 } impl S { fn a(self: &S) -> i32 { ret 0; }"
+    parseSource("struct S { pub v: i32 } impl S { fn a(self: &S) -> i32 { ret 0; }"
                 " fn b(self: &S) -> i32 { ret 0; } }");
     auto impl = dynamic_cast<StructImpl *>(context->program.globalStatements[1].get());
     ASSERT_NE(impl, nullptr);
@@ -1228,7 +1257,7 @@ TEST_F(ParserTest, BreakContinueInLoopsParse)
 
 TEST_F(ParserTest, NestedStructLiteralInInit)
 {
-    parseSource("struct A { x: i32 } fn main() -> i32 { let a = A { x: A { x: 1 }.x }; ret 0; }");
+    parseSource("struct A { pub x: i32 } fn main() -> i32 { let a = A { x: A { x: 1 }.x }; ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -1236,13 +1265,13 @@ TEST_F(ParserTest, NestedStructLiteralInInit)
 
 TEST_F(ParserTest, ValidMutBorrowInStructFieldType)
 {
-    parseSource("struct S { p: &mut i32 } fn main() -> i32 { ret 0; }");
+    parseSource("struct S { pub p: &mut i32 } fn main() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
 TEST_F(ParserTest, ValidEmptyImpl)
 {
-    parseSource("struct S { v: i32 } impl S { } fn main() -> i32 { ret 0; }");
+    parseSource("struct S { pub v: i32 } impl S { } fn main() -> i32 { ret 0; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -1260,7 +1289,7 @@ TEST_F(ParserTest, ValidEnumWithTrailingComma)
 
 TEST_F(ParserTest, ValidCallOnMemberAccess)
 {
-    parseSource("struct S { v: i32 } impl S { fn get(self: &S) -> i32 { ret self.v; } }"
+    parseSource("struct S { pub v: i32 } impl S { fn get(self: &S) -> i32 { ret self.v; } }"
                 " fn main() -> i32 { let s = S { v: 1 }; ret s.get(); }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
@@ -1286,7 +1315,7 @@ TEST_F(ParserTest, ValidArithmeticWithAllOperators)
 
 TEST_F(ParserTest, MissingDotInMemberAccess)
 {
-    parseSource("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret sv; }");
+    parseSource("struct S { pub v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret sv; }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
 
@@ -1316,7 +1345,7 @@ TEST_F(ParserTest, EmptyFunctionParamList)
 
 TEST_F(ParserTest, ValidMultipleMethodsInImpl)
 {
-    parseSource("struct S { v: i32 } impl S { fn a(self: &S) -> i32 { ret self.v; }"
+    parseSource("struct S { pub v: i32 } impl S { fn a(self: &S) -> i32 { ret self.v; }"
                 " fn b(self: &mut S, x: i32) { self.v = x; } }");
     EXPECT_EQ(Logger::GetErrorCount(), 0);
 }
@@ -1379,4 +1408,40 @@ TEST_F(ParserTest, NeverFunctionSignatureShape)
     ASSERT_NE(fnDef, nullptr);
     ASSERT_TRUE(fnDef->returnType.has_value());
     EXPECT_EQ(fnDef->returnType.value()->typeName, "never");
+}
+
+// A trailing question mark parses as a POSTFIX operator: the suffix chain wraps
+// the call in a TryExpr, and further . or [ may follow it.
+TEST_F(ParserTest, PostfixQuestionParsesAsTryExpr)
+{
+    parseSource("fn main() -> i32 { let x = f()?; ret 0; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+
+    auto &globalStmts = context->program.globalStatements;
+    ASSERT_EQ(globalStmts.size(), 1);
+    auto fnDef = dynamic_cast<FunctionDef *>(globalStmts[0].get());
+    ASSERT_NE(fnDef, nullptr);
+    ASSERT_TRUE(fnDef->body != nullptr);
+    auto body = dynamic_cast<CompoundStmt *>(fnDef->body.get());
+    ASSERT_NE(body, nullptr);
+    ASSERT_GE(body->statements.size(), 1u);
+    auto decl = dynamic_cast<DeclStmt *>(body->statements[0].get());
+    ASSERT_NE(decl, nullptr);
+    ASSERT_TRUE(decl->initValue.has_value());
+    auto *tryExpr = dynamic_cast<TryExpr *>(decl->initValue.value().get());
+    ASSERT_NE(tryExpr, nullptr);
+    EXPECT_NE(dynamic_cast<FunctionCall *>(tryExpr->expression.get()), nullptr);
+}
+
+TEST_F(ParserTest, PostfixQuestionThenMemberAccess)
+{
+    // The suffix chain continues after the operator: call, ?, field.
+    parseSource("struct S { pub v: i32 } fn g() -> S { ret S { v: 1 }; } fn main() -> i32 { ret g()?.v; }");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, QuestionCannotStartAnExpression)
+{
+    parseSource("fn main() -> i32 { let x = ?y; ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0) << "a leading ? is not an expression";
 }

@@ -80,12 +80,12 @@ enum class TokenCode
     GT,     // ">"
     LT_EQ,  // "<="
     GT_EQ,  // ">="
-    ASSIGN, // "="
-    NOT,    // !
-    BOR,    // |
-    OR,     // ||
-    AND,    // &&
-
+    ASSIGN,   // "="
+    NOT,      // !
+    BOR,      // |
+    OR,       // ||
+    AND,      // &&
+    QUESTION, // "?" — postfix error propagation (expr?), never a binary operator
     /* Delimiter */
     LBRACE,          // "{"
     RBRACE,          // "}"

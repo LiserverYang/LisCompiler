@@ -160,6 +160,9 @@ llvm::json::Object LspServer::compileAndPublish(const std::string &uri)
     // not shadow a stdlib module), then the document's directory.
     context->searchPaths.push_back(stdLibDir_);
     context->searchPaths.push_back(parentDir(path));
+    // Same directory = the unsafe-core boundary (heap primitives + raw-pointer
+    // ops are stdlib-only), so stdlib modules are not misreported.
+    context->stdLibDirs.push_back(stdLibDir_);
 
     context->filePath = path;
     context->fileValue = docIt->second;
@@ -419,6 +422,12 @@ void LspServer::walkExpr(HIRExpr *expr, const std::string &uri)
     if (auto *r = dynamic_cast<HIRRef *>(expr))
     {
         walkExpr(r->expr.get(), uri);
+        return;
+    }
+    if (auto *t = dynamic_cast<HIRTry *>(expr))
+    {
+        // `expr?`: index the operand too (the operator itself defines no symbol).
+        walkExpr(t->expr.get(), uri);
         return;
     }
     if (auto *s = dynamic_cast<HIRStructInit *>(expr))

@@ -61,10 +61,23 @@ static const char *kStdlibPrologue =
     "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
     "impt string { String };\n"
     "impt chars { is_digit, is_alpha, is_alphanumeric, is_whitespace, digit_to_int };\n"
-    "impt drop { Drop };\n";
+    "impt drop { Drop };\n"
+    // `result` is imported WITHOUT `unwrap_or`: option.lis exports that name too,
+    // and two selective imports of the same bare name are a deliberate conflict.
+    // Tests that want Result::unwrap_or by bare name use kResultPrologue, or call
+    // it qualified (`impt result;` + `result::unwrap_or`).
+    "impt result { Result, is_ok, is_err };\n";
 
 /// Math-only prologue for snippets that DEFINE their own `fn sum` (which would
 /// clash with the iterator module's promoted `sum`).
+/// Prologue for snippets that need Result WITHOUT option (so the bare name
+/// `unwrap_or` resolves to the result module) — plus the Drop/string modules the
+/// helper snippets use.
+static const char *kResultPrologue =
+    "impt result { Result, is_ok, is_err, unwrap_or };\n"
+    "impt string { String };\n"
+    "impt drop { Drop };\n";
+
 static const char *kMathPrologue =
     "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
 
@@ -174,6 +187,9 @@ protected:
         context->args->setArg("o", "2");
         context->args->setArg("filePath", "test.lis");
         context->searchPaths.push_back(stdLibDir.string());
+        // The real lstdlib is also the unsafe-core boundary: the stdlib modules
+        // imported below are the only files allowed to use the heap primitives.
+        context->stdLibDirs.push_back(stdLibDir.string());
 
         // Main source (stdlib imports prepended).
         context->filePath = "test.lis";
@@ -253,6 +269,7 @@ protected:
         }
         context->searchPaths.push_back(modDir.string());
         context->searchPaths.push_back(stdLibDir.string());
+        context->stdLibDirs.push_back(stdLibDir.string());
 
         // Main source (stdlib imports prepended).
         context->filePath = "test.lis";
@@ -627,7 +644,7 @@ TEST_F(RuntimeTest, CastI32ToCharAllowed)
 
 TEST_F(RuntimeTest, CastI8ToCharAllowed)
 {
-    // Byte read back as char (the documented s.data[i] as char pattern).
+    // Byte read back as char (the cast the heap buffer's element reads use).
     expectRun("fn main() -> i32 { let x = 'x' as i8; let c = x as char; ret c as i32; }", 120);
 }
 
@@ -671,7 +688,7 @@ TEST_F(RuntimeTest, SharedRefReceiverReadsThrough)
 TEST_F(RuntimeTest, TraitMixedReceiverKindsRuntime)
 {
     expectRun("trait Mixed { fn read(self: &Self) -> i32; fn write(self: &mut Self, v: i32); }"
-              " struct S { v: i32 } impl Mixed for S {"
+              " struct S { pub v: i32 } impl Mixed for S {"
               " fn read(self: &S) -> i32 { ret self.v; }"
               " fn write(self: &mut S, v: i32) { self.v = v; } }"
               " fn main() -> i32 { let mut s = S { v: 1 }; s.write(7); ret s.read(); }",
@@ -683,7 +700,7 @@ TEST_F(RuntimeTest, TraitMixedReceiverKindsRuntime)
 TEST_F(RuntimeTest, DropGlueRunsAtBlockEnd)
 {
     // A block-end drop must invoke the user Drop impl once (observable side effect).
-    expectRun("let counter = 0; struct X { v: i32 } impl Drop for X { fn drop(self) { counter = counter + 1; } }"
+    expectRun("let counter = 0; struct X { pub v: i32 } impl Drop for X { fn drop(self) { counter = counter + 1; } }"
               " fn main() -> i32 { { let x = X { v: 1 }; } ret counter; }",
         1);
 }
@@ -691,8 +708,8 @@ TEST_F(RuntimeTest, DropGlueRunsAtBlockEnd)
 TEST_F(RuntimeTest, PartialMoveDropNoDoubleFree)
 {
     // Borrow field a, move sibling b, scope-end drop must not double-free.
-    expectRun("struct Inner { v: i32 } impl Drop for Inner { fn drop(self) {} }"
-              " struct Pair { a: Inner, b: Inner }"
+    expectRun("struct Inner { pub v: i32 } impl Drop for Inner { fn drop(self) {} }"
+              " struct Pair { pub a: Inner, pub b: Inner }"
               " fn main() -> i32 { let mut p = Pair { a: Inner{v:1}, b: Inner{v:2} };"
               " let r = &p.a; let v = p.b; let w = r.v; ret w; }",
         1);
@@ -797,7 +814,7 @@ TEST_F(RuntimeTest, EnumVariantIsMoved)
 TEST_F(RuntimeTest, EnumMatchNonCopyPayload)
 {
     // A non-Copy payload is MOVED into the binding; reading it works.
-    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { v: i32 }"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { pub v: i32 }"
                           " fn main() -> i32 { let o = Option::Some(Inner{v: 5}); let mut got = 0;"
                           " match o { Some(x) => { got = x.v; }, None => { got = 99; }, }"
                           " ret got; }",
@@ -808,7 +825,7 @@ TEST_F(RuntimeTest, EnumMatchNonCopyPayload)
 TEST_F(RuntimeTest, EnumMatchNonCopyNoDoubleFree)
 {
     // The moved payload is dropped exactly once (drop glue counter).
-    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { v: i32 }"
+    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { pub v: i32 }"
                           " let ctr = 0; impl Drop for Inner { fn drop(self) { ctr = ctr + 1; } }"
                           " fn main() -> i32 { { let o = Option::Some(Inner{v: 5});"
                           " match o { Some(x) => { }, None => { }, } }"
@@ -1136,7 +1153,7 @@ TEST_F(RuntimeTest, ArrayOfCharsAndLoop)
 
 TEST_F(RuntimeTest, ArrayNonCopyElementRejected)
 {
-    expectCompileFail("struct S { v: i32 } fn main() -> i32 { let a = [S{v:1}]; ret 0; }",
+    expectCompileFail("struct S { pub v: i32 } fn main() -> i32 { let a = [S{v:1}]; ret 0; }",
         "must be Copy");
 }
 
@@ -1153,7 +1170,7 @@ TEST_F(RuntimeTest, StringPushAndGrow)
     // from_lit("hello") + push_char + push_str — exercises the buffer grow path.
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\"); let mut t = s;"
                  " t.push_char(' '); t.push_str(\"world\");"
-                 " print_str(t.to_cstr()); println(); ret t.len; }",
+                 " print_str(t.to_cstr()); println(); ret t.len(); }",
         "hello world\n",
         11);
 }
@@ -1182,14 +1199,13 @@ TEST_F(RuntimeTest, StringIsEmpty)
 TEST_F(RuntimeTest, StringFreedExactlyOnce)
 {
     // A heap-owning struct with a Drop counter: moving it transfers ownership,
-    // so the scope-end drop (which frees the buffer) runs exactly once — never
-    // twice. This is the same single-ownership machinery String uses.
+    // so the scope-end drop runs exactly once — never twice. The heap buffer is
+    // a String now (the heap primitives themselves are stdlib-private).
     expectRun("let frees = 0;"
-              " struct Buf { pub data: &mut i8, pub len: i32 }"
-              " impl Drop for Buf { fn drop(self) { frees = frees + 1; __free(self.data); } }"
+              " struct Buf { pub s: String }"
+              " impl Drop for Buf { fn drop(self) { frees = frees + 1; } }"
               " fn main() -> i32 {"
-              "   let p = __alloc(4);"
-              "   { let b = Buf { data: p, len: 0 }; let c = b; }" // b moved into c, c drops → frees 1
+              "   { let b = Buf { s: String::from_lit(\"abc\") }; let c = b; }" // b moved into c, c drops → frees 1
               "   ret frees; }",
         1);
 }
@@ -1198,7 +1214,7 @@ TEST_F(RuntimeTest, StringMoveTransfersOwnership)
 {
     // After `let t = s;`, s is unusable (single ownership).
     expectCompileFail("fn main() -> i32 { let s = String::from_lit(\"a\");"
-                      " let t = s; let x = s.len; ret x; }",
+                      " let t = s; let x = s.len(); ret x; }",
         "moved");
 }
 
@@ -1211,11 +1227,117 @@ TEST_F(RuntimeTest, ToStringBuiltins)
         0);
 }
 
-TEST_F(RuntimeTest, HeapAllocFree)
+// The heap primitives ARE the compiler's unsafe core: they take raw pointers and
+// lower straight to libc malloc/free/memcpy/strlen with no bounds, lifetime or
+// aliasing checking. They are therefore callable only from the standard library,
+// which is what makes the rest of the language's heap use auditable. The heap
+// path itself is covered end-to-end by the String tests (alloc/grow/free).
+TEST_F(RuntimeTest, HeapPrimitivesAreStdlibOnly)
 {
-    expectRun("fn main() -> i32 { let p = __alloc(8); p[0] = 'x' as i8;"
-              " let c = p[0] as char; __free(p); ret c as i32; }",
-        120);
+    expectCompileFail("fn main() -> i32 { let p = __alloc(8); ret 0; }",
+        "can only be called from the standard library");
+    expectCompileFail("fn main() -> i32 { let p = __alloc(8); __free(p); ret 0; }",
+        "can only be called from the standard library");
+    expectCompileFail("fn f(p: *i8) -> i32 { ret __strlen(p); } fn main() -> i32 { ret 0; }",
+        "can only be called from the standard library");
+}
+
+// Raw-pointer indexing is unchecked C pointer arithmetic — also stdlib-only, and
+// the old "a reference to a primitive is a C buffer" special case is gone.
+TEST_F(RuntimeTest, RawPointerOpsAreStdlibOnly)
+{
+    expectCompileFail("fn f(p: *mut i8) -> i32 { ret p[0] as i32; } fn main() -> i32 { ret 0; }",
+        "only allowed inside the standard library");
+    expectCompileFail("fn f(p: *mut i8) -> &i8 { ret __deref(p); } fn main() -> i32 { ret 0; }",
+        "can only be used inside the standard library");
+    expectCompileFail("fn f(p: &mut i8) -> i32 { ret p[0] as i32; } fn main() -> i32 { ret 0; }",
+        "is not indexable");
+}
+
+// ── raw pointer types (*T / *mut T): the heap buffer's real type ───────────────
+// A raw pointer is a first-class type (parameter, return type, struct field) and
+// lowers to opaque `ptr`. It owns nothing: a struct holding one gets NO drop
+// glue (that is why needsDrop() exists next to isCopyable()).
+
+TEST_F(RuntimeTest, PointerTypeIsAFirstClassType)
+{
+    expectRun("struct Buf { pub data: *mut i8, pub count: i32 }"
+              " fn count_of(b: &Buf) -> i32 { ret b.count; }"
+              " fn take(p: *i8, q: *mut i8) -> i32 { ret 0; }"
+              " fn main() -> i32 { ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, PointerIsNotAnInteger)
+{
+    // Casts stay primitive-to-primitive, so a raw pointer can never be fabricated
+    // from a literal or from an integer: there is no way to forge an address.
+    expectCompileFail("fn main() -> i32 { let p: *mut i8 = 0; ret 0; }",
+        "type mismatch in variable declaration");
+}
+
+TEST_F(RuntimeTest, ArrayOfRawPointersRejected)
+{
+    // Same rule as reference elements: an array of indirections would let an
+    // owner escape into a copied element.
+    expectCompileFail("fn f(a: [*mut i8; 2]) -> i32 { ret 0; } fn main() -> i32 { ret 0; }",
+        "raw pointer");
+}
+
+// ── field visibility (`pub`) is ENFORCED ───────────────────────────────────────
+// A private field is reachable only from a method of the declaring type. That is
+// what lets a type keep an invariant: String's data/len/cap stay consistent
+// because no other code can touch them.
+
+TEST_F(RuntimeTest, PrivateFieldIsInaccessibleOutsideItsType)
+{
+    expectCompileFail("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret s.v; }",
+        "field 'v' of 'S' is private");
+}
+
+TEST_F(RuntimeTest, PrivateFieldCannotBeConstructedOutsideItsType)
+{
+    expectCompileFail("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret 0; }",
+        "field 'v' of 'S' is private");
+}
+
+TEST_F(RuntimeTest, PublicFieldIsAccessibleAnywhere)
+{
+    expectRun("struct S { pub v: i32 } fn main() -> i32 { let s = S { v: 5 }; ret s.v; }", 5);
+}
+
+TEST_F(RuntimeTest, PrivateFieldIsAccessibleFromItsTypesOwnMethods)
+{
+    // An instance method AND a static one — the latter is how a type constructs
+    // itself (String::new builds the private triple). The declaring type is what
+    // matters, not the kind of method.
+    expectRun("struct S { v: i32 } impl S { fn make() -> S { ret S { v: 7 }; }"
+              " fn get(self: &S) -> i32 { ret self.v; } }"
+              " fn main() -> i32 { let s = S::make(); ret s.get(); }",
+        7);
+}
+
+TEST_F(RuntimeTest, PrivateFieldIsInaccessibleFromAFreeFunction)
+{
+    expectCompileFail("struct S { v: i32 } fn peek(s: &S) -> i32 { ret s.v; }"
+                      " fn main() -> i32 { ret 0; }",
+        "field 'v' of 'S' is private");
+}
+
+TEST_F(RuntimeTest, PrivateFieldIsInaccessibleAcrossModules)
+{
+    // The same rule across module boundaries — another module cannot read the
+    // field (the diagnostic itself is asserted by the tests above).
+    EXPECT_FALSE(compileMulti(
+        "impt types { S };\nfn main() -> i32 { let s = S::make(); ret s.v; }",
+        {{"types", "struct S { v: i32 } impl S { fn make() -> S { ret S { v: 1 }; } }"}}));
+}
+
+TEST_F(RuntimeTest, StringFieldsArePrivateButAccessorsWork)
+{
+    expectCompileFail("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len; }",
+        "field 'len' of 'String' is private");
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len(); }", 2);
 }
 
 // ── Step 23 robustness fixes ──────────────────────────────────────────────────
@@ -1264,11 +1386,14 @@ TEST_F(RuntimeTest, ArrayAsFunctionReturnRejected)
 }
 
 // B5: indexing a reference to a struct is illegal (codegen has no element type).
+// Since the heap-safety work the rejection is stated in terms of the rule that
+// replaced the old "a reference to a primitive is a C buffer" special case:
+// C-style indexing requires a RAW pointer, and only the stdlib may do it.
 TEST_F(RuntimeTest, IndexRefToStructRejected)
 {
-    expectCompileFail("struct Foo { v: i32 } fn main() -> i32 { let mut f = Foo{v:1};"
+    expectCompileFail("struct Foo { pub v: i32 } fn main() -> i32 { let mut f = Foo{v:1};"
                       " let r = &mut f; ret r[0].v; }",
-        "cannot index a reference to type");
+        "is not indexable");
 }
 
 // C1: global initializers must be literals — else they'd silently zero-initialize.
@@ -1315,9 +1440,14 @@ TEST_F(RuntimeTest, WriteThroughSharedRefRejected)
 // E2 (runtime): write THROUGH a &mut field of an immutable binding is allowed.
 TEST_F(RuntimeTest, WriteThroughMutFieldIndex)
 {
-    expectOutput("fn main() -> i32 { let s = String::from_lit(\"hi\"); s.data[0] = 'x' as i8;"
-                 " print_str(s.to_cstr()); println(); ret 0; }",
-        "xi\n",
+    // The old spelling wrote through String's `&mut i8` buffer field. That buffer
+    // is a stdlib-private raw pointer now, so the same rule — writing through a
+    // `&mut` FIELD does not require the root binding to be `mut` — is exercised
+    // with a `&mut [i32; N]` field.
+    expectOutput("struct Holder { pub buf: &mut [i32; 2] }"
+                 " fn main() -> i32 { let mut a = [1, 2]; let h = Holder { buf: &mut a };"
+                 " h.buf[0] = 5; print_int(a[0]); println(); ret 0; }",
+        "5\n",
         0);
 }
 
@@ -1364,7 +1494,7 @@ TEST_F(RuntimeTest, StringPushCharGrowsAtCap)
 {
     expectRun("fn main() -> i32 { let mut s = String::new();"
               " let mut i = 0; while i < 16 { s.push_char('a'); i = i + 1; }"
-              " ret s.len; }",
+              " ret s.len(); }",
         16);
 }
 
@@ -1922,7 +2052,7 @@ TEST_F(RuntimeTest, ForVarNotLeakedOutside)
 TEST_F(RuntimeTest, ForOnCustomIterator)
 {
     // A struct implementing Iterator<i32> is usable in for.
-    expectRun("struct R { cur: i32, end: i32 } impl Iterator<i32> for R {"
+    expectRun("struct R { pub cur: i32, pub end: i32 } impl Iterator<i32> for R {"
               " fn next(self: &mut Self) -> Option<i32> {"
               " if self.cur < self.end { let v = self.cur; self.cur = self.cur + 1;"
               " ret Option::Some(v); } ret Option::None; } }"
@@ -2216,21 +2346,21 @@ TEST_F(RuntimeTest, GenericPickLarger)
 
 TEST_F(RuntimeTest, GenericStructPair)
 {
-    expectRun("struct Pair<T> { a: T, b: T } fn main() -> i32 {"
+    expectRun("struct Pair<T> { pub a: T, pub b: T } fn main() -> i32 {"
               " let p = Pair { a: 3, b: 4 }; ret p.a + p.b; }",
         7);
 }
 
 TEST_F(RuntimeTest, GenericStructNested)
 {
-    expectRun("struct Box<T> { v: T } fn main() -> i32 { let b = Box { v: Box { v: 5 } };"
+    expectRun("struct Box<T> { pub v: T } fn main() -> i32 { let b = Box { v: Box { v: 5 } };"
               " ret b.v.v; }",
         5);
 }
 
 TEST_F(RuntimeTest, GenericStructMethod)
 {
-    expectRun("struct W<T> { v: T } impl W<T> { fn get(self) -> T { ret self.v; } }"
+    expectRun("struct W<T> { pub v: T } impl W<T> { fn get(self) -> T { ret self.v; } }"
               " fn main() -> i32 { let w = W { v: 8 }; ret w.get(); }",
         8);
 }
@@ -2258,7 +2388,7 @@ TEST_F(RuntimeTest, GenericBoundedAddWorks)
 
 TEST_F(RuntimeTest, GenericOperatorOverload)
 {
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
               " let a = V { x: 3 }; let b = V { x: 4 }; ret (a + b).x; }",
         7);
@@ -2302,25 +2432,25 @@ TEST_F(RuntimeTest, ArrayIndexLastElement)
 
 TEST_F(RuntimeTest, StringNewIsEmpty)
 {
-    expectRun("fn main() -> i32 { let s = String::new(); ret s.len; }", 0);
+    expectRun("fn main() -> i32 { let s = String::new(); ret s.len(); }", 0);
 }
 
 TEST_F(RuntimeTest, StringFromLiteral)
 {
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len; }", 2);
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len(); }", 2);
 }
 
 TEST_F(RuntimeTest, StringPushChars)
 {
     expectRun("fn main() -> i32 { let mut s = String::new();"
-              " s.push_char('a'); s.push_char('b'); ret s.len; }",
+              " s.push_char('a'); s.push_char('b'); ret s.len(); }",
         2);
 }
 
 TEST_F(RuntimeTest, StringPushStr)
 {
     expectRun("fn main() -> i32 { let mut s = String::new(); s.push_str(\"hello\");"
-              " ret s.len; }",
+              " ret s.len(); }",
         5);
 }
 
@@ -2328,7 +2458,7 @@ TEST_F(RuntimeTest, StringGrowPastCap)
 {
     // 30 pushes forces multiple buffer reallocations (cap starts at 16).
     expectRun("fn main() -> i32 { let mut s = String::new(); let mut i = 0;"
-              " while i < 30 { s.push_char('a'); i = i + 1; } ret s.len; }",
+              " while i < 30 { s.push_char('a'); i = i + 1; } ret s.len(); }",
         30);
 }
 
@@ -2363,8 +2493,10 @@ TEST_F(RuntimeTest, StringToCstrPrints)
 
 TEST_F(RuntimeTest, StringMutateByte)
 {
+    // `s.data[0] = 'x'` is no longer expressible from user code (the buffer is a
+    // stdlib-private raw pointer), so the round-trip goes through the safe API.
     expectRun("fn main() -> i32 { let mut s = String::from_lit(\"hi\");"
-              " s.data[0] = 'x' as i8; ret s.data[0] as i32; }",
+              " s.push_char('x'); match s.index(2) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
         120);
 }
 
@@ -2380,7 +2512,7 @@ TEST_F(RuntimeTest, StringPushStrThenIndex)
 
 TEST_F(RuntimeTest, OpOverloadSubtraction)
 {
-    expectRun("struct V { x: i32 } impl Sub for V { fn sub(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Sub for V { fn sub(self, o: Self) -> V {"
               " ret V { x: self.x - o.x }; } } fn main() -> i32 {"
               " let a = V { x: 10 }; let b = V { x: 3 }; ret (a - b).x; }",
         7);
@@ -2388,7 +2520,7 @@ TEST_F(RuntimeTest, OpOverloadSubtraction)
 
 TEST_F(RuntimeTest, OpOverloadMultiplication)
 {
-    expectRun("struct V { x: i32 } impl Mul for V { fn mul(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Mul for V { fn mul(self, o: Self) -> V {"
               " ret V { x: self.x * o.x }; } } fn main() -> i32 {"
               " let a = V { x: 6 }; let b = V { x: 7 }; ret (a * b).x; }",
         42);
@@ -2396,7 +2528,7 @@ TEST_F(RuntimeTest, OpOverloadMultiplication)
 
 TEST_F(RuntimeTest, OpOverloadDivision)
 {
-    expectRun("struct V { x: i32 } impl Div for V { fn div(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Div for V { fn div(self, o: Self) -> V {"
               " ret V { x: self.x / o.x }; } } fn main() -> i32 {"
               " let a = V { x: 20 }; let b = V { x: 4 }; ret (a / b).x; }",
         5);
@@ -2404,7 +2536,7 @@ TEST_F(RuntimeTest, OpOverloadDivision)
 
 TEST_F(RuntimeTest, OpOverloadRemainder)
 {
-    expectRun("struct V { x: i32 } impl Rem for V { fn rem(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Rem for V { fn rem(self, o: Self) -> V {"
               " ret V { x: self.x % o.x }; } } fn main() -> i32 {"
               " let a = V { x: 17 }; let b = V { x: 5 }; ret (a % b).x; }",
         2);
@@ -2413,7 +2545,7 @@ TEST_F(RuntimeTest, OpOverloadRemainder)
 TEST_F(RuntimeTest, OpOverloadChainedPrecedence)
 {
     // a + b * c: * binds tighter than + even under overloading → 1 + 6 = 7.
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } impl Mul for V { fn mul(self, o: Self) -> V {"
               " ret V { x: self.x * o.x }; } } fn main() -> i32 {"
               " let a = V { x: 1 }; let b = V { x: 2 }; let c = V { x: 3 };"
@@ -2423,7 +2555,7 @@ TEST_F(RuntimeTest, OpOverloadChainedPrecedence)
 
 TEST_F(RuntimeTest, OpOverloadNotEqual)
 {
-    expectRun("struct V { x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
+    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
               " ret self.x == o.x; } fn ne(self, o: Self) -> bool { ret self.x != o.x; } }"
               " fn main() -> i32 { let a = V { x: 1 }; let b = V { x: 2 };"
               " if a != b { ret 1; } ret 0; }",
@@ -2432,7 +2564,7 @@ TEST_F(RuntimeTest, OpOverloadNotEqual)
 
 TEST_F(RuntimeTest, OpOverloadEqual)
 {
-    expectRun("struct V { x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
+    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
               " ret self.x == o.x; } fn ne(self, o: Self) -> bool { ret self.x != o.x; } }"
               " fn main() -> i32 { let a = V { x: 5 }; let b = V { x: 5 };"
               " if a == b { ret 1; } ret 0; }",
@@ -2441,7 +2573,7 @@ TEST_F(RuntimeTest, OpOverloadEqual)
 
 TEST_F(RuntimeTest, OpOverloadLessThan)
 {
-    expectRun("struct V { x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
+    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
               " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
               " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
               " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
@@ -2452,7 +2584,7 @@ TEST_F(RuntimeTest, OpOverloadLessThan)
 
 TEST_F(RuntimeTest, OpOverloadOnGeneric)
 {
-    expectRunWithPrologue("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRunWithPrologue("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
                           " ret V { x: self.x + o.x }; } } fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
                           " fn main() -> i32 { let r = sum(V { x: 2 }, V { x: 5 }); ret r.x; }",
         kMathPrologue,
@@ -3037,13 +3169,15 @@ TEST_F(RuntimeTest, ExamplePrint)
 TEST_F(RuntimeTest, ExampleString)
 {
     expectExample("string", 0);
+    // Result + the `?` operator (exit code = the first successful parse, 42).
+    expectExample("result", 42);
 }
 
 // ── B2: more drop semantics ────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, DropImplCompilesAndRuns)
 {
-    expectRun("struct D { v: i32 } impl Drop for D { fn drop(self) { } }"
+    expectRun("struct D { pub v: i32 } impl Drop for D { fn drop(self) { } }"
               " fn main() -> i32 { let d = D { v: 5 }; ret d.v; }",
         5);
 }
@@ -3052,7 +3186,7 @@ TEST_F(RuntimeTest, DropRunsAtScopeEnd)
 {
     // The drop body runs when the value goes out of scope; observable via a
     // global counter written in drop. (Globals use `let`, no `mut` keyword.)
-    expectRun("let dropped = 0; struct D { v: i32 } impl Drop for D {"
+    expectRun("let dropped = 0; struct D { pub v: i32 } impl Drop for D {"
               " fn drop(self) { dropped = dropped + 1; } }"
               " fn main() -> i32 { { let d = D { v: 1 }; } ret dropped; }",
         1);
@@ -3060,7 +3194,7 @@ TEST_F(RuntimeTest, DropRunsAtScopeEnd)
 
 TEST_F(RuntimeTest, DropGenericType)
 {
-    expectRun("struct Box<T> { v: T } impl Drop for Box<i32> { fn drop(self) { } }"
+    expectRun("struct Box<T> { pub v: T } impl Drop for Box<i32> { fn drop(self) { } }"
               " fn main() -> i32 { let b = Box { v: 5 }; ret b.v; }",
         5);
 }
@@ -3068,7 +3202,7 @@ TEST_F(RuntimeTest, DropGenericType)
 TEST_F(RuntimeTest, DropMultipleValues)
 {
     // Two values of the same Drop type → the counter reaches 2.
-    expectRun("let dropped = 0; struct D { v: i32 } impl Drop for D {"
+    expectRun("let dropped = 0; struct D { pub v: i32 } impl Drop for D {"
               " fn drop(self) { dropped = dropped + 1; } }"
               " fn main() -> i32 { { let a = D { v: 1 }; let b = D { v: 2 }; } ret dropped; }",
         2);
@@ -3076,8 +3210,8 @@ TEST_F(RuntimeTest, DropMultipleValues)
 
 TEST_F(RuntimeTest, DropFieldWithNestedDrop)
 {
-    expectRun("struct Inner { v: i32 } impl Drop for Inner { fn drop(self) { } }"
-              " struct Outer { i: Inner, v: i32 } impl Drop for Outer { fn drop(self) { } }"
+    expectRun("struct Inner { pub v: i32 } impl Drop for Inner { fn drop(self) { } }"
+              " struct Outer { pub i: Inner, pub v: i32 } impl Drop for Outer { fn drop(self) { } }"
               " fn main() -> i32 { let o = Outer { i: Inner { v: 1 }, v: 2 }; ret o.v; }",
         2);
 }
@@ -3085,7 +3219,7 @@ TEST_F(RuntimeTest, DropFieldWithNestedDrop)
 TEST_F(RuntimeTest, DropStringFrees)
 {
     // String has impl Drop (frees the buffer) — must not double-free or leak.
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len; }", 2);
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len(); }", 2);
 }
 
 // ── B2: more enums and match ───────────────────────────────────────────────────
@@ -3167,7 +3301,7 @@ TEST_F(RuntimeTest, StringEmptyNewIndex)
 
 TEST_F(RuntimeTest, StringPushStrToEmpty)
 {
-    expectRun("fn main() -> i32 { let mut s = String::new(); s.push_str(\"abc\"); ret s.len; }", 3);
+    expectRun("fn main() -> i32 { let mut s = String::new(); s.push_str(\"abc\"); ret s.len(); }", 3);
 }
 
 TEST_F(RuntimeTest, StringIndexEachPosition)
@@ -3183,22 +3317,28 @@ TEST_F(RuntimeTest, StringIndexEachPosition)
 
 TEST_F(RuntimeTest, StringMutateAndGrow)
 {
+    // Grows the buffer (capacity doubling + memcpy + free of the old block) and
+    // keeps the appended content readable at the far end.
     expectRun("fn main() -> i32 { let mut s = String::from_lit(\"hi\");"
-              " s.data[0] = 'x' as i8; s.push_char('!'); ret s.len; }",
-        3);
+              " let mut i = 0; while i < 30 { s.push_char('!'); i = i + 1; }"
+              " match s.index(31) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
+        33);
 }
 
 TEST_F(RuntimeTest, StringDoubleAppend)
 {
     expectRun("fn main() -> i32 { let mut s = String::new();"
-              " s.push_str(\"ab\"); s.push_str(\"cd\"); ret s.len; }",
+              " s.push_str(\"ab\"); s.push_str(\"cd\"); ret s.len(); }",
         4);
 }
 
 TEST_F(RuntimeTest, StringToCstrLengthMatches)
 {
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"hello\");"
-              " let p = s.to_cstr(); ret __strlen(p); }",
+    // `to_cstr` returns a borrow of the buffer; it must be exactly the content
+    // (no `__strlen` — the heap primitives are stdlib-only now).
+    expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\");"
+                 " print_str(s.to_cstr()); ret s.len(); }",
+        "hello",
         5);
 }
 
@@ -3213,7 +3353,7 @@ TEST_F(RuntimeTest, StringNewThenPushStrThenIndex)
 
 TEST_F(RuntimeTest, OpOverloadGreaterThan)
 {
-    expectRun("struct V { x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
+    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
               " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
               " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
               " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
@@ -3226,7 +3366,7 @@ TEST_F(RuntimeTest, OpOverloadLeGe)
 {
     // Operator-overload calls consume their operands (by-value self/other), so
     // each comparison needs fresh struct values.
-    expectRun("struct V { x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
+    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
               " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
               " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
               " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
@@ -3238,7 +3378,7 @@ TEST_F(RuntimeTest, OpOverloadLeGe)
 
 TEST_F(RuntimeTest, OpOverloadBitAnd)
 {
-    expectRun("struct M { x: i32 } impl BitAnd for M { fn bitand(self, o: Self) -> M {"
+    expectRun("struct M { pub x: i32 } impl BitAnd for M { fn bitand(self, o: Self) -> M {"
               " ret M { x: self.x & o.x }; } } fn main() -> i32 {"
               " let a = M { x: 6 }; let b = M { x: 3 }; ret (a & b).x; }",
         2);
@@ -3246,7 +3386,7 @@ TEST_F(RuntimeTest, OpOverloadBitAnd)
 
 TEST_F(RuntimeTest, OpOverloadBitOr)
 {
-    expectRun("struct M { x: i32 } impl BitOr for M { fn bitor(self, o: Self) -> M {"
+    expectRun("struct M { pub x: i32 } impl BitOr for M { fn bitor(self, o: Self) -> M {"
               " ret M { x: self.x | o.x }; } } fn main() -> i32 {"
               " let a = M { x: 6 }; let b = M { x: 3 }; ret (a | b).x; }",
         7);
@@ -3254,7 +3394,7 @@ TEST_F(RuntimeTest, OpOverloadBitOr)
 
 TEST_F(RuntimeTest, OpOverloadChainThree)
 {
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
               " let a = V { x: 1 }; let b = V { x: 2 }; let c = V { x: 3 };"
               " let r = a + b + c; ret r.x; }",
@@ -3263,7 +3403,7 @@ TEST_F(RuntimeTest, OpOverloadChainThree)
 
 TEST_F(RuntimeTest, OpOverloadMixedWithPrimitive)
 {
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
               " let a = V { x: 10 }; let b = V { x: 5 }; let v = a + b;"
               " ret v.x + 100; }",
@@ -3351,7 +3491,7 @@ TEST_F(RuntimeTest, GlobalShadowingRejected)
 
 TEST_F(RuntimeTest, GenericSwapLikeViaStruct)
 {
-    expectRun("struct Pair<T> { a: T, b: T } fn main() -> i32 {"
+    expectRun("struct Pair<T> { pub a: T, pub b: T } fn main() -> i32 {"
               " let p = Pair { a: 1, b: 2 }; let q = Pair { a: p.b, b: p.a }; ret q.a; }",
         2);
 }
@@ -3365,7 +3505,7 @@ TEST_F(RuntimeTest, GenericEnumMethod)
 
 TEST_F(RuntimeTest, GenericNestedThreeDeep)
 {
-    expectRun("struct B<T> { v: T } fn main() -> i32 {"
+    expectRun("struct B<T> { pub v: T } fn main() -> i32 {"
               " let b = B { v: B { v: B { v: 3 } } }; ret b.v.v.v; }",
         3);
 }
@@ -3380,7 +3520,7 @@ TEST_F(RuntimeTest, GenericFunctionTwoParams)
 
 TEST_F(RuntimeTest, GenericStructWithTwoTypes)
 {
-    expectRun("struct M<T, U> { a: T, b: U } fn main() -> i32 {"
+    expectRun("struct M<T, U> { pub a: T, pub b: U } fn main() -> i32 {"
               " let m = M { a: 3, b: 'x' }; ret m.a; }",
         3);
 }
@@ -3643,7 +3783,7 @@ TEST_F(RuntimeTest, StringPushManyChars)
 {
     expectRun("fn main() -> i32 { let mut s = String::new();"
               " s.push_char('a'); s.push_char('b'); s.push_char('c');"
-              " s.push_char('d'); s.push_char('e'); ret s.len; }",
+              " s.push_char('d'); s.push_char('e'); ret s.len(); }",
         5);
 }
 
@@ -3658,21 +3798,21 @@ TEST_F(RuntimeTest, StringIndexAfterGrow)
 TEST_F(RuntimeTest, StringMutateThenReadBack)
 {
     expectRun("fn main() -> i32 { let mut s = String::from_lit(\"abc\");"
-              " s.data[1] = 'z' as i8; ret s.data[1] as i32; }",
+              " s.push_str(\"z\"); match s.index(3) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
         122);
 }
 
 TEST_F(RuntimeTest, StringLengthAfterPushStr)
 {
     expectRun("fn main() -> i32 { let mut s = String::from_lit(\"he\");"
-              " s.push_str(\"llo\"); ret s.len; }",
+              " s.push_str(\"llo\"); ret s.len(); }",
         5);
 }
 
 TEST_F(RuntimeTest, StringMultipleInFunction)
 {
     expectRun("fn main() -> i32 { let a = String::from_lit(\"ab\");"
-              " let b = String::from_lit(\"cd\"); ret a.len + b.len; }",
+              " let b = String::from_lit(\"cd\"); ret a.len() + b.len(); }",
         4);
 }
 
@@ -3695,7 +3835,7 @@ TEST_F(RuntimeTest, GenericDoubleParam)
 TEST_F(RuntimeTest, StructMethodMutatingField)
 {
     // A &mut self method that mutates a field through self, observable after.
-    expectRun("struct C { v: i32 } impl C { fn set(self: &mut Self, x: i32) {"
+    expectRun("struct C { pub v: i32 } impl C { fn set(self: &mut Self, x: i32) {"
               " self.v = x; } } fn main() -> i32 { let mut c = C { v: 1 };"
               " c.set(9); ret c.v; }",
         9);
@@ -3703,7 +3843,7 @@ TEST_F(RuntimeTest, StructMethodMutatingField)
 
 TEST_F(RuntimeTest, GenericEnumOfGeneric)
 {
-    expectRun("struct B<T> { v: T } enum O<T> { Some(T), None } fn main() -> i32 {"
+    expectRun("struct B<T> { pub v: T } enum O<T> { Some(T), None } fn main() -> i32 {"
               " let b = B { v: 6 }; let o = O::Some(b);"
               " match o { Some(bx) => { ret bx.v; }, None => { ret 0; } } }",
         6);
@@ -3771,7 +3911,7 @@ TEST_F(RuntimeTest, ArrayRefIndexLoop)
 
 TEST_F(RuntimeTest, OpOverloadDifferentTraits)
 {
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } impl Sub for V { fn sub(self, o: Self) -> V {"
               " ret V { x: self.x - o.x }; } } fn main() -> i32 {"
               " let a = V { x: 10 }; let b = V { x: 3 }; let c = V { x: 2 };"
@@ -3781,7 +3921,7 @@ TEST_F(RuntimeTest, OpOverloadDifferentTraits)
 
 TEST_F(RuntimeTest, OpOverloadFloat)
 {
-    expectOutput("struct V { x: f64 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectOutput("struct V { pub x: f64 } impl Add for V { fn add(self, o: Self) -> V {"
                  " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
                  " let a = V { x: 1.5 }; let b = V { x: 2.5 };"
                  " print_float((a + b).x); println(); ret 0; }",
@@ -3792,7 +3932,7 @@ TEST_F(RuntimeTest, OpOverloadFloat)
 TEST_F(RuntimeTest, OpOverloadMethodCallSyntax)
 {
     // The trait method is directly callable too.
-    expectRun("struct V { x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
+    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
               " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
               " let a = V { x: 3 }; let b = V { x: 4 }; let c = a.add(b); ret c.x; }",
         7);
@@ -3871,7 +4011,7 @@ TEST_F(RuntimeTest, ArithmeticTripleNested)
 TEST_F(RuntimeTest, CompareStringsViaLen)
 {
     expectRun("fn main() -> i32 { let a = String::from_lit(\"aa\");"
-              " let b = String::from_lit(\"bbb\"); if a.len < b.len { ret 1; } ret 0; }",
+              " let b = String::from_lit(\"bbb\"); if a.len() < b.len() { ret 1; } ret 0; }",
         1);
 }
 
@@ -3912,7 +4052,7 @@ TEST_F(RuntimeTest, GlobalCounterInMatch)
 TEST_F(RuntimeTest, StringConcatViaPush)
 {
     expectRun("fn main() -> i32 { let mut s = String::new();"
-              " s.push_str(\"foo\"); s.push_str(\"bar\"); ret s.len; }",
+              " s.push_str(\"foo\"); s.push_str(\"bar\"); ret s.len(); }",
         6);
 }
 
@@ -4042,7 +4182,7 @@ TEST_F(RuntimeTest, StringComparisonLengths)
 {
     expectRun("fn main() -> i32 { let a = String::from_lit(\"a\");"
               " let b = String::from_lit(\"abc\");"
-              " if a.len < b.len && b.len == 3 { ret 1; } ret 0; }",
+              " if a.len() < b.len() && b.len() == 3 { ret 1; } ret 0; }",
         1);
 }
 
@@ -4126,9 +4266,9 @@ TEST_F(RuntimeTest, MatchArmWithGlobalSideEffect)
 
 TEST_F(RuntimeTest, MultipleStringsInStruct)
 {
-    expectRun("struct Pair { a: String, b: String } fn main() -> i32 {"
+    expectRun("struct Pair { pub a: String, pub b: String } fn main() -> i32 {"
               " let p = Pair { a: String::from_lit(\"ab\"), b: String::from_lit(\"cde\") };"
-              " ret p.a.len + p.b.len; }",
+              " ret p.a.len() + p.b.len(); }",
         5);
 }
 
@@ -4146,7 +4286,7 @@ TEST_F(RuntimeTest, ArrayOfArraysNotAllowedSema)
 
 TEST_F(RuntimeTest, ChainedMethodCalls)
 {
-    expectRun("struct S { v: i32 } impl S { fn add(self: &mut S, d: i32) { self.v = self.v + d; }"
+    expectRun("struct S { pub v: i32 } impl S { fn add(self: &mut S, d: i32) { self.v = self.v + d; }"
               " fn mul(self: &mut S, m: i32) { self.v = self.v * m; } }"
               " fn main() -> i32 { let mut c = S { v: 1 }; c.add(2); c.mul(3); ret c.v; }",
         9);
@@ -4178,7 +4318,7 @@ TEST_F(RuntimeTest, NestedGenericEnums)
 
 TEST_F(RuntimeTest, StringEmptyLenAfterNew)
 {
-    expectRun("fn main() -> i32 { let s = String::new(); if s.len == 0 { ret 1; } ret 0; }", 1);
+    expectRun("fn main() -> i32 { let s = String::new(); if s.len() == 0 { ret 1; } ret 0; }", 1);
 }
 
 TEST_F(RuntimeTest, GlobalAndLocalShadowFree)
@@ -4260,7 +4400,7 @@ TEST_F(RuntimeTest, SimpleGlobal)
 
 TEST_F(RuntimeTest, SimpleStructField)
 {
-    expectRun("struct S { v: i32 } fn main() -> i32 { let s = S { v: 4 }; ret s.v; }", 4);
+    expectRun("struct S { pub v: i32 } fn main() -> i32 { let s = S { v: 4 }; ret s.v; }", 4);
 }
 
 TEST_F(RuntimeTest, SimpleEnumMatch)
@@ -4282,7 +4422,7 @@ TEST_F(RuntimeTest, SimpleCharLiteral)
 
 TEST_F(RuntimeTest, SimpleStringLen)
 {
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len; }", 2);
+    expectRun("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len(); }", 2);
 }
 
 TEST_F(RuntimeTest, SimpleModulo)
@@ -4749,5 +4889,361 @@ TEST_F(RuntimeTest, OptionUnwrapOnHelperResult)
     expectRun("fn main() -> i32 { ret first(range(1, 5)).unwrap(); }", 1);
     // unwrap_or stays available (and non-panicking) alongside unwrap.
     expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(4), 0) + Option::Some(5).unwrap(); }", 9);
+}
+
+// ── I: enums with several non-Copy payload slots ──────────────────────────────
+//
+// A match arm that RETURNS EARLY consumes the scrutinee temp; the OTHER variant's
+// payload slot was never written on that path, so dropping it would release
+// uninitialized memory. Observable with a Drop counter: before the fix the bogus
+// drop ran once per early exit (21 here instead of 11).
+
+TEST_F(RuntimeTest, EnumTwoNonCopyPayloadsNoBogusDrop)
+{
+    expectRun("let g_drops = 0;\n"
+              "struct Leaf { pub v: i32 }\n"
+              "impl Drop for Leaf { fn drop(self) { g_drops = g_drops + 1; } }\n"
+              "enum P { A(Leaf), B(Leaf) }\n"
+              "fn f(p: P) -> i32 { match p { A(a) => { ret 1; }, B(b) => { ret 2; } } }\n"
+              "fn main() -> i32 { let x = f(P::A(Leaf { v: 1 })); ret g_drops * 10 + x; }",
+        11);
+}
+
+// A two-parameter generic ENUM is what Result<T, E> needs: construct, match, a
+// generic function over both parameters, and a method on the generic enum.
+TEST_F(RuntimeTest, GenericEnumWithTwoParameterTypes)
+{
+    expectRun("enum Pair<A, B> { Both(A, B), Neither }\n"
+              "fn main() -> i32 { let p = Pair::Both(3, 'x');\n"
+              "    match p { Both(a, b) => { ret a; }, Neither => { ret 0; } } }",
+        3);
+}
+
+TEST_F(RuntimeTest, GenericEnumTwoTypesThroughGenericFunction)
+{
+    expectRun("enum Pair<A, B> { Both(A, B), Neither }\n"
+              "fn pick<X, Y>(p: Pair<X, Y>) -> X {\n"
+              "    match p { Both(a, b) => { ret a; }, Neither => { panic(\"empty\"); } }\n"
+              "}\n"
+              "fn main() -> i32 { let p = Pair::Both(9, 'y'); ret pick(p); }",
+        9);
+}
+
+TEST_F(RuntimeTest, GenericEnumTwoTypesImplMethod)
+{
+    expectRun("enum Pair<A, B> { Both(A, B), Neither }\n"
+              "impl Pair {\n"
+              "    fn first(self) -> A { match self { Both(a, b) => { ret a; }, Neither => { panic(\"empty\"); } } }\n"
+              "}\n"
+              "fn main() -> i32 { let p = Pair::Both(11, 'z'); ret p.first(); }",
+        11);
+}
+
+TEST_F(RuntimeTest, GenericEnumTwoTypesNonCopyPayloads)
+{
+    expectOutput("enum Pair<A, B> { Both(A, B), Neither }\n"
+                 "fn main() -> i32 {\n"
+                 "    let p = Pair::Both(String::from_lit(\"hello\"), String::from_lit(\"world\"));\n"
+                 "    match p { Both(a, b) => { print_str(a.to_cstr()); }, Neither => { print_int(0); } }\n"
+                 "    println();\n"
+                 "    ret 0;\n"
+                 "}",
+        "hello\n", 0);
+}
+
+// ── J: definite assignment (a let without an initializer) ────────────────────
+//
+// Option B of the spec decision: a Move binding must have an initializer (the
+// scope-exit drop would otherwise release an unconstructed value); a Copy binding
+// may be declared without one, but every use must be definitely assigned —
+// flow-merged with AND across if/match, conservatively reset across a loop.
+
+TEST_F(RuntimeTest, UninitCopyBindingAssignThenRead)
+{
+    expectRun("fn main() -> i32 { let mut x: i32; x = 5; ret x; }", 5);
+}
+
+TEST_F(RuntimeTest, UninitCopyBindingUnusedIsAllowed)
+{
+    expectRun("fn main() -> i32 { let x: i32; ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, UninitReadRejected)
+{
+    expectCompileFail("fn main() -> i32 { let x: i32; ret x; }", "use of uninitialized value");
+}
+
+TEST_F(RuntimeTest, UninitBothBranchesAssignAccepted)
+{
+    expectRun("fn main() -> i32 { let mut x: i32; let c = 1;\n"
+              "    if c > 0 { x = 1; } else { x = 2; }\n"
+              "    ret x; }",
+        1);
+}
+
+TEST_F(RuntimeTest, UninitOneBranchMissingRejected)
+{
+    expectCompileFail("fn main() -> i32 { let mut x: i32; let c = 1;\n"
+                      "    if c > 0 { x = 1; }\n"
+                      "    ret x; }",
+        "use of uninitialized value");
+}
+
+// A branch that cannot fall through (it returns) contributes no state: the other
+// branch decides.
+TEST_F(RuntimeTest, UninitReturningBranchDoesNotBlock)
+{
+    expectRun("fn f(c: bool) -> i32 { let mut x: i32;\n"
+              "    if c { x = 1; } else { ret 9; }\n"
+              "    ret x; }\n"
+              "fn main() -> i32 { ret f(true); }",
+        1);
+}
+
+TEST_F(RuntimeTest, UninitMatchAllArmsAssignAccepted)
+{
+    expectRun("fn main() -> i32 { let mut x: i32; let o = Option::Some(1);\n"
+              "    match o { Some(v) => { x = v; }, None => { x = 2; } }\n"
+              "    ret x; }",
+        1);
+}
+
+TEST_F(RuntimeTest, UninitMatchArmMissingAssignRejected)
+{
+    expectCompileFail("fn main() -> i32 { let mut x: i32; let o = Option::Some(1);\n"
+                      "    match o { Some(v) => { x = v; }, None => { } }\n"
+                      "    ret x; }",
+        "use of uninitialized value");
+}
+
+// The loop body may run zero times, so an assignment inside it does not make the
+// binding definitely assigned afterwards (conservative, like Rust).
+TEST_F(RuntimeTest, UninitAssignedOnlyInsideLoopRejected)
+{
+    expectCompileFail("fn main() -> i32 { let mut x: i32; let mut i = 0;\n"
+                      "    while i < 3 { x = 1; i = i + 1; }\n"
+                      "    ret x; }",
+        "use of uninitialized value");
+}
+
+TEST_F(RuntimeTest, UninitAssignedBeforeLoopAccepted)
+{
+    expectRun("fn main() -> i32 { let mut x: i32; x = 0; let mut i = 0;\n"
+              "    while i < 3 { i = i + 1; let y = x + 1; }\n"
+              "    ret x; }",
+        0);
+}
+
+// Code after a branch that always returns is unreachable, so it is not checked.
+TEST_F(RuntimeTest, UninitChecksSkippedInUnreachableCode)
+{
+    expectRun("fn main() -> i32 { let x: i32; let c = 1;\n"
+              "    if c > 0 { ret 1; } else { ret 2; }\n"
+              "    ret x; }",
+        1);
+}
+
+TEST_F(RuntimeTest, UninitMoveOfUninitRejected)
+{
+    expectCompileFail("fn main() -> i32 { let x: i32; let y = x; ret y; }",
+        "use of uninitialized value");
+}
+
+TEST_F(RuntimeTest, UninitBorrowOfUninitRejected)
+{
+    expectCompileFail("fn main() -> i32 { let x: i32; let r = &x; ret 0; }",
+        "use of uninitialized value");
+}
+
+// Writing a FIELD through an uninitialized reference needs the binding first.
+// Since `&mut T` stopped being Copy the code is rejected even earlier: the
+// binding itself cannot be declared without an initializer (E3012).
+TEST_F(RuntimeTest, UninitFieldWriteThroughUninitRefRejected)
+{
+    expectCompileFail("struct P { pub v: i32 }\n"
+                      "fn main() -> i32 { let mut r: &mut P; r.v = 1; ret 0; }",
+        "without an initializer");
+}
+
+// A Move binding cannot be declared without an initializer at all.
+TEST_F(RuntimeTest, UninitMoveBindingWithoutInitializerRejected)
+{
+    expectCompileFail("fn main() -> i32 { let s: String; ret 0; }", "without an initializer");
+    expectCompileFail("struct P { pub v: i32 }\nfn main() -> i32 { let p: P; ret 0; }",
+        "without an initializer");
+}
+
+// ── K: Result and the postfix ? operator (error propagation) ─────────────────
+
+TEST_F(RuntimeTest, ResultConstructAndHelpers)
+{
+    // kResultPrologue (not the default one): the bare name unwrap_or must resolve
+    // to RESULT's helper here, and the default prologue imports option's.
+    expectRunWithPrologue("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+                          "fn bad() -> Result<i32, i32> { ret Result::Err(9); }\n"
+                          "fn main() -> i32 {\n"
+                          "    let a = one();\n"
+                          "    let b = bad();\n"
+                          "    let ok = is_ok(a);\n"
+                          "    let err = is_err(b);\n"
+                          "    let v = unwrap_or(one(), 0) + unwrap_or(bad(), 5);\n"
+                          "    if ok { if err { ret v; } }\n"
+                          "    ret 0 - 1;\n"
+                          "}",
+        kResultPrologue,
+        6);
+}
+
+TEST_F(RuntimeTest, ResultUnwrapAndExpect)
+{
+    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(3); }\n"
+              "fn main() -> i32 { let r = one(); ret r.unwrap() + one().expect(\"wanted a value\"); }",
+        6);
+    expectPanic("fn bad() -> Result<i32, i32> { ret Result::Err(9); }\n"
+                "fn main() -> i32 { let r = bad(); ret r.unwrap(); }",
+        "panicked: called unwrap on an Err value");
+    expectPanic("fn bad() -> Result<i32, i32> { ret Result::Err(9); }\n"
+                "fn main() -> i32 { let r = bad(); ret r.expect(\"a value was required\"); }",
+        "panicked: a value was required");
+}
+
+// On the Ok path the operator yields the payload.
+TEST_F(RuntimeTest, TryOperatorPropagatesOkPayload)
+{
+    expectRun("fn ok42() -> Result<i32, i32> { ret Result::Ok(42); }\n"
+              "fn f() -> Result<i32, i32> { let v = ok42()?; ret Result::Ok(v + 1); }\n"
+              "fn main() -> i32 { let r = f();\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0 - e; } } }",
+        43);
+}
+
+// The Err path returns Err(e) from the enclosing function immediately: the
+// statements after the operator must not run (the second one would otherwise add).
+TEST_F(RuntimeTest, TryOperatorPropagatesErrAndSkipsRest)
+{
+    expectRun("fn bad() -> Result<i32, i32> { ret Result::Err(7); }\n"
+              "fn f() -> Result<i32, i32> {\n"
+              "    let v = bad()?;\n"
+              "    let w = bad()?;\n"
+              "    ret Result::Ok(v + w);\n"
+              "}\n"
+              "fn main() -> i32 { let r = f();\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret e; } } }",
+        7);
+}
+
+TEST_F(RuntimeTest, TryOperatorChainedInOneExpression)
+{
+    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+              "fn two() -> Result<i32, i32> { ret Result::Ok(2); }\n"
+              "fn f() -> Result<i32, i32> { ret Result::Ok(one()? + two()? + one()?); }\n"
+              "fn main() -> i32 { let r = f();\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 100; } } }",
+        4);
+}
+
+TEST_F(RuntimeTest, TryOperatorInsideMatchArmAndLoop)
+{
+    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+              "fn wrap(c: i32) -> Result<i32, i32> { ret Result::Ok(c); }\n"
+              "fn pick(c: i32) -> Result<i32, i32> {\n"
+              "    match wrap(c) {\n"
+              "        Ok(v) => { let w = one()?; ret Result::Ok(v + w); },\n"
+              "        Err(e) => { ret Result::Err(e); },\n"
+              "    }\n"
+              "}\n"
+              "fn main() -> i32 { let r = pick(5);\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0; } } }",
+        6);
+    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+              "fn f() -> Result<i32, i32> {\n"
+              "    let mut s = 0;\n"
+              "    let mut i = 0;\n"
+              "    while i < 3 { s = s + one()?; i = i + 1; }\n"
+              "    ret Result::Ok(s);\n"
+              "}\n"
+              "fn main() -> i32 { let r = f();\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0; } } }",
+        3);
+}
+
+// The operator may be followed by member access, and used as a statement.
+TEST_F(RuntimeTest, TryOperatorSuffixAndStatementForms)
+{
+    expectRun("struct P { pub v: i32 }\n"
+              "fn getp() -> Result<P, i32> { ret Result::Ok(P { v: 3 }); }\n"
+              "fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+              "fn f() -> Result<i32, i32> { let p = getp()?; ret Result::Ok(p.v + one()?); }\n"
+              "fn main() -> i32 { let r = f();\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0; } } }",
+        4);
+    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+              "fn f() -> Result<i32, i32> { one()?; ret Result::Ok(9); }\n"
+              "fn main() -> i32 { let r = f();\n"
+              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0; } } }",
+        9);
+}
+
+// Non-Copy payloads travel through the operator on both paths exactly once.
+TEST_F(RuntimeTest, TryOperatorNonCopyPayloads)
+{
+    expectOutput("fn make() -> Result<String, String> { ret Result::Ok(String::from_lit(\"payload\")); }\n"
+                 "fn f() -> Result<String, String> { let a = make()?; ret Result::Ok(a); }\n"
+                 "fn main() -> i32 { let r = f();\n"
+                 "    match r { Ok(v) => { print_str(v.to_cstr()); }, Err(e) => { print_str(e.to_cstr()); } }\n"
+                 "    println();\n"
+                 "    ret 0;\n"
+                 "}",
+        "payload\n", 0);
+    expectOutput("fn bad() -> Result<i32, String> { ret Result::Err(String::from_lit(\"inner\")); }\n"
+                 "fn f() -> Result<i32, String> { let v = bad()?; ret Result::Ok(v); }\n"
+                 "fn main() -> i32 { let r = f();\n"
+                 "    match r { Ok(v) => { print_int(v); }, Err(e) => { print_str(e.to_cstr()); } }\n"
+                 "    println();\n"
+                 "    ret 0;\n"
+                 "}",
+        "inner\n", 0);
+}
+
+// A whole-module import exposes module-qualified names — the way to reach
+// result::unwrap_or when option's unwrap_or is imported as well.
+TEST_F(RuntimeTest, ResultQualifiedAccessFromWholeModuleImport)
+{
+    expectRunWithPrologue(
+        "impt result;\n"
+        "fn bad() -> result::Result<i32, i32> { ret result::Result::Err(4); }\n"
+        "fn main() -> i32 { ret result::unwrap_or(bad(), 11); }",
+        "",
+        11);
+}
+
+TEST_F(RuntimeTest, TryOperatorRequiresResultOperand)
+{
+    expectCompileFail("fn f() -> Result<i32, i32> { let x = 5?; ret Result::Ok(x); }\n"
+                      "fn main() -> i32 { ret 0; }",
+        "requires a 'Result' value");
+}
+
+TEST_F(RuntimeTest, TryOperatorRequiresResultReturningFunction)
+{
+    expectCompileFail("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
+                      "fn f() -> i32 { let x = one()?; ret x; }\n"
+                      "fn main() -> i32 { ret 0; }",
+        "requires the enclosing function to return");
+}
+
+TEST_F(RuntimeTest, TryOperatorRequiresMatchingErrorType)
+{
+    expectCompileFail("fn bad() -> Result<i32, i32> { ret Result::Err(1); }\n"
+                      "fn f() -> Result<i32, bool> { let x = bad()?; ret Result::Ok(x); }\n"
+                      "fn main() -> i32 { ret 0; }",
+        "does not match the function error type");
+}
+
+// A void generic argument would become a void struct field (LLVM rejects that).
+TEST_F(RuntimeTest, VoidGenericArgumentRejected)
+{
+    expectCompileFail("fn f() -> Result<void, i32> { ret Result::Ok(1); }\nfn main() -> i32 { ret 0; }",
+        "cannot be a generic argument");
 }
 

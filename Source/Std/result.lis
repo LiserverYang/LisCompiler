@@ -1,0 +1,79 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// result.lis
+//
+// `Result<T, E>` — the fallible counterpart of Option: `Ok(v)` carries the value,
+// `Err(e)` carries the error. It is what the postfix `?` operator propagates:
+//
+//     fn load(n: i32) -> Result<i32, i32> {
+//         let v = read_it(n)?;        // Err(e) => ret Result::Err(e)
+//         ret Result::Ok(v + 1);
+//     }
+//
+// `?` requires the ENCLOSING function to return a Result whose error type is
+// compatible with the operand's; there is no implicit error conversion.
+//
+// `unwrap`/`expect` abort the process on `Err` (via the `panic` builtin), exactly
+// like their Option counterparts; `unwrap_or` is the non-panicking accessor.
+
+enum Result<T, E>
+{
+    Ok(T),
+    Err(E)
+}
+
+// ── unwrap / expect: the panicking accessors ─────────────────────────────────
+//
+// Both consume the result (by-value `self`) and return the Ok payload; on `Err`
+// they call `panic(&i8)`, whose type is `never` (bottom), so the `Err` arm
+// produces no value and the method still type-checks as returning `T`.
+impl Result
+{
+    // The `Ok` payload; aborts the program on `Err`.
+    //
+    //     Result::Ok(7).unwrap()   // 7
+    fn unwrap(self) -> T
+    {
+        match self {
+            Ok(v) => { ret v; },
+            Err(_e) => { panic("called unwrap on an Err value"); },
+        }
+    }
+
+    // Like `unwrap`, but aborts with the caller-supplied message.
+    fn expect(self, msg: &i8) -> T
+    {
+        match self {
+            Ok(v) => { ret v; },
+            Err(_e) => { panic(msg); },
+        }
+    }
+}
+
+// True if the result carries a value (`Ok`).
+fn is_ok<T, E>(r: Result<T, E>) -> bool
+{
+    match r {
+        Ok(_v) => { ret true; },
+        Err(_e) => { ret false; },
+    }
+}
+
+// True if the result carries an error (`Err`).
+fn is_err<T, E>(r: Result<T, E>) -> bool
+{
+    match r {
+        Ok(_v) => { ret false; },
+        Err(_e) => { ret true; },
+    }
+}
+
+// The `Ok` payload, falling back to `dflt` on `Err` (the error value is dropped).
+fn unwrap_or<T, E>(r: Result<T, E>, dflt: T) -> T
+{
+    match r {
+        Ok(v) => { ret v; },
+        Err(_e) => { ret dflt; },
+    }
+}

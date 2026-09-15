@@ -54,6 +54,16 @@ struct Context
     /// Order: main-file directory, then -I dirs, then the stdlib dir.
     std::vector<std::string> searchPaths;
 
+    /// The boundary of the compiler's UNSAFE CORE. A file inside one of these
+    /// directories may use what the language cannot verify: the heap primitives
+    /// (`__alloc`/`__free`/`__memcpy`/`__strlen`), the raw-pointer →
+    /// reference conversions (`__deref`/`__deref_mut`) and raw-pointer
+    /// indexing. Everything else goes through the safe stdlib API built on top
+    /// (String today, heap collections later). The compiler's own build puts
+    /// `<bin>/lstdlib` here; the test harness adds the same directory.
+    /// EMPTY → nothing qualifies (fail-closed, never fail-open).
+    std::vector<std::string> stdLibDirs;
+
     /// Loaded file contents keyed by absolute path — for multi-file diagnostics
     /// (Context::filePath/fileValue is a single slot, restored after parsing).
     std::unordered_map<std::string, std::string> fileContents;

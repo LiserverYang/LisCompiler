@@ -88,6 +88,9 @@ public:
 
     std::shared_ptr<ReferenceType> getReference(std::shared_ptr<Type> base, bool isMutable);
 
+    /** Get (or create + cache) `*base` / `*mut base` — a raw pointer. */
+    std::shared_ptr<PointerType> getPointer(std::shared_ptr<Type> base, bool isMutable);
+
     /** Get (or create + cache) `[elementType; size]`. */
     std::shared_ptr<ArrayType> getArray(std::shared_ptr<Type> elementType, size_t size);
 
@@ -173,6 +176,7 @@ private:
     // generic-param lists don't alias either).
     std::unordered_map<std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>>, std::shared_ptr<FunctionType>, FuncHash> functions;
     std::unordered_map<std::pair<void *, bool>, std::shared_ptr<ReferenceType>, RefHash> refCache;
+    std::unordered_map<std::pair<void *, bool>, std::shared_ptr<PointerType>, RefHash> ptrCache;
     std::unordered_map<std::string, std::shared_ptr<TraitType>> traits;
     // SelfType is interned by (trait name, isMut, isRef) — the SAME triple
     // SelfType::equals compares. Keying by name alone made a `&self` and a

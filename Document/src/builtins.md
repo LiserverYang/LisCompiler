@@ -48,10 +48,17 @@
 
 | 函数 | 签名 | 说明 |
 |---|---|---|
-| `__alloc(n: i32) -> &mut i8` | `malloc(n)`，返回可写缓冲 | |
-| `__free(p: &i8) -> void` | `free(p)` | |
-| `__memcpy(dst: &i8, src: &i8, n: i32) -> &mut i8` | `memcpy`，返回 dst | |
-| `__strlen(s: &i8) -> i32` | `strlen` | |
+| `__alloc(n: i32) -> *mut i8` | `malloc(n)`，返回可写堆缓冲 | |
+| `__free(p: *i8) -> void` | `free(p)` | |
+| `__memcpy(dst: *mut i8, src: *i8, n: i32) -> *mut i8` | `memcpy`，返回 dst | |
+| `__strlen(s: *i8) -> i32` | `strlen` | |
+| `__deref(p: *T) -> &T` | 把只读裸指针变成共享引用（stdlib 专用） | |
+| `__deref_mut(p: *mut T) -> &mut T` | 把可写裸指针变成可变引用（stdlib 专用） | |
+
+**这些是编译器的「不安全核心」，只能在标准库（`<bin>/lstdlib` 内的文件）里调用**，
+否则编译错误 E3013（堆原语）/ E3014（裸指针操作）。它们直接落到 libc，
+没有任何边界、生命周期或别名检查；把它们关在标准库里，是语言其余部分能够安全使用堆的前提。
+用户要用堆，就走 `String`（将来还有堆集合）这类带检查的标准库 API。
 
 **OOM 不检查**：`malloc` 失败时后续写会崩溃（语言无错误处理机制）。
 

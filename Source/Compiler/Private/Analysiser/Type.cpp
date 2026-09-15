@@ -21,6 +21,17 @@ bool is_one_of(const T &value, const Args &...args)
 // ========================= Type =========================
 Type::Type(Kind kind) : kind(kind) {}
 
+bool Type::isCopyable() const
+{
+    // `&mut T` is deliberately NOT Copy: two live copies of an exclusive
+    // reference would both claim unique access to the referent. It is still
+    // non-owning (see isPointerLike), so it never needs drop glue — that is what
+    // needsDrop() is for.
+    return kind == Kind::Primitive || kind == Kind::Pointer
+           || (kind == Kind::Reference
+               && !static_cast<const ReferenceType *>(this)->isMutableRef());
+}
+
 bool Type::implementsTrait(const std::string &name) const
 {
     // Compare BARE trait names: implTrait entries carry the trait's module
@@ -131,6 +142,32 @@ bool ReferenceType::equals(const std::shared_ptr<Type> &other) const
 std::string ReferenceType::toString() const
 {
     return (isMutable ? "&mut " : "&") + baseType->toString();
+}
+
+// ========================= PointerType =========================
+PointerType::PointerType(std::shared_ptr<Type> base, bool isMutable)
+    : Type(Kind::Pointer), baseType(std::move(base)), isMutable(isMutable) {}
+
+std::shared_ptr<Type> PointerType::getBaseType() const
+{
+    return baseType;
+}
+
+bool PointerType::isMutablePtr() const
+{
+    return isMutable;
+}
+
+bool PointerType::equals(const std::shared_ptr<Type> &other) const
+{
+    if (other->getKind() != Kind::Pointer) return false;
+    auto pt = std::static_pointer_cast<PointerType>(other);
+    return pt->isMutable == isMutable && pt->baseType->equals(baseType);
+}
+
+std::string PointerType::toString() const
+{
+    return (isMutable ? "*mut " : "*") + baseType->toString();
 }
 
 // ========================= ArrayType =========================

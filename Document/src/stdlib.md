@@ -9,13 +9,18 @@
 ```lis
 impt math { max, abs };
 impt option { Option, unwrap_or };
+impt result { Result, is_ok, is_err };
 impt string { String };
 ```
 
-六个模块：`drop`（Drop trait）、`option`（Option<T>）、`iterator`（Iterator/Range/for
-协议）、`math`（Numeric/算子 trait + 数值函数）、`chars`（字符分类）、`string`
-（String 堆字符串）。模块间依赖已显式声明（iterator 导入 option；string 导入
-drop 与 option）—— 只需导入你直接使用的模块。
+七个模块：`drop`（Drop trait）、`option`（Option<T>）、`result`（Result<T, E> + `?` 传播协议）、
+`iterator`（Iterator/Range/for 协议）、`math`（Numeric/算子 trait + 数值函数）、`chars`
+（字符分类）、`string`（String 堆字符串）。模块间依赖已显式声明（iterator 导入 option；
+string 导入 drop 与 option）—— 只需导入你直接使用的模块。
+
+> `unwrap_or` 在 `option` 与 `result` 里**各有一个**。两者都做选择性导入会触发
+> 「selective import conflicts with an existing name」——这是既有的冲突规则，不是 bug。
+> 需要同时用两个时，用整模块导入 + 限定名：`impt result;` 然后 `result::unwrap_or(...)`。
 
 ## Drop
 
@@ -50,6 +55,24 @@ enum Option<T> { Some(T), None }
 它们能实现的前提是 `panic` 的返回类型是 `never` —— `None` 臂不产生值，方法因此仍然
 类型检查为返回 `T`。需要回退值时用 `unwrap_or`。
 
+## Result
+
+```lis
+enum Result<T, E> { Ok(T), Err(E) }
+```
+
+| 函数 / 方法 | 签名 | 说明 |
+|---|---|---|
+| `is_ok<T, E>(r)` | `-> bool` | `Ok` 为真 |
+| `is_err<T, E>(r)` | `-> bool` | `Err` 为真 |
+| `unwrap_or<T, E>(r, dflt)` | `-> T` | `Ok` 取载荷，`Err` 取默认（错误值被丢弃） |
+| `r.unwrap()` | `-> T` | 取 `Ok` 载荷；`Err` 时 `panic("called unwrap on an Err value")` |
+| `r.expect(msg)` | `-> T` | 同上，用调用者消息 panic |
+
+`Result` 是[后缀 `?` 运算符](./expression.md)的载体：`expr?` 在 `Ok` 时产出载荷，在 `Err` 时
+立刻 `ret Result::Err(e)`。`?` 要求**外层函数返回 Result，且错误类型与操作数兼容**（不做任何
+错误转换）。
+
 ## Iterator 与 Range
 
 ```lis
@@ -66,9 +89,9 @@ struct Range { pub start: i32, pub end: i32, pub current: i32 }
 ```lis
 struct String
 {
-    pub data: &mut i8,   // 堆缓冲(C 字符串,null 结尾)
-    pub len: i32,
-    pub cap: i32
+    data: *mut i8,   // 堆缓冲(C 字符串,null 结尾)。私有
+    len: i32,        // 私有
+    cap: i32         // 私有
 }
 ```
 
@@ -81,8 +104,13 @@ struct String
 | `push_str(self: &mut String, other: &i8)` | | 追加 C 字符串 |
 | `index(self: &String, i: i32)` | `-> Option<char>` | 越界返回 None（两端检查） |
 | `is_empty(self: &String)` | `-> bool` | |
+| `len(self: &String)` | `-> i32` | 字节数（不含结尾 null） |
+| `cap(self: &String)` | `-> i32` | 当前容量（字节） |
 
 - 拥有堆缓冲，**永不 Copy**；`impl Drop` 释放缓冲。
+- 三个字段都是**私有**的：`data`/`len`/`cap` 必须互相一致（这是类型的不变量），
+  只有 `String` 自己的方法能保证；读长度/容量用 `len()` / `cap()`。
+  字段可见性由编译器强制（E3015），不是约定。
 - String 是**字节串**：中文按 UTF-8 字节计数（`len` 是字节数）。
 - `to_cstr` 的返回借用编译器不追踪——调用方必须保证 owner 存活。
 - OOM 不检查。

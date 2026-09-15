@@ -672,6 +672,18 @@ std::unique_ptr<TypeNode> Parser::parseType()
         type->isMutReference = match(TokenCode::MUT);
     }
 
+    // Pointer type `*T` / `*mut T`. In TYPE position a leading `*` is
+    // unambiguous: the language has no dereference operator in expressions, so
+    // the STAR token can only start a pointer type here. No new reserved word is
+    // introduced (`const` is deliberately NOT part of the spelling).
+    if (match(TokenCode::STAR))
+    {
+        type->isPointer = true;
+        type->isMutPointer = match(TokenCode::MUT);
+        type->pointee = parseType();
+        return type;
+    }
+
     // Array type `[T; N]`.
     if (match(TokenCode::LBRACKET))
     {
@@ -1829,6 +1841,18 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
             index->index = parseExpression();
             consume(TokenCode::RBRACKET, "expected ']' after index", E_ExpectedKeyword);
             left = std::move(index);
+        }
+        else if (match(TokenCode::QUESTION))
+        {
+            // `expr?` — error propagation. A POSTFIX operator inside the suffix
+            // chain: it binds tighter than every binary operator (`a + b?` is
+            // `a + (b?)`) and may be followed by `.field` / `[i]`, which the loop
+            // handles on the next iteration.
+            PositionRecorder recorder(this, nullptr);
+            auto tryExpr = std::make_unique<TryExpr>();
+            recorder.bindNode(tryExpr.get());
+            tryExpr->expression = std::move(left);
+            left = std::move(tryExpr);
         }
         else
         {

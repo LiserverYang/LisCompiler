@@ -61,6 +61,17 @@ struct Symbol
     VarState state;
 
     /**
+     * Definite assignment: false only for a binding declared WITHOUT an
+     * initializer (`let x;`), which the language allows for Copy types. Every
+     * other binding — globals, params, match bindings, for-loop temporaries —
+     * starts initialized, so the conservative default cannot produce a false
+     * positive. Reads of a not-definitely-initialized binding are rejected; the
+     * flag is flow-sensitive (merged with AND across if/match branches, and
+     * reset across a loop body).
+     */
+    bool initialized = true;
+
+    /**
      * Field paths moved out of this variable by partial (field) moves, e.g.
      * `let x = p.a` → [["a"]], `let x = p.a.b` → [["a","b"]]. Mirrors the
      * MIR-side partiallyMovedFields_. A whole-value use while this is non-empty
