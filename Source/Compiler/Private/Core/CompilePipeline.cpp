@@ -89,7 +89,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     passes.emplace_back(std::make_unique<HIRSemanticAnalyzer>(context));
     passes.emplace_back(std::make_unique<MIRBuilder>(context));
     passes.emplace_back(std::make_unique<MIRMonomorphization>(context));
-    passes.emplace_back(std::make_unique<LLVMIRBuilder>(context, context->llvmContext, context->args->getArg("filePath")));
+    passes.emplace_back(std::make_unique<LLVMIRBuilder>(context, *context->llvmContext, context->args->getArg("filePath")));
 
     Emitter::Options emitOpts;
     int optLevel = std::stoi(context->args->getArg("o"));

@@ -1,590 +1,13 @@
-/**
- * Copyright 2026, LiserverYang. All rights reserved.
- * MIT License.
- *
- * Runtime regression tests: compile a `.lis` snippet through the FULL pipeline
- * (Lexer → Parser → HIR → sema → MIR → monomorphization → LLVM → Emitter), link
- * the object with the MinGW toolchain, run it, and assert the process exit code.
- *
- * This catches runtime semantic bugs that sema-only tests miss — e.g. the
- * reference-typed method-receiver bug (`let m = &mut c; m.add(5);` not mutating
- * c), which compiles cleanly but behaves wrongly at runtime.
- */
+// Split out of RuntimeTest.cpp: the fixture and the helpers live in
+// RuntimeTestFixture.hpp, and each runtime test TU compiles in PARALLEL
+// (see TestModule.py). Keep new tests in whichever file fits; the split is
+// purely about compile time.
 
-#include <gtest/gtest.h>
-
-#include <atomic>
-#include <cstdio>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <sstream>
-#include <string>
-
-// NOTE: do NOT include <windows.h> here — it defines `ERROR`/`TRUE`/... as
-// macros, which breaks `Logger::LogLevel::ERROR` in the compiler headers.
-#ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
-#include <process.h>
-#define dup _dup
-#define dup2 _dup2
-#define close _close
-extern char *_pgmptr; // full path of the running executable (MinGW CRT)
-#else
-#include <unistd.h>
-#endif
-
-#include "Core/Context.hpp"
-#include "IR/Emitter.hpp"
-#include "IR/HIRBuilder.hpp"
-#include "IR/HIRSemanticAnalyzer.hpp"
-#include "IR/LLVMIRBuilder.hpp"
-#include "IR/MIRBuilder.hpp"
-#include "IR/MIRMonomorphization.hpp"
-#include "Lexer/Lexer.hpp"
-#include "Logger/Logger.hpp"
-#include "Parser/Parser.hpp"
-
-namespace fs = std::filesystem;
-
-namespace
-{
-std::atomic<int> g_rtCounter{0};
-
-/// Import prologue prepended to every RuntimeTest snippet. The stdlib is no
-/// longer auto-preloaded — selective imports promote the public API's bare
-/// names (the internal names stay `math$max` etc.).
-static const char *kStdlibPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
-    "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
-    "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
-    "impt string { String };\n"
-    "impt chars { is_digit, is_alpha, is_alphanumeric, is_whitespace, digit_to_int };\n"
-    "impt drop { Drop };\n"
-    // `result` is imported WITHOUT `unwrap_or`: option.lis exports that name too,
-    // and two selective imports of the same bare name are a deliberate conflict.
-    // Tests that want Result::unwrap_or by bare name use kResultPrologue, or call
-    // it qualified (`impt result;` + `result::unwrap_or`).
-    "impt result { Result, is_ok, is_err };\n";
-
-/// Math-only prologue for snippets that DEFINE their own `fn sum` (which would
-/// clash with the iterator module's promoted `sum`).
-/// Prologue for snippets that need Result WITHOUT option (so the bare name
-/// `unwrap_or` resolves to the result module) — plus the Drop/string modules the
-/// helper snippets use.
-static const char *kResultPrologue =
-    "impt result { Result, is_ok, is_err, unwrap_or };\n"
-    "impt string { String };\n"
-    "impt drop { Drop };\n";
-
-static const char *kMathPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
-
-/// Exit status of a child process that reached the builtin panic: libc
-/// abort(). UCRT maps its __fastfail(FAST_FAIL_FATAL_APP_EXIT) to 0xC0000409;
-/// on POSIX abort() raises SIGABRT (128 + 6). Asserted rather than merely
-/// "non-zero" so a runtime/toolchain change is noticed instead of silently
-/// accepted.
-#ifdef _WIN32
-static const int kPanicExitCode = (int)0xC0000409;
-#else
-static const int kPanicExitCode = 134;
-#endif
-
-/// Locate the preloaded stdlib (`Build/Binaries/lstdlib`). test.exe lives at
-/// `Build/Intermediate/`, so it is the exe dir's parent + `Binaries/lstdlib`.
-fs::path findStdlibDir()
-{
-#ifdef _WIN32
-    if (_pgmptr)
-    {
-        fs::path cand = fs::path(_pgmptr).parent_path().parent_path() / "Binaries" / "lstdlib";
-        if (fs::exists(cand)) return cand;
-    }
-#else
-    {
-        char buf[4096];
-        ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-        if (n > 0)
-        {
-            buf[n] = '\0';
-            fs::path cand = fs::path(buf).parent_path().parent_path() / "Binaries" / "lstdlib";
-            if (fs::exists(cand)) return cand;
-        }
-    }
-#endif
-    fs::path cwdCand = fs::current_path() / "Build" / "Binaries" / "lstdlib";
-    if (fs::exists(cwdCand)) return cwdCand;
-    return {};
-}
-} // namespace
-
-class RuntimeTest : public ::testing::Test
-{
-protected:
-    fs::path stdLibDir;
-    fs::path objPath;
-    fs::path exePath;
-    fs::path diagPath;
-
-    void SetUp() override
-    {
-        stdLibDir = findStdlibDir();
-        ASSERT_FALSE(stdLibDir.empty()) << "cannot locate Build/Binaries/lstdlib";
-        int id = g_rtCounter++;
-        objPath = fs::temp_directory_path() / ("lis_rt_" + std::to_string(id) + ".o");
-        exePath = fs::temp_directory_path() / ("lis_rt_" + std::to_string(id) + ".exe");
-        diagPath = fs::temp_directory_path() / ("lis_rt_diag_" + std::to_string(id) + ".txt");
-    }
-
-    void TearDown() override
-    {
-        std::error_code ec;
-        fs::remove(objPath, ec);
-        fs::remove(exePath, ec);
-        fs::remove(diagPath, ec);
-    }
-
-    /// Compile while capturing the Logger's diagnostics to `diagnostics`.
-    bool compileCapture(const std::string &source, std::string &diagnostics)
-    {
-        fflush(stdout);
-        int saved = dup(_fileno(stdout));
-        FILE *f = freopen(diagPath.string().c_str(), "w", stdout);
-        (void)f;
-        bool ok = compile(source);
-        fflush(stdout);
-        dup2(saved, _fileno(stdout));
-        close(saved);
-        std::ifstream fi(diagPath);
-        diagnostics.assign((std::istreambuf_iterator<char>(fi)), std::istreambuf_iterator<char>());
-        return ok;
-    }
-
-    /// The snippet must be REJECTED (semantic error, not a codegen crash) with a
-    /// diagnostic containing `fragment`.
-    void expectCompileFail(const std::string &source, const std::string &fragment)
-    {
-        std::string diag;
-        bool ok = compileCapture(source, diag);
-        EXPECT_FALSE(ok) << "expected a compile error, got clean compile for:\n"
-                         << source;
-        EXPECT_NE(diag.find(fragment), std::string::npos)
-            << "expected message containing '" << fragment << "', got:\n"
-            << diag;
-    }
-
-    /// Compile `source` through the full pipeline to objPath. Returns false on
-    /// any semantic error (diagnostics are logged to stdout by the Logger).
-    /// The stdlib is NOT auto-preloaded; a prologue imports its public API
-    /// (selective imports promote the bare names the snippets use). Snippets
-    /// that DEFINE their own stdlib-named types (e.g. their own `enum Option`)
-    /// pass an empty or reduced prologue to avoid the (correct) import clash.
-    bool compile(const std::string &source, const std::string &prologue = kStdlibPrologue)
-    {
-        auto context = std::make_shared<Context>();
-        context->args->setArg("o", "2");
-        context->args->setArg("filePath", "test.lis");
-        context->searchPaths.push_back(stdLibDir.string());
-        // The real lstdlib is also the unsafe-core boundary: the stdlib modules
-        // imported below are the only files allowed to use the heap primitives.
-        context->stdLibDirs.push_back(stdLibDir.string());
-
-        // Main source (stdlib imports prepended).
-        context->filePath = "test.lis";
-        context->fileValue = prologue + source;
-        Lexer lexer(context);
-        lexer.run();
-        Parser parser(context);
-        parser.parseAll();
-        // Parse errors (incl. lexer errors the Parser gate sees) are now
-        // recoverable — report them as a failed compile instead of exit(1)
-        // killing the whole test process.
-        if (Logger::GetErrorCount() > 0) return false;
-
-        HIRBuilder builder(context);
-        builder.run();
-
-        // Gate on semantic errors — do NOT call sema.run() (it calls exit(1)).
-        Logger::ResetErrorCount();
-        HIRSemanticAnalyzer sema(context);
-        sema.visit(context->hirProgram.get());
-        if (Logger::GetErrorCount() > 0) return false;
-
-        MIRBuilder mir(context);
-        // buildProgram() rather than run(): run() gates MIR-level diagnostics
-        // (a `-> never` function that never diverges) with exit(1), which would
-        // kill the whole test process. Mirror the sema handling above.
-        context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
-        if (Logger::GetErrorCount() > 0) return false;
-        MIRMonomorphization mono(context);
-        mono.run();
-        LLVMIRBuilder llvm(context, context->llvmContext, "test.lis");
-        llvm.run();
-
-        Emitter::Options opts;
-        opts.outPath = objPath.string();
-        Emitter emitter(context, opts);
-        emitter.run();
-        return true;
-    }
-
-    /// Compile `source` with extra MODULE files. Each module entry is
-    /// (module-path, content); files are written under a fresh temp dir that is
-    /// prepended to Context::searchPaths, so `impt foo.bar;` finds foo/bar.lis.
-    /// The stdlib is still preloaded into the root module (as compile() does).
-    bool compileMulti(const std::string &source,
-        const std::vector<std::pair<std::string, std::string>> &modules,
-        std::string *diagnostics = nullptr)
-    {
-        auto context = std::make_shared<Context>();
-        context->args->setArg("o", "2");
-        context->args->setArg("filePath", "test.lis");
-
-        // Write the module files and expose them via searchPaths.
-        fs::path modDir = fs::temp_directory_path() / ("lis_mods_" + std::to_string(g_rtCounter++));
-        fs::create_directories(modDir);
-        for (auto &[name, src] : modules)
-        {
-            // Dot-separated module path → filesystem path: "foo.bar" → foo/bar
-            fs::path relPath;
-            std::string seg;
-            for (char c : name)
-            {
-                if (c == '.')
-                {
-                    relPath /= seg;
-                    seg.clear();
-                }
-                else
-                    seg += c;
-            }
-            relPath /= seg;
-            fs::path p = modDir / relPath;
-            p += ".lis";
-            fs::create_directories(p.parent_path());
-            std::ofstream f(p);
-            f << src;
-        }
-        context->searchPaths.push_back(modDir.string());
-        context->searchPaths.push_back(stdLibDir.string());
-        context->stdLibDirs.push_back(stdLibDir.string());
-
-        // Main source (stdlib imports prepended).
-        context->filePath = "test.lis";
-        context->fileValue = std::string(kStdlibPrologue) + source;
-        Lexer lexer(context);
-        lexer.run();
-        Parser parser(context);
-        parser.parseAll();
-        if (Logger::GetErrorCount() > 0)
-        {
-            fs::remove_all(modDir);
-            return false;
-        }
-
-        HIRBuilder builder(context);
-        builder.run();
-
-        // Gate on semantic errors — do NOT call sema.run() (it calls exit(1)).
-        Logger::ResetErrorCount();
-        HIRSemanticAnalyzer sema(context);
-        sema.visit(context->hirProgram.get());
-        if (Logger::GetErrorCount() > 0)
-        {
-            fs::remove_all(modDir);
-            return false;
-        }
-
-        MIRBuilder mir(context);
-        // buildProgram() rather than run(): run() gates MIR-level diagnostics
-        // (a `-> never` function that never diverges) with exit(1), which would
-        // kill the whole test process. Mirror the sema handling above.
-        context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
-        if (Logger::GetErrorCount() > 0) return false;
-        MIRMonomorphization mono(context);
-        mono.run();
-        LLVMIRBuilder llvm(context, context->llvmContext, "test.lis");
-        llvm.run();
-
-        Emitter::Options opts;
-        opts.outPath = objPath.string();
-        Emitter emitter(context, opts);
-        emitter.run();
-        fs::remove_all(modDir);
-        (void)diagnostics;
-        return true;
-    }
-
-    /// Link objPath → exePath with the MinGW toolchain, then run it and return
-    /// the process exit code (-1 if linking or launching failed). If `out` is
-    /// non-null the child's stdout is captured into it; if `err` is non-null its
-    /// stderr is captured (the builtin `panic` writes its message there); if
-    /// `in` is non-null its bytes are fed to the child's stdin (via a pipe)
-    /// before it runs.
-    int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr,
-        std::string *err = nullptr)
-    {
-        std::string linkCmd = "g++ -o \"" + exePath.string() + "\" \"" + objPath.string() + "\"";
-        if (std::system(linkCmd.c_str()) != 0)
-            return -1;
-#ifdef _WIN32
-        // Redirect the child's stdout to a pipe so the caller can read it back.
-        int saved = -1;
-        int fds[2] = {-1, -1};
-        if (out)
-        {
-            fflush(stdout);
-            saved = dup(_fileno(stdout));
-            if (_pipe(fds, 65536, _O_BINARY) == 0)
-            {
-                dup2(fds[1], _fileno(stdout));
-                close(fds[1]); // child inherits the write end; we close ours
-            }
-        }
-
-        // Same for stderr — SEPARATE pipe: draining one pipe to EOF blocks
-        // until the child exits, so a shared pipe would lose whichever stream
-        // was still unread. The builtin panic writes its message here.
-        int savedErr = -1;
-        int fdsErr[2] = {-1, -1};
-        if (err)
-        {
-            fflush(stderr);
-            savedErr = dup(_fileno(stderr));
-            if (_pipe(fdsErr, 65536, _O_BINARY) == 0)
-            {
-                dup2(fdsErr[1], _fileno(stderr));
-                close(fdsErr[1]);
-            }
-        }
-
-        // Feed the child's stdin from a pipe. The input is written BEFORE the
-        // spawn so it sits in the pipe buffer (test inputs are small); closing
-        // the write end gives the child EOF after it reads all of it.
-        int savedIn = -1;
-        int fdsIn[2] = {-1, -1};
-        if (in)
-        {
-            fflush(stdin);
-            savedIn = dup(_fileno(stdin));
-            if (_pipe(fdsIn, 65536, _O_BINARY) == 0)
-            {
-                dup2(fdsIn[0], _fileno(stdin));
-                if (fdsIn[0] != _fileno(stdin)) close(fdsIn[0]);
-                _write(fdsIn[1], in->data(), (unsigned)in->size());
-                close(fdsIn[1]);
-            }
-        }
-
-        int code = _spawnl(_P_WAIT, exePath.string().c_str(), exePath.string().c_str(), nullptr);
-        if (out && saved != -1)
-        {
-            dup2(saved, _fileno(stdout));
-            close(saved);
-            char buf[4096];
-            ssize_t n;
-            while ((n = read(fds[0], buf, sizeof(buf))) > 0)
-                out->append(buf, (size_t)n);
-            close(fds[0]);
-        }
-        if (err && savedErr != -1)
-        {
-            dup2(savedErr, _fileno(stderr));
-            close(savedErr);
-            char buf[4096];
-            ssize_t n;
-            while ((n = read(fdsErr[0], buf, sizeof(buf))) > 0)
-                err->append(buf, (size_t)n);
-            close(fdsErr[0]);
-        }
-        if (in && savedIn != -1)
-        {
-            dup2(savedIn, _fileno(stdin));
-            close(savedIn);
-        }
-        return code;
-#else
-        if (!err)
-        {
-            int st = std::system(exePath.string().c_str());
-            return WEXITSTATUS(st);
-        }
-        // POSIX: no fd juggling needed for one stream — redirect stderr to a
-        // sibling temp file and read it back. (A signal death reports status 0
-        // here, exactly as it already does for stdout-only runs.)
-        fs::path errPath = exePath;
-        errPath += ".err";
-        std::string cmd = "\"" + exePath.string() + "\" 2> \"" + errPath.string() + "\"";
-        int st = std::system(cmd.c_str());
-        {
-            std::ifstream fe(errPath);
-            err->assign((std::istreambuf_iterator<char>(fe)), std::istreambuf_iterator<char>());
-        }
-        {
-            std::error_code ec;
-            fs::remove(errPath, ec);
-        }
-        return WEXITSTATUS(st);
-#endif
-    }
-
-    /// Compile, link, run and assert the process exit code.
-    void expectRun(const std::string &source, int expectedExit)
-    {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
-                                     << source;
-        int code = linkAndRun();
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
-                                      << source;
-    }
-
-    /// Like expectRun but with a custom (or empty) stdlib prologue — for
-    /// snippets that define their own stdlib-named types (`enum Option`).
-    void expectRunWithPrologue(const std::string &source, const std::string &prologue, int expectedExit)
-    {
-        ASSERT_TRUE(compile(source, prologue)) << "compilation failed:\n"
-                                               << source;
-        int code = linkAndRun();
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
-                                      << source;
-    }
-    /// Compile, link, run, and assert the process reached the builtin panic:
-    /// it must abort (kPanicExitCode) and its stderr must contain
-    /// `expectedStderr`.
-    ///
-    /// stderr — not stdout — is the panic channel, and stdout must NOT be
-    /// asserted around a panic: abort() does not flush stdio, so anything the
-    /// program printed before diverging is simply lost.
-    void expectPanic(const std::string &source, const std::string &expectedStderr)
-    {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
-                                     << source;
-        std::string err;
-        int code = linkAndRun(nullptr, nullptr, &err);
-        EXPECT_EQ(code, kPanicExitCode)
-            << "expected the process to abort on panic (exit " << kPanicExitCode
-            << "), got " << code << " for:\n"
-            << source;
-        EXPECT_NE(err.find(expectedStderr), std::string::npos)
-            << "expected stderr containing \"" << expectedStderr << "\", got:\n"
-            << err;
-    }
-
-    /// Compile, link, run, and assert both the exit code AND the captured stdout.
-    void expectOutput(const std::string &source, const std::string &expectedOut, int expectedExit)
-    {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
-                                     << source;
-        std::string out;
-        int code = linkAndRun(&out);
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
-                                      << source;
-        // Windows printf emits CRLF; normalize to LF so the comparison is
-        // platform-independent.
-        std::string normalized;
-        for (char c : out)
-            if (c != '\r') normalized += c;
-        EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n"
-                                           << source;
-    }
-
-    /// Compile, link, run feeding `input` to stdin, and assert exit code +
-    /// captured stdout (CRLF-normalized).
-    void expectOutputWithInput(const std::string &source, const std::string &input, const std::string &expectedOut, int expectedExit)
-    {
-        ASSERT_TRUE(compile(source)) << "compilation failed:\n"
-                                     << source;
-        std::string out;
-        int code = linkAndRun(&out, &input);
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
-                                      << source;
-        std::string normalized;
-        for (char c : out)
-            if (c != '\r') normalized += c;
-        EXPECT_EQ(normalized, expectedOut) << "stdout mismatch for:\n"
-                                           << source;
-    }
-
-    /// Compile, link and run `Examples/<name>.lis` (located via the exe path),
-    /// asserting the baseline exit code. Guards the canonical examples against
-    /// silent rot.
-    void expectExample(const std::string &name, int expectedExit)
-    {
-        fs::path root = stdLibDir.parent_path().parent_path().parent_path(); // .../Build/Binaries/lstdlib → repo root
-        fs::path ex = root / "Examples" / (name + ".lis");
-        std::ifstream f(ex);
-        ASSERT_TRUE(f.good()) << "cannot open " << ex;
-        std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        // Examples carry their own `impt` statements (no auto-prologue — the
-        // examples' legacy names like `max`/`Option`/`sum` would clash).
-        ASSERT_TRUE(compile(src, "")) << "compilation failed:\n"
-                                      << src;
-        int code = linkAndRun();
-        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
-                                      << src;
-    }
-};
-
-// ── basic codegen ──────────────────────────────────────────────────────────────
+#include "RuntimeTestFixture.hpp"
 
 TEST_F(RuntimeTest, Arithmetic)
 {
     expectRun("fn main() -> i32 { ret 1 + 2 * 3; }", 7);
-}
-
-// P8: the HIR printer's tree walk must include value-match arm tail expressions.
-// Before the fix getHIRChildren(HIRMatch) only walked arm.body, so
-// `Some(v) => v + 1` arms were invisible in --print-hir.
-TEST_F(RuntimeTest, HIRPrinterShowsMatchTailValue)
-{
-    auto ctx = std::make_shared<Context>();
-    ctx->filePath = "test.lis";
-    ctx->fileValue =
-        "enum Option<T> { Some(T), None } fn main() -> i32 {"
-        " let o = Option::Some(1); let y = match o { Some(v) => v + 1, None => 0 }; ret y; }";
-    Lexer lexer(ctx);
-    lexer.run();
-    Parser parser(ctx);
-    parser.parseAll();
-    HIRBuilder builder(ctx);
-    builder.run();
-
-    // printHIR writes to std::cout (C++ iostream), which does NOT follow the
-    // C-stdio freopen/dup2 dance that compileCapture relies on for the
-    // printf-based logger — the dump came back empty on MinGW. Swap std::cout's
-    // buffer into a local ostringstream instead (platform-independent).
-    std::ostringstream oss;
-    auto *oldBuf = std::cout.rdbuf(oss.rdbuf());
-    printHIR((HIRNode *)ctx->hirProgram.get());
-    std::cout.rdbuf(oldBuf);
-    std::string out = oss.str();
-    // The value arm `Some(v) => v + 1` must be walked and printed as a binary op.
-    // The HIRPrinter labels the node `binary_op` (lowercase, see opKindToString),
-    // so the assertion checks that exact label.
-    EXPECT_NE(out.find("binary_op"), std::string::npos)
-        << "value-match arm tail expression missing from HIR dump:\n"
-        << out;
-}
-
-// P1 regression: an integer literal too large for int64 used as a VALUE used to
-// crash HIRBuilder's unguarded std::stoll (std::terminate). It must now be
-// rejected with a clean diagnostic instead.
-TEST_F(RuntimeTest, ValueIntegerLiteralOverflowRejected)
-{
-    expectCompileFail("fn main() -> i32 { let a = 99999999999999999999; ret a as i32; }",
-        "overflows");
-}
-
-// ── P4 regression: cast narrowing must use explicit bit widths ─────────────────
-// The old check compared PrimKind enum ordinals, silently depending on the enum
-// being declared in width order. These pin the widths explicitly.
-
-TEST_F(RuntimeTest, CastI64ToI32NarrowingRejected)
-{
-    expectCompileFail("fn f(x: i64) -> i32 { ret x as i32; } fn main() -> i32 { ret f(1); }",
-        "smaller integer type");
 }
 
 TEST_F(RuntimeTest, CastI32ToI8NarrowingRejected)
@@ -599,23 +22,6 @@ TEST_F(RuntimeTest, CastI16ToI8NarrowingRejected)
         "smaller integer type");
 }
 
-TEST_F(RuntimeTest, CastI32ToI64WideningAllowed)
-{
-    // i32 → i64 is a widening cast — must compile and run.
-    expectRun("fn main() -> i64 { ret 5 as i64; }", 5);
-}
-
-TEST_F(RuntimeTest, CastI8ToI64WideningAllowed)
-{
-    // i8 → i64 is a widening cast. Literals are i32, so build the i8 input via
-    // char → i8 (the language's byte path, as string.lis does). NOTE: `'\\0'`
-    // in the C++ string is the two chars backslash-zero (a NUL char literal in
-    // .lis) — a bare `'\0'` would embed an actual NUL byte into the source.
-    expectRun("fn f(x: i8) -> i64 { ret x as i64; }"
-              " fn main() -> i64 { let a = 'A' as i8; let b = '\\0' as i8; ret f(a) + f(b); }",
-        65);
-}
-
 TEST_F(RuntimeTest, CastI16ToI32WideningAllowed)
 {
     // i16 → i32 widening. Build the i16 input via char → i16 (char may be cast
@@ -625,27 +31,10 @@ TEST_F(RuntimeTest, CastI16ToI32WideningAllowed)
         65);
 }
 
-// ── P5 regression: i64 → char must not silently truncate ──────────────────────
-// The old cast check `if (target == CHAR) break;` let ANY integer cast to char
-// through; i64 → char truncated to char's runtime i32 width silently. Now only
-// widths ≤ 32 bits may cast to char.
-
-TEST_F(RuntimeTest, CastI64ToCharRejected)
-{
-    expectCompileFail("fn f(x: i64) -> char { ret x as char; } fn main() -> i32 { ret 0; }",
-        "smaller integer type");
-}
-
 TEST_F(RuntimeTest, CastI32ToCharAllowed)
 {
     // 65 as char → 'A' (char is i32 at runtime; identity cast).
     expectRun("fn main() -> i32 { let c = 65 as char; ret c as i32; }", 65);
-}
-
-TEST_F(RuntimeTest, CastI8ToCharAllowed)
-{
-    // Byte read back as char (the cast the heap buffer's element reads use).
-    expectRun("fn main() -> i32 { let x = 'x' as i8; let c = x as char; ret c as i32; }", 120);
 }
 
 // NOTE: malformed-exponent literals (`1e`, `1e+`) are NOT testable here — the
@@ -656,29 +45,6 @@ TEST_F(RuntimeTest, IndirectCall)
 {
     // Function pointers (Step 6): `let fp = dbl; fp(21)`.
     expectRun("fn dbl(x: i32) -> i32 { ret x * 2; } fn main() -> i32 { let fp = dbl; ret fp(21); }", 42);
-}
-
-// ── reference-typed method receivers (regression) ─────────────────────────────
-
-TEST_F(RuntimeTest, MutRefReceiverMutatesThrough)
-{
-    // `let m = &mut c; m.add(4)` must mutate c (receiver passed by value).
-    expectRun("struct counter { pub value: i32 } impl counter {"
-              " fn new(v: i32) -> counter { ret counter { value: v }; }"
-              " fn add(self: &mut counter, d: i32) { self.value = self.value + d; }"
-              " fn get(self: &counter) -> i32 { ret self.value; } }"
-              " fn main() -> i32 { let mut c = counter::new(1); let m = &mut c;"
-              " m.add(4); let g = m.get(); ret c.value + g; }",
-        10);
-}
-
-TEST_F(RuntimeTest, SharedRefReceiverReadsThrough)
-{
-    expectRun("struct counter { pub value: i32 } impl counter {"
-              " fn new(v: i32) -> counter { ret counter { value: v }; }"
-              " fn get(self: &counter) -> i32 { ret self.value; } }"
-              " fn main() -> i32 { let c = counter::new(7); let r = &c; ret r.get(); }",
-        7);
 }
 
 // P2 regression (runtime): a trait mixing `&self` and `&mut self` methods used
@@ -695,61 +61,6 @@ TEST_F(RuntimeTest, TraitMixedReceiverKindsRuntime)
         7);
 }
 
-// ── ownership / drop glue at runtime ──────────────────────────────────────────
-
-TEST_F(RuntimeTest, DropGlueRunsAtBlockEnd)
-{
-    // A block-end drop must invoke the user Drop impl once (observable side effect).
-    expectRun("let counter = 0; struct X { pub v: i32 } impl Drop for X { fn drop(self) { counter = counter + 1; } }"
-              " fn main() -> i32 { { let x = X { v: 1 }; } ret counter; }",
-        1);
-}
-
-TEST_F(RuntimeTest, PartialMoveDropNoDoubleFree)
-{
-    // Borrow field a, move sibling b, scope-end drop must not double-free.
-    expectRun("struct Inner { pub v: i32 } impl Drop for Inner { fn drop(self) {} }"
-              " struct Pair { pub a: Inner, pub b: Inner }"
-              " fn main() -> i32 { let mut p = Pair { a: Inner{v:1}, b: Inner{v:2} };"
-              " let r = &p.a; let v = p.b; let w = r.v; ret w; }",
-        1);
-}
-
-// ── iterators / for-loops ──────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ForLoopOverCustomIterator)
-{
-    expectRun("struct Countdown { pub start: i32, pub current: i32 }"
-              " impl Countdown { fn new(n: i32) -> Countdown { ret Countdown { start: n, current: n }; } }"
-              " impl Iterator<i32> for Countdown {"
-              "   fn next(self: &mut Self) -> Option<i32> {"
-              "     if self.current > 0 { let v = self.current; self.current = self.current - 1;"
-              "                          ret Option::Some(v); }"
-              "     ret Option::None; } }"
-              " fn main() -> i32 { let mut total = 0; for x in Countdown::new(3) { total = total + x; } ret total; }",
-        6);
-}
-
-// ── generics tech-debt (0c) ────────────────────────────────────────────────────
-// These two shapes were broken (or worked only by a cache accident) before the
-// fix: a static method of a generic struct whose symbol carries the struct's
-// generic param.
-
-TEST_F(RuntimeTest, GenericStructStaticMethodNoOwnGenerics)
-{
-    // `fn new(_v: T)` uses the STRUCT's T without redeclaring it.
-    expectRun("struct box<T> { pub v: T } impl box { fn new(_v: T) { ret box { v: _v }; } }"
-              " fn main() -> i32 { let b = box::new(10); ret b.v; }",
-        10);
-}
-
-TEST_F(RuntimeTest, GenericStructStaticMethodOwnGenerics)
-{
-    expectRun("struct box<T> { pub v: T } impl box { fn new<T>(_v: T) { ret box { v: _v }; } }"
-              " fn main() -> i32 { let b = box::new(10); ret b.v; }",
-        10);
-}
-
 // P7: a generic struct with a trait constraint runs buildStructType twice
 // (pass-1b pre-registration + pass-2 full analysis) on the SAME generic param;
 // updateContraints must stay idempotent (no duplicate implTrait entries).
@@ -758,46 +69,6 @@ TEST_F(RuntimeTest, GenericStructWithTraitConstraint)
     expectRun("struct box<T: Numeric> { pub v: T } impl box { fn make(_v: T) -> box { ret box { v: _v }; } }"
               " fn main() -> i32 { let b = box::make(10); ret b.v; }",
         10);
-}
-
-// ── match / enum runtime ──────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, EnumMatchUnitVariant)
-{
-    expectRun("enum color { red, green, blue } fn main() -> i32 {"
-              " let c = color::green;"
-              " match c { red => { ret 1; }, green => { ret 2; }, blue => { ret 3; }, }"
-              " }",
-        2);
-}
-
-TEST_F(RuntimeTest, EnumMatchPayloadBinding)
-{
-    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
-                          " let o = Option::Some(7);"
-                          " match o { Some(v) => { ret v; }, None => { ret 0; }, }"
-                          " }",
-        "",
-        7);
-}
-
-TEST_F(RuntimeTest, EnumMatchWildcard)
-{
-    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
-                          " let o = Option::Some(3);"
-                          " match o { Some(v) => { ret v; }, _ => { ret 99; }, }"
-                          " }",
-        "",
-        3);
-}
-
-TEST_F(RuntimeTest, EnumMatchUnitVariantWildcard)
-{
-    expectRun("enum flag { on, off } fn main() -> i32 {"
-              " let o = flag::off;"
-              " match o { on => { ret 1; }, _ => { ret 0; }, }"
-              " }",
-        0);
 }
 
 TEST_F(RuntimeTest, EnumVariantIsMoved)
@@ -811,59 +82,11 @@ TEST_F(RuntimeTest, EnumVariantIsMoved)
         5);
 }
 
-TEST_F(RuntimeTest, EnumMatchNonCopyPayload)
-{
-    // A non-Copy payload is MOVED into the binding; reading it works.
-    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { pub v: i32 }"
-                          " fn main() -> i32 { let o = Option::Some(Inner{v: 5}); let mut got = 0;"
-                          " match o { Some(x) => { got = x.v; }, None => { got = 99; }, }"
-                          " ret got; }",
-        "",
-        5);
-}
-
-TEST_F(RuntimeTest, EnumMatchNonCopyNoDoubleFree)
-{
-    // The moved payload is dropped exactly once (drop glue counter).
-    expectRunWithPrologue("enum Option<T> { Some(T), None } struct Inner { pub v: i32 }"
-                          " let ctr = 0; impl Drop for Inner { fn drop(self) { ctr = ctr + 1; } }"
-                          " fn main() -> i32 { { let o = Option::Some(Inner{v: 5});"
-                          " match o { Some(x) => { }, None => { }, } }"
-                          " ret ctr; }",
-        "impt drop { Drop };\n",
-        1);
-}
-
-TEST_F(RuntimeTest, EnumMatchExpression)
-{
-    // `let y = match ...` — a value match with tail expressions.
-    expectRunWithPrologue("enum Option<T> { Some(T), None } fn main() -> i32 {"
-                          " let o = Option::Some(7);"
-                          " let y = match o { Some(v) => v + 1, None => 0 };"
-                          " ret y; }",
-        "",
-        8);
-}
-
 // ── print builtins ─────────────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, PrintInt)
 {
     expectOutput("fn main() -> i32 { print_int(42); println(); ret 0; }", "42\n", 0);
-}
-
-TEST_F(RuntimeTest, PrintStringAndChar)
-{
-    expectOutput("fn main() -> i32 { print_str(\"hi\"); print_char('!'); println(); ret 0; }",
-        "hi!\n",
-        0);
-}
-
-TEST_F(RuntimeTest, PrintFloatAndBool)
-{
-    expectOutput("fn main() -> i32 { print_float(3.5); println(); print_bool(true); println(); ret 0; }",
-        "3.500000\n1\n",
-        0);
 }
 
 TEST_F(RuntimeTest, PrintMultiple)
@@ -873,37 +96,9 @@ TEST_F(RuntimeTest, PrintMultiple)
         0);
 }
 
-// ── math helpers ───────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, MathMinMax)
-{
-    expectRun("fn main() -> i32 { ret min(3, 7) + max(3, 7); }", 10);
-}
-
-TEST_F(RuntimeTest, MathAbsClamp)
-{
-    expectRun("fn main() -> i32 { ret abs(0 - 5) + clamp(12, 0, 10); }", 15);
-}
-
 TEST_F(RuntimeTest, MathFabs)
 {
     expectRun("fn main() -> i32 { if fabs(0.0 - 2.5) > 2.0 { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, MathMinMaxFloat)
-{
-    expectRun("fn main() -> i32 { if max(3.5, 4.5) == 4.5 { ret 1; } ret 0; }", 1);
-}
-
-// ── operator type-check / Numeric constraint (soundness) ───────────────────────
-
-TEST_F(RuntimeTest, GenericMaxOnStructRejected)
-{
-    // `max<T: Numeric>` with a struct arg must be rejected at the call site,
-    // NOT crash LLVM on an invalid ICmp.
-    expectCompileFail("struct box { pub a: i32, pub b: i32 }"
-                      " fn main() -> i32 { max(box{a:1,b:2}, box{a:3,b:4}); ret 0; }",
-        "Numeric");
 }
 
 TEST_F(RuntimeTest, StructComparisonRejected)
@@ -913,69 +108,11 @@ TEST_F(RuntimeTest, StructComparisonRejected)
         "cannot be applied");
 }
 
-TEST_F(RuntimeTest, UnconstrainedGenericOpRejected)
-{
-    // A generic function using `<` on T must declare `T: Numeric`.
-    expectCompileFail("fn m<T>(a: T, b: T) -> T { if a < b { ret a; } ret b; }"
-                      " fn main() -> i32 { ret m(1, 2); }",
-        "Numeric");
-}
-
-TEST_F(RuntimeTest, StructLogicalOpRejected)
-{
-    expectCompileFail("struct box { pub a: i32 } fn main() -> i32 {"
-                      " let x = box{a:1}; if x && x { ret 1; } ret 0; }",
-        "bool");
-}
-
 TEST_F(RuntimeTest, ImplNumericOnStructRejected)
 {
     expectCompileFail("struct box { pub a: i32 } impl Numeric for box {}"
                       " fn main() -> i32 { ret 0; }",
         "operator overloading");
-}
-
-// ── operator overloading ───────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, OperatorOverloadAdd)
-{
-    // `impl Add for Vec2` + `v1 + v2` lowers to `v1.add(v2)`.
-    expectRun("struct Vec2 { pub x: i32, pub y: i32 }"
-              " impl Add for Vec2 { fn add(self, other: Self) -> Vec2 {"
-              "   ret Vec2 { x: self.x + other.x, y: self.y + other.y }; } }"
-              " fn main() -> i32 { let a = Vec2{x:1,y:2}; let b = Vec2{x:3,y:4};"
-              " let c = a + b; ret c.x + c.y; }",
-        10);
-}
-
-TEST_F(RuntimeTest, OperatorOverloadComparison)
-{
-    // `impl PartialOrd for Vec2` + `v1 < v2` → `v1.lt(v2)` returns bool.
-    expectRun("struct Vec2 { pub x: i32, pub y: i32 }"
-              " impl PartialOrd for Vec2 { fn lt(self, other: Self) -> bool {"
-              "   ret (self.x + self.y) < (other.x + other.y); }"
-              "   fn gt(self, other: Self) -> bool {"
-              "   ret (self.x + self.y) > (other.x + other.y); }"
-              "   fn le(self, other: Self) -> bool {"
-              "   ret (self.x + self.y) <= (other.x + other.y); }"
-              "   fn ge(self, other: Self) -> bool {"
-              "   ret (self.x + self.y) >= (other.x + other.y); } }"
-              " fn main() -> i32 { let a = Vec2{x:1,y:1}; let b = Vec2{x:5,y:5};"
-              " if a < b { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, GenericOperatorFunctionStruct)
-{
-    // A generic `fn sum<T: Add>` monomorphized over a struct implementing Add.
-    expectRunWithPrologue("struct Vec2 { pub x: i32, pub y: i32 }"
-                          " impl Add for Vec2 { fn add(self, other: Self) -> Vec2 {"
-                          "   ret Vec2 { x: self.x + other.x, y: self.y + other.y }; } }"
-                          " fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
-                          " fn main() -> i32 { let v = sum(Vec2{x:1,y:2}, Vec2{x:3,y:4});"
-                          " ret v.x + v.y; }",
-        kMathPrologue,
-        10);
 }
 
 TEST_F(RuntimeTest, GenericOperatorFunctionPrimitive)
@@ -988,17 +125,6 @@ TEST_F(RuntimeTest, GenericOperatorFunctionPrimitive)
         14);
 }
 
-TEST_F(RuntimeTest, OperatorOverloadChained)
-{
-    // `a + b + c` → `(a.add(b)).add(c)`.
-    expectRun("struct Vec2 { pub x: i32, pub y: i32 }"
-              " impl Add for Vec2 { fn add(self, other: Self) -> Vec2 {"
-              "   ret Vec2 { x: self.x + other.x, y: self.y + other.y }; } }"
-              " fn main() -> i32 { let a = Vec2{x:1,y:0}; let b = Vec2{x:2,y:0};"
-              " let c = Vec2{x:3,y:0}; let d = a + b + c; ret d.x; }",
-        6);
-}
-
 TEST_F(RuntimeTest, StructWithoutOpTraitRejected)
 {
     // A struct NOT implementing `Add` still rejects `+` with a clean error.
@@ -1007,49 +133,10 @@ TEST_F(RuntimeTest, StructWithoutOpTraitRejected)
         "Add");
 }
 
-// ── stdlib breadth (option / math / char / iterator helpers) ───────────────────
-
-TEST_F(RuntimeTest, OptionHelpers)
-{
-    // A bare `Option::None` can't infer T in a generic-arg position, so the
-    // test builds a concrete none via a local helper (return-position inference).
-    expectRun("fn mk_none() -> Option<i32> { ret Option::None; }"
-              " fn main() -> i32 {"
-              " let a = Option::Some(7);"
-              " let x = unwrap_or(a, 0); let y = unwrap_or(mk_none(), 0);"
-              " ret x + y; }",
-        7);
-}
-
-TEST_F(RuntimeTest, OptionIsSomeAndOr)
-{
-    expectRun("fn mk_none() -> Option<i32> { ret Option::None; }"
-              " fn main() -> i32 {"
-              " let s = is_some(Option::Some(1));"
-              " let n = is_none(mk_none());"
-              " let a = unwrap_or(and(Option::Some(1), Option::Some(5)), 0);"
-              " let o = unwrap_or(or(mk_none(), Option::Some(9)), 0);"
-              " let mut flag = 0;"
-              " if s && n { flag = 1; }"
-              " ret a + o + flag; }",
-        15);
-}
-
 TEST_F(RuntimeTest, MathGcdLcmIpow)
 {
     expectRun("fn main() -> i32 { ret gcd(12, 18) + lcm(4, 6) + ipow(2, 10); }",
         6 + 12 + 1024);
-}
-
-TEST_F(RuntimeTest, MathSignEven)
-{
-    expectRun("fn main() -> i32 {"
-              " let s = sign(0 - 5); let e = is_even(10); let o = is_odd(7);"
-              " let mut total = s;"
-              " if e { total = total + 1; }"
-              " if o { total = total + 1; }"
-              " ret total; }",
-        1); // -1 + 1 + 1
 }
 
 TEST_F(RuntimeTest, MathDegLerp)
@@ -1073,57 +160,6 @@ TEST_F(RuntimeTest, CharClassification)
         8);
 }
 
-TEST_F(RuntimeTest, IteratorLastNthProduct)
-{
-    expectRun("fn main() -> i32 {"
-              " let last_ = unwrap_or(last(range(1, 5)), 0);"    // 4
-              " let nth_ = unwrap_or(nth(range(10, 20), 3), 0);" // 13
-              " let prod = product(range(1, 5));"                // 24
-              " ret last_ + nth_ + prod; }",
-        4 + 13 + 24);
-}
-
-// ── input builtins (read_line / read_int / read_f64) ─────────────────────────
-
-TEST_F(RuntimeTest, ReadInt)
-{
-    expectOutputWithInput(
-        "fn main() -> i32 { let n = read_int(); print_int(n); println(); ret 0; }",
-        "42\n",
-        "42\n",
-        0);
-}
-
-TEST_F(RuntimeTest, ReadLine)
-{
-    // read_line strips the trailing newline.
-    expectOutputWithInput(
-        "fn main() -> i32 { let line = read_line(); print_str(line); println(); ret 0; }",
-        "hello\n",
-        "hello\n",
-        0);
-}
-
-TEST_F(RuntimeTest, ReadF64)
-{
-    expectOutputWithInput(
-        "fn main() -> i32 { let x = read_f64(); print_float(x); println(); ret 0; }",
-        "3.5\n",
-        "3.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, ReadIntThenLine)
-{
-    // read_int consumes one line; the next read_line consumes the next.
-    expectOutputWithInput(
-        "fn main() -> i32 { let n = read_int(); let line = read_line();"
-        " print_int(n); print_char(','); print_str(line); println(); ret 0; }",
-        "42\nhello\n",
-        "42,hello\n",
-        0);
-}
-
 // ── arrays / heap / String (Step 22) ─────────────────────────────────────────
 
 TEST_F(RuntimeTest, ArrayLiteralAndIndex)
@@ -1131,48 +167,10 @@ TEST_F(RuntimeTest, ArrayLiteralAndIndex)
     expectRun("fn main() -> i32 { let a = [1, 2, 3, 4]; ret a[0] + a[3]; }", 5);
 }
 
-TEST_F(RuntimeTest, ArrayElementWrite)
-{
-    expectRun("fn main() -> i32 { let mut a = [1, 2, 3]; a[1] = 9; ret a[1]; }", 9);
-}
-
-TEST_F(RuntimeTest, ArrayMovedNotCopied)
-{
-    // Arrays are Move: `let b = a` invalidates a (single ownership).
-    expectCompileFail("fn main() -> i32 { let a = [1, 2]; let b = a; ret a[0]; }",
-        "moved");
-}
-
-TEST_F(RuntimeTest, ArrayOfCharsAndLoop)
-{
-    expectRun("fn main() -> i32 { let mut a = [1, 2, 3, 4]; let mut s = 0;"
-              " let mut i = 0; while i < 4 { s = s + a[i]; i = i + 1; }"
-              " a[3] = 40; ret s + a[3]; }",
-        50);
-}
-
 TEST_F(RuntimeTest, ArrayNonCopyElementRejected)
 {
     expectCompileFail("struct S { pub v: i32 } fn main() -> i32 { let a = [S{v:1}]; ret 0; }",
         "must be Copy");
-}
-
-TEST_F(RuntimeTest, StringFromLitAndPrint)
-{
-    expectOutput("fn main() -> i32 { let s = String::from_lit(\"hi\");"
-                 " print_str(s.to_cstr()); println(); ret 0; }",
-        "hi\n",
-        0);
-}
-
-TEST_F(RuntimeTest, StringPushAndGrow)
-{
-    // from_lit("hello") + push_char + push_str — exercises the buffer grow path.
-    expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\"); let mut t = s;"
-                 " t.push_char(' '); t.push_str(\"world\");"
-                 " print_str(t.to_cstr()); println(); ret t.len(); }",
-        "hello world\n",
-        11);
 }
 
 TEST_F(RuntimeTest, StringIndexOption)
@@ -1184,62 +182,12 @@ TEST_F(RuntimeTest, StringIndexOption)
         104 - 63);
 }
 
-TEST_F(RuntimeTest, StringIsEmpty)
-{
-    // is_empty() flips from true (String::new) to false after a push_char.
-    expectRun("fn main() -> i32 { let mut s = String::new();"
-              " let mut e = 0;"
-              " if s.is_empty() { e = e + 1; }"
-              " s.push_char('a');"
-              " if s.is_empty() { ret e; } else { ret e + 1; }"
-              " }",
-        2);
-}
-
-TEST_F(RuntimeTest, StringFreedExactlyOnce)
-{
-    // A heap-owning struct with a Drop counter: moving it transfers ownership,
-    // so the scope-end drop runs exactly once — never twice. The heap buffer is
-    // a String now (the heap primitives themselves are stdlib-private).
-    expectRun("let frees = 0;"
-              " struct Buf { pub s: String }"
-              " impl Drop for Buf { fn drop(self) { frees = frees + 1; } }"
-              " fn main() -> i32 {"
-              "   { let b = Buf { s: String::from_lit(\"abc\") }; let c = b; }" // b moved into c, c drops → frees 1
-              "   ret frees; }",
-        1);
-}
-
 TEST_F(RuntimeTest, StringMoveTransfersOwnership)
 {
     // After `let t = s;`, s is unusable (single ownership).
     expectCompileFail("fn main() -> i32 { let s = String::from_lit(\"a\");"
                       " let t = s; let x = s.len(); ret x; }",
         "moved");
-}
-
-TEST_F(RuntimeTest, ToStringBuiltins)
-{
-    expectOutput("fn main() -> i32 { let a = to_string_i32(42); print_str(a.to_cstr()); println();"
-                 " let b = to_string_f64(3.5); print_str(b.to_cstr()); println();"
-                 " let c = to_string_bool(true); print_str(c.to_cstr()); println(); ret 0; }",
-        "42\n3.500000\n1\n",
-        0);
-}
-
-// The heap primitives ARE the compiler's unsafe core: they take raw pointers and
-// lower straight to libc malloc/free/memcpy/strlen with no bounds, lifetime or
-// aliasing checking. They are therefore callable only from the standard library,
-// which is what makes the rest of the language's heap use auditable. The heap
-// path itself is covered end-to-end by the String tests (alloc/grow/free).
-TEST_F(RuntimeTest, HeapPrimitivesAreStdlibOnly)
-{
-    expectCompileFail("fn main() -> i32 { let p = __alloc(8); ret 0; }",
-        "can only be called from the standard library");
-    expectCompileFail("fn main() -> i32 { let p = __alloc(8); __free(p); ret 0; }",
-        "can only be called from the standard library");
-    expectCompileFail("fn f(p: *i8) -> i32 { ret __strlen(p); } fn main() -> i32 { ret 0; }",
-        "can only be called from the standard library");
 }
 
 // Raw-pointer indexing is unchecked C pointer arithmetic — also stdlib-only, and
@@ -1254,36 +202,6 @@ TEST_F(RuntimeTest, RawPointerOpsAreStdlibOnly)
         "is not indexable");
 }
 
-// ── raw pointer types (*T / *mut T): the heap buffer's real type ───────────────
-// A raw pointer is a first-class type (parameter, return type, struct field) and
-// lowers to opaque `ptr`. It owns nothing: a struct holding one gets NO drop
-// glue (that is why needsDrop() exists next to isCopyable()).
-
-TEST_F(RuntimeTest, PointerTypeIsAFirstClassType)
-{
-    expectRun("struct Buf { pub data: *mut i8, pub count: i32 }"
-              " fn count_of(b: &Buf) -> i32 { ret b.count; }"
-              " fn take(p: *i8, q: *mut i8) -> i32 { ret 0; }"
-              " fn main() -> i32 { ret 0; }",
-        0);
-}
-
-TEST_F(RuntimeTest, PointerIsNotAnInteger)
-{
-    // Casts stay primitive-to-primitive, so a raw pointer can never be fabricated
-    // from a literal or from an integer: there is no way to forge an address.
-    expectCompileFail("fn main() -> i32 { let p: *mut i8 = 0; ret 0; }",
-        "type mismatch in variable declaration");
-}
-
-TEST_F(RuntimeTest, ArrayOfRawPointersRejected)
-{
-    // Same rule as reference elements: an array of indirections would let an
-    // owner escape into a copied element.
-    expectCompileFail("fn f(a: [*mut i8; 2]) -> i32 { ret 0; } fn main() -> i32 { ret 0; }",
-        "raw pointer");
-}
-
 // ── field visibility (`pub`) is ENFORCED ───────────────────────────────────────
 // A private field is reachable only from a method of the declaring type. That is
 // what lets a type keep an invariant: String's data/len/cap stay consistent
@@ -1295,51 +213,6 @@ TEST_F(RuntimeTest, PrivateFieldIsInaccessibleOutsideItsType)
         "field 'v' of 'S' is private");
 }
 
-TEST_F(RuntimeTest, PrivateFieldCannotBeConstructedOutsideItsType)
-{
-    expectCompileFail("struct S { v: i32 } fn main() -> i32 { let s = S { v: 1 }; ret 0; }",
-        "field 'v' of 'S' is private");
-}
-
-TEST_F(RuntimeTest, PublicFieldIsAccessibleAnywhere)
-{
-    expectRun("struct S { pub v: i32 } fn main() -> i32 { let s = S { v: 5 }; ret s.v; }", 5);
-}
-
-TEST_F(RuntimeTest, PrivateFieldIsAccessibleFromItsTypesOwnMethods)
-{
-    // An instance method AND a static one — the latter is how a type constructs
-    // itself (String::new builds the private triple). The declaring type is what
-    // matters, not the kind of method.
-    expectRun("struct S { v: i32 } impl S { fn make() -> S { ret S { v: 7 }; }"
-              " fn get(self: &S) -> i32 { ret self.v; } }"
-              " fn main() -> i32 { let s = S::make(); ret s.get(); }",
-        7);
-}
-
-TEST_F(RuntimeTest, PrivateFieldIsInaccessibleFromAFreeFunction)
-{
-    expectCompileFail("struct S { v: i32 } fn peek(s: &S) -> i32 { ret s.v; }"
-                      " fn main() -> i32 { ret 0; }",
-        "field 'v' of 'S' is private");
-}
-
-TEST_F(RuntimeTest, PrivateFieldIsInaccessibleAcrossModules)
-{
-    // The same rule across module boundaries — another module cannot read the
-    // field (the diagnostic itself is asserted by the tests above).
-    EXPECT_FALSE(compileMulti(
-        "impt types { S };\nfn main() -> i32 { let s = S::make(); ret s.v; }",
-        {{"types", "struct S { v: i32 } impl S { fn make() -> S { ret S { v: 1 }; } }"}}));
-}
-
-TEST_F(RuntimeTest, StringFieldsArePrivateButAccessorsWork)
-{
-    expectCompileFail("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len; }",
-        "field 'len' of 'String' is private");
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len(); }", 2);
-}
-
 // ── Step 23 robustness fixes ──────────────────────────────────────────────────
 
 // B1: array-size literal that doesn't fit int64 → clean sema error, not a
@@ -1348,41 +221,6 @@ TEST_F(RuntimeTest, ArraySizeLiteralTooLargeRejected)
 {
     expectCompileFail("fn main() -> i32 { let a: [i32; 99999999999999999999] = [1]; ret a[0]; }",
         "exceeds the limit");
-}
-
-// B2: array size above the element cap → clean error, not an LLVM assert.
-TEST_F(RuntimeTest, ArraySizeOverLimitRejected)
-{
-    expectCompileFail("fn main() -> i32 { let a: [i32; 5000000000] = [1]; ret a[0]; }",
-        "exceeds the limit");
-}
-
-// B4: empty array literal has no element type to infer.
-TEST_F(RuntimeTest, EmptyArrayLiteralRejected)
-{
-    expectCompileFail("fn main() -> i32 { let a = []; ret 0; }",
-        "empty array literal");
-}
-
-// B4: explicit `[T; 0]` is not a legal type.
-TEST_F(RuntimeTest, ZeroSizeArrayTypeRejected)
-{
-    expectCompileFail("fn main() -> i32 { let a: [i32; 0] = [1]; ret 0; }",
-        "array size must be a positive integer");
-}
-
-// B3: arrays are not first-class — reject as function params / returns before
-// the LLVM backend asserts on a non-first-class ArrayType.
-TEST_F(RuntimeTest, ArrayAsFunctionParamRejected)
-{
-    expectCompileFail("fn f(a: [i32; 2]) -> i32 { ret a[0]; } fn main() -> i32 { ret 0; }",
-        "array type cannot be a function parameter");
-}
-
-TEST_F(RuntimeTest, ArrayAsFunctionReturnRejected)
-{
-    expectCompileFail("fn f() -> [i32; 2] { ret [1, 2]; } fn main() -> i32 { ret 0; }",
-        "array type cannot be a function return");
 }
 
 // B5: indexing a reference to a struct is illegal (codegen has no element type).
@@ -1396,84 +234,12 @@ TEST_F(RuntimeTest, IndexRefToStructRejected)
         "is not indexable");
 }
 
-// C1: global initializers must be literals — else they'd silently zero-initialize.
-TEST_F(RuntimeTest, GlobalArrayInitializerRejected)
-{
-    expectCompileFail("let g = [1, 2]; fn main() -> i32 { ret 0; }",
-        "global variable initializer must be a literal");
-}
-
-TEST_F(RuntimeTest, GlobalCallInitializerRejected)
-{
-    expectCompileFail("let s = String::new(); fn main() -> i32 { ret 0; }",
-        "global variable initializer must be a literal");
-}
-
-// E4: reference elements would escape origin tracking — reject the array.
-TEST_F(RuntimeTest, ArrayOfReferencesRejected)
-{
-    expectCompileFail("fn main() -> i32 { let mut x = 1; let a = [&mut x]; ret 0; }",
-        "cannot be a reference");
-}
-
-// E5: builtin / libc names are reserved.
-TEST_F(RuntimeTest, ReservedBuiltinNameRejected)
-{
-    expectCompileFail("fn __alloc(n: i32) -> i32 { ret 0; } fn main() -> i32 { ret 0; }",
-        "reserved by the compiler");
-}
-
-TEST_F(RuntimeTest, ReservedLibcNameRejected)
-{
-    expectCompileFail("fn strlen(s: &i8) -> i32 { ret 0; } fn main() -> i32 { ret 0; }",
-        "reserved by the compiler");
-}
-
 // E2: writing through a SHARED reference to an array is rejected.
 TEST_F(RuntimeTest, WriteThroughSharedRefRejected)
 {
     expectCompileFail("fn main() -> i32 { let a = [1, 2]; let r: &[i32; 2] = &a;"
                       " r[0] = 5; ret 0; }",
         "cannot assign through a shared reference");
-}
-
-// E2 (runtime): write THROUGH a &mut field of an immutable binding is allowed.
-TEST_F(RuntimeTest, WriteThroughMutFieldIndex)
-{
-    // The old spelling wrote through String's `&mut i8` buffer field. That buffer
-    // is a stdlib-private raw pointer now, so the same rule — writing through a
-    // `&mut` FIELD does not require the root binding to be `mut` — is exercised
-    // with a `&mut [i32; N]` field.
-    expectOutput("struct Holder { pub buf: &mut [i32; 2] }"
-                 " fn main() -> i32 { let mut a = [1, 2]; let h = Holder { buf: &mut a };"
-                 " h.buf[0] = 5; print_int(a[0]); println(); ret 0; }",
-        "5\n",
-        0);
-}
-
-// E2 (runtime): write through a &mut reference to an array is allowed.
-TEST_F(RuntimeTest, WriteThroughMutRefToArray)
-{
-    expectRun("fn main() -> i32 { let mut a = [1, 2, 3]; let r = &mut a;"
-              " r[1] = 9; ret a[1]; }",
-        9);
-}
-
-// D1 (runtime): an out-of-bounds array index aborts the process.
-TEST_F(RuntimeTest, ArrayOobAborts)
-{
-    ASSERT_TRUE(compile("fn main() -> i32 { let a = [1, 2, 3]; ret a[99]; }"))
-        << "compilation failed";
-    int code = linkAndRun();
-    EXPECT_NE(code, 0) << "out-of-bounds array index must abort, got exit 0";
-}
-
-// D1 (runtime): in-bounds indexing does NOT abort.
-TEST_F(RuntimeTest, ArrayInBoundsNoAbort)
-{
-    expectRun("fn main() -> i32 { let a = [1, 2, 3]; let mut s = 0; let mut i = 0;"
-              " while i < 3 { s = s + a[i]; i = i + 1; } ret s; }",
-        6);
 }
 
 // A2: %f of 1e100 is a ~108-char string — would overflow the old 64-byte
@@ -1489,82 +255,12 @@ TEST_F(RuntimeTest, ToStringF64LargeNoOverflow)
     EXPECT_GT(out.size(), (size_t)64) << "to_string_f64(1e100) was truncated";
 }
 
-// A1: push_char grows exactly when the null terminator would overflow.
-TEST_F(RuntimeTest, StringPushCharGrowsAtCap)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new();"
-              " let mut i = 0; while i < 16 { s.push_char('a'); i = i + 1; }"
-              " ret s.len(); }",
-        16);
-}
-
-// ── 2026-08-12 spec decisions ────────────────────────────────────────────
-// 1. Default parameter values (`a: i32 = 5`) were dead syntax (parsed then
-//    ignored by every later pass) — removed; must now be a parse error.
-TEST_F(RuntimeTest, DefaultParameterValuesRejected)
-{
-    expectCompileFail("fn f(a: i32 = 5) -> i32 { ret a; } fn main() -> i32 { ret f(1); }",
-        "default parameter values are not supported");
-}
-
-// 2. #[i_know] statement attribute: relaxes the integer-narrowing cast ERROR
-//    to a warning (data may still truncate — the user takes responsibility).
-TEST_F(RuntimeTest, IKnowAttributeAllowsNarrowingCast)
-{
-    expectRun("fn main() -> i32 { let big: i64 = 1 as i64;"
-              " #[i_know = \"i know what I'm doing\"] let t: i32 = big as i32;"
-              " ret t; }",
-        1);
-}
-
-// Same, but the attribute in front of an ASSIGNMENT statement.
-TEST_F(RuntimeTest, IKnowAttributeOnAssignment)
-{
-    expectRun("fn main() -> i32 { let big: i64 = 5 as i64; let mut t: i32 = 0;"
-              " #[i_know] t = big as i32;"
-              " ret t; }",
-        5);
-}
-
 // Without #[i_know], i64 -> i32 narrowing stays a hard error (regression).
 TEST_F(RuntimeTest, NarrowingCastWithoutIKnowRejected)
 {
     expectCompileFail("fn main() -> i32 { let big: i64 = 1 as i64;"
                       " let t: i32 = big as i32; ret t; }",
         "cannot cast integer to a smaller integer type");
-}
-
-// ── P12 regression: control flow nested in an if body must execute ────────────
-// buildIf sealed the branch ENTRY block (thenId/elseId) with Goto(join), which
-// OVERWROTE the nested control flow's own terminator — the inner if/while/for
-// body became unreachable. Seal the branch's actual END block instead.
-
-TEST_F(RuntimeTest, NestedIfInsideIfExecutes)
-{
-    expectRun("fn main() -> i32 { let x = 5; let mut r = 0;"
-              " if x > 3 { if x > 4 { r = 1; } } ret r; }",
-        1);
-}
-
-TEST_F(RuntimeTest, WhileInsideIfBodyExecutes)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut r = 0;"
-              " if true { while i < 2 { r = r + 1; i = i + 1; } } ret r; }",
-        2);
-}
-
-TEST_F(RuntimeTest, ForInsideIfBodyExecutes)
-{
-    expectRun("fn main() -> i32 { let mut r = 0;"
-              " if true { for x in range(1, 3) { r = r + x; } } ret r; }",
-        3);
-}
-
-TEST_F(RuntimeTest, NestedIfInElseBodyExecutes)
-{
-    expectRun("fn main() -> i32 { let x = 1; let mut r = 0;"
-              " if x > 3 { r = 1; } else { if x > 0 { r = 2; } } ret r; }",
-        2);
 }
 
 TEST_F(RuntimeTest, ElseIfChainRunsWithoutCrash)
@@ -1578,40 +274,6 @@ TEST_F(RuntimeTest, ElseIfChainRunsWithoutCrash)
         2);
 }
 
-TEST_F(RuntimeTest, ElseIfElseBranchRuns)
-{
-    // The final `else` of an else-if chain must also be reachable.
-    expectRun("fn main() -> i32 { let x = 50; let mut r = 0;"
-              " if x < 5 { r = 1; } else if x < 20 { r = 2; } else { r = 3; }"
-              " ret r; }",
-        3);
-}
-
-TEST_F(RuntimeTest, StatementAfterNestedIfExecutes)
-{
-    // Not only the nested if's own body — a statement AFTER it in the same block
-    // must execute too (the pre-fix seal overwrote control flow past the if).
-    expectRun("fn main() -> i32 { let mut r = 0;"
-              " if true { if true { r = 1; } r = 5; } ret r; }",
-        5);
-}
-
-TEST_F(RuntimeTest, IfInsideWhileBodyRegression)
-{
-    // Direction check: while body containing an if already worked; must stay.
-    expectRun("fn main() -> i32 { let mut i = 0; let mut r = 0;"
-              " while i < 2 { if true { r = 1; } i = i + 1; } ret r; }",
-        1);
-}
-
-TEST_F(RuntimeTest, IfInsideForBodyRegression)
-{
-    // Direction check: for body containing an if already worked; must stay.
-    expectRun("fn main() -> i32 { let mut r = 0;"
-              " for x in range(1, 4) { if x > 1 { r = r + x; } } ret r; }",
-        5);
-}
-
 // ── P13 regression: a bare if as a branch must not crash the compiler ─────────
 // HIRBuilder dynamic_cast'd every branch to HIRBlock; `else if ...` (else is a
 // bare IfStmt) and `if a if b {...}` (then is a bare IfStmt) produced a null
@@ -1623,60 +285,9 @@ TEST_F(RuntimeTest, BareIfThenBranchRuns)
     expectRun("fn main() -> i32 { let mut r = 0; if true if true { r = 1; } ret r; }", 1);
 }
 
-TEST_F(RuntimeTest, BareIfThenElseBranchRuns)
-{
-    expectRun("fn main() -> i32 { let x = 1; let mut r = 0;"
-              " if true if x > 0 { r = 2; } ret r; }",
-        2);
-}
-
-// ── P14 regression: bool→int cast must be a zero-extension ────────────────────
-// bool is lowered to LLVM i1; the widening cast used SExt, so `true as i32`
-// sign-extended to -1 instead of 1. bool is unsigned → ZExt.
-
-TEST_F(RuntimeTest, BoolTrueCastToIntIsOne)
-{
-    expectRun("fn main() -> i32 { let b = true; ret b as i32; }", 1);
-}
-
-TEST_F(RuntimeTest, BoolFalseCastToIntIsZero)
-{
-    expectRun("fn main() -> i32 { let b = false; ret b as i32; }", 0);
-}
-
-TEST_F(RuntimeTest, BoolTrueCastToInt64IsOne)
-{
-    expectRun("fn main() -> i64 { let b = true; ret b as i64; }", 1);
-}
-
-TEST_F(RuntimeTest, BoolCastResultInArithmetic)
-{
-    // The cast result must be a usable 1/0 value, not -1 (which would give 9).
-    expectRun("fn main() -> i32 { let b = true; ret 10 + (b as i32); }", 11);
-}
-
-// ── B: arithmetic semantics ─────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ArithmeticLargeProduct)
-{
-    expectRun("fn main() -> i32 { ret 1000000 * 1000; }", 1000000000);
-}
-
-TEST_F(RuntimeTest, ArithmeticLeftAssociativeSubtraction)
-{
-    // Equal precedence is left-associative: (100 - 50) - 25 = 25, not
-    // 100 - (50 - 25) = 75.
-    expectRun("fn main() -> i32 { ret 100 - 50 - 25; }", 25);
-}
-
 TEST_F(RuntimeTest, ArithmeticPrecedenceMulBeforeAdd)
 {
     expectRun("fn main() -> i32 { ret 2 + 3 * 4; }", 14);
-}
-
-TEST_F(RuntimeTest, ArithmeticParenthesesOverridePrecedence)
-{
-    expectRun("fn main() -> i32 { ret (2 + 3) * 4; }", 20);
 }
 
 TEST_F(RuntimeTest, ArithmeticDivisionTruncates)
@@ -1684,45 +295,9 @@ TEST_F(RuntimeTest, ArithmeticDivisionTruncates)
     expectRun("fn main() -> i32 { ret 7 / 2; }", 3);
 }
 
-TEST_F(RuntimeTest, ArithmeticModuloPositive)
-{
-    expectRun("fn main() -> i32 { ret 17 % 5; }", 2);
-}
-
-TEST_F(RuntimeTest, ArithmeticModuloNegativeIsCstyle)
-{
-    // The result of `%` follows the dividend (C semantics): -17 % 5 = -2.
-    // Take the magnitude so the exit code stays positive.
-    expectRun("fn main() -> i32 { let a = 0 - 17; let r = a % 5;"
-              " if r < 0 { ret 0 - r; } ret r; }",
-        2);
-}
-
-TEST_F(RuntimeTest, ArithmeticModuloExactMultiple)
-{
-    expectRun("fn main() -> i32 { ret 20 % 5; }", 0);
-}
-
 TEST_F(RuntimeTest, ArithmeticSumChain)
 {
     expectRun("fn main() -> i32 { ret 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10; }", 55);
-}
-
-TEST_F(RuntimeTest, ArithmeticMixedOps)
-{
-    // 2 + 6 * 7 / 3 - 4 = 2 + 14 - 4 = 12.
-    expectRun("fn main() -> i32 { ret 2 + 6 * 7 / 3 - 4; }", 12);
-}
-
-// ── B: integer widths (i8/i16/i64) ─────────────────────────────────────────────
-// i8/i16 values come from char casts (`'A' as i8`); i64 from widening casts.
-
-TEST_F(RuntimeTest, I8AdditionWraps)
-{
-    // 65 + 65 = 130 overflows signed i8 → -126.
-    expectRun("fn main() -> i32 { let a = 'A' as i8; let b = 'A' as i8;"
-              " let c = a + b; ret c as i32; }",
-        -126);
 }
 
 TEST_F(RuntimeTest, I8SubtractionNegative)
@@ -1730,26 +305,6 @@ TEST_F(RuntimeTest, I8SubtractionNegative)
     expectRun("fn main() -> i32 { let a = 'A' as i8; let b = 'B' as i8;"
               " let c = a - b; ret c as i32; }",
         -1);
-}
-
-TEST_F(RuntimeTest, I8WidenToI32)
-{
-    expectRun("fn main() -> i32 { let a = 'A' as i8; ret a as i32; }", 65);
-}
-
-TEST_F(RuntimeTest, I8WidenToI64SignExtends)
-{
-    // -1 as i8 widens to i64 as -1 (sign extension, not zero extension).
-    expectRun("fn main() -> i64 { let a = 'A' as i8; let b = 'B' as i8;"
-              " let c = a - b; ret c as i64; }",
-        -1);
-}
-
-TEST_F(RuntimeTest, I16AdditionFits)
-{
-    expectRun("fn main() -> i32 { let a = 'A' as i16; let b = 'A' as i16;"
-              " let c = a + b; ret c as i32; }",
-        130);
 }
 
 TEST_F(RuntimeTest, I16WidenToI64)
@@ -1764,50 +319,11 @@ TEST_F(RuntimeTest, I64Addition)
         12);
 }
 
-TEST_F(RuntimeTest, I64Multiplication)
-{
-    expectRun("fn main() -> i64 { let a = 100 as i64; let b = 20 as i64;"
-              " let c = a * b; ret c; }",
-        2000);
-}
-
-TEST_F(RuntimeTest, I64Division)
-{
-    expectRun("fn main() -> i64 { let a = 100 as i64; let b = 25 as i64;"
-              " let c = a / b; ret c; }",
-        4);
-}
-
-TEST_F(RuntimeTest, IntegerWidthChainWidening)
-{
-    // i8 → i16 → i32 → i64, value preserved at each step.
-    expectRun("fn main() -> i64 { let a = 'A' as i8; let b = a as i16;"
-              " let c = b as i32; let d = c as i64; ret d; }",
-        65);
-}
-
 TEST_F(RuntimeTest, I8Comparison)
 {
     expectRun("fn main() -> i32 { let a = 'A' as i8; let b = 'B' as i8;"
               " if a < b { ret 1; } ret 0; }",
         1);
-}
-
-TEST_F(RuntimeTest, I8BitwiseAnd)
-{
-    // 'A'=65 (0b1000001) & 'B'=66 (0b1000010) = 0b1000000 = 64.
-    expectRun("fn main() -> i32 { let a = 'A' as i8; let b = 'B' as i8;"
-              " let c = a & b; ret c as i32; }",
-        64);
-}
-
-// ── B: float (f64) semantics ───────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, FloatAddition)
-{
-    expectOutput("fn main() -> i32 { print_float(1.5 + 2.5); println(); ret 0; }",
-        "4.000000\n",
-        0);
 }
 
 TEST_F(RuntimeTest, FloatMultiplication)
@@ -1817,51 +333,10 @@ TEST_F(RuntimeTest, FloatMultiplication)
         0);
 }
 
-TEST_F(RuntimeTest, FloatDivision)
-{
-    expectOutput("fn main() -> i32 { print_float(7.0 / 2.0); println(); ret 0; }",
-        "3.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, FloatComparison)
-{
-    expectRun("fn main() -> i32 { if 3.5 > 3.0 { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, FloatEquality)
-{
-    expectRun("fn main() -> i32 { if 1.0 == 1.0 { ret 1; } ret 0; }", 1);
-}
-
 TEST_F(RuntimeTest, IntToFloatCast)
 {
     expectOutput("fn main() -> i32 { let x = 5 as f64; print_float(x); println(); ret 0; }",
         "5.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, I64ToFloatCast)
-{
-    expectOutput("fn main() -> i32 { let a = 3 as i64; let b = a as f64;"
-                 " print_float(b); println(); ret 0; }",
-        "3.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, FloatModuloVariables)
-{
-    expectOutput("fn main() -> i32 { let x = 10.0; let y = 4.0; let z = x - y * 2.0;"
-                 " print_float(z); println(); ret 0; }",
-        "2.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, FloatScientificLiteral)
-{
-    // 1e2 is 100.0.
-    expectOutput("fn main() -> i32 { print_float(1e2); println(); ret 0; }",
-        "100.000000\n",
         0);
 }
 
@@ -1871,67 +346,15 @@ TEST_F(RuntimeTest, FloatNaNComparisonIsFalse)
     expectRun("fn main() -> i32 { let x = 0.0 / 0.0; if x > 0.0 { ret 1; } ret 0; }", 0);
 }
 
-// ── B: casts ───────────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, CharToIntCast)
-{
-    expectRun("fn main() -> i32 { let c = 'A'; ret c as i32; }", 65);
-}
-
-TEST_F(RuntimeTest, IntToCharCast)
-{
-    expectRun("fn main() -> i32 { let x = 66 as i32; let c = x as char; ret c as i32; }", 66);
-}
-
-TEST_F(RuntimeTest, I8ToCharCast)
-{
-    expectRun("fn main() -> i32 { let a = 'A' as i8; let c = a as char; ret c as i32; }", 65);
-}
-
 TEST_F(RuntimeTest, BoolToCharCastRejected)
 {
     expectCompileFail("fn main() -> i32 { let b = true; let c = b as char; ret c as i32; }",
         "only be cast to integer");
 }
 
-TEST_F(RuntimeTest, FloatToIntCastRejected)
-{
-    expectCompileFail("fn main() -> i32 { let x = 3.7 as i32; ret x; }", "cannot be cast");
-}
-
-TEST_F(RuntimeTest, CharToI64Widening)
-{
-    expectRun("fn main() -> i64 { let c = 'A'; ret c as i64; }", 65);
-}
-
-TEST_F(RuntimeTest, I64ToI32NarrowingRejected)
-{
-    expectCompileFail("fn main() -> i32 { let a = 5 as i64; ret a as i32; }",
-        "smaller integer type");
-}
-
-TEST_F(RuntimeTest, IntToBoolCastRejected)
-{
-    // bool is not an integer target → "integer can only be cast to float or integer".
-    expectCompileFail("fn main() -> i32 { let x = 1 as bool; ret 0; }",
-        "can only be cast to float or integer");
-}
-
-TEST_F(RuntimeTest, SameTypeCastUselessInfo)
-{
-    // i32 → i32 is a useless cast (INFO, not an error) — compile succeeds.
-    expectRun("fn main() -> i32 { ret 5 as i32; }", 5);
-}
-
 TEST_F(RuntimeTest, I16ToI64Widening)
 {
     expectRun("fn main() -> i64 { let a = 'A' as i16; ret a as i64; }", 65);
-}
-
-TEST_F(RuntimeTest, CastInExpression)
-{
-    // A cast can appear anywhere an expression can.
-    expectRun("fn main() -> i32 { ret ('B' as i32) + 1; }", 67);
 }
 
 TEST_F(RuntimeTest, CharToBoolCastRejected)
@@ -1940,53 +363,11 @@ TEST_F(RuntimeTest, CharToBoolCastRejected)
         "only be cast to integer");
 }
 
-TEST_F(RuntimeTest, I8ToI16Widening)
-{
-    expectRun("fn main() -> i32 { let a = 'A' as i8; let b = a as i16; ret b as i32; }", 65);
-}
-
-// ── B: control flow (while / for / break / continue) ───────────────────────────
-
-TEST_F(RuntimeTest, WhileSum0To9)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 10 { s = s + i; i = i + 1; } ret s; }",
-        45);
-}
-
-TEST_F(RuntimeTest, WhileEvenSumUpTo20)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 20 { i = i + 1; if (i % 2) == 0 { s = s + i; } } ret s; }",
-        110);
-}
-
 TEST_F(RuntimeTest, WhileCountDown)
 {
     expectRun("fn main() -> i32 { let mut n = 5; let mut c = 0;"
               " while n > 0 { n = n - 1; c = c + 1; } ret c; }",
         5);
-}
-
-TEST_F(RuntimeTest, WhileTrueWithBreak)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; while true { i = i + 1;"
-              " if i > 5 { break; } } ret i; }",
-        6);
-}
-
-TEST_F(RuntimeTest, WhileBreakEarlyExitCode)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 100 { i = i + 1; if i == 10 { break; } s = s + i; } ret s; }",
-        45);
-}
-
-TEST_F(RuntimeTest, WhileContinueSkipsEven)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 10 { i = i + 1; if (i % 2) == 0 { continue; } s = s + i; } ret s; }",
-        25);
 }
 
 TEST_F(RuntimeTest, WhileNestedBlocks)
@@ -1997,56 +378,11 @@ TEST_F(RuntimeTest, WhileNestedBlocks)
         9);
 }
 
-TEST_F(RuntimeTest, WhileBodyUsesLoopVar)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; let mut i = 1;"
-              " while i <= 5 { s = s + i * 10; i = i + 1; } ret s; }",
-        150);
-}
-
-TEST_F(RuntimeTest, ForRangeSum1To10)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 11) { s = s + x; } ret s; }", 55);
-}
-
-TEST_F(RuntimeTest, ForRangeEmpty)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(5, 5) { s = s + x; } ret s; }", 0);
-}
-
-TEST_F(RuntimeTest, ForRangeBackwardEmpty)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(10, 1) { s = s + x; } ret s; }", 0);
-}
-
 TEST_F(RuntimeTest, ForBreak)
 {
     expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 100) {"
               " if x > 5 { break; } s = s + x; } ret s; }",
         15);
-}
-
-TEST_F(RuntimeTest, ForContinueSkipsThree)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 6) {"
-              " if x == 3 { continue; } s = s + x; } ret s; }",
-        12);
-}
-
-TEST_F(RuntimeTest, ForNestedProductSum)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for i in range(1, 4) {"
-              " for j in range(1, 4) { s = s + i * j; } } ret s; }",
-        36);
-}
-
-TEST_F(RuntimeTest, ForVarNotLeakedOutside)
-{
-    // The loop variable is scoped to the loop — reusing the name outside fails
-    // (single-name rule), but a DIFFERENT name works.
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 3) { s = s + x; }"
-              " let y = 100; ret s + y; }",
-        103);
 }
 
 TEST_F(RuntimeTest, ForOnCustomIterator)
@@ -2061,48 +397,6 @@ TEST_F(RuntimeTest, ForOnCustomIterator)
         6);
 }
 
-// ── B: recursion ───────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, RecursionFactorial)
-{
-    expectRun("fn fact(n: i32) -> i32 { if n <= 1 { ret 1; } ret n * fact(n - 1); }"
-              " fn main() -> i32 { ret fact(5); }",
-        120);
-}
-
-TEST_F(RuntimeTest, RecursionFibonacci)
-{
-    expectRun("fn fib(n: i32) -> i32 { if n < 2 { ret n; }"
-              " ret fib(n - 1) + fib(n - 2); } fn main() -> i32 { ret fib(7); }",
-        13);
-}
-
-TEST_F(RuntimeTest, RecursionCountDown)
-{
-    // `down` (not `count` — that name collides with the preloaded stdlib's
-    // `count<T: Iterator>`).
-    expectRun("fn down(n: i32, acc: i32) -> i32 { if n == 0 { ret acc; }"
-              " ret down(n - 1, acc + 1); } fn main() -> i32 { ret down(10, 0); }",
-        10);
-}
-
-TEST_F(RuntimeTest, RecursionSumUpTo)
-{
-    // `sumto` (not `sum` — collides with stdlib). Sum(20)=210 fits the 8-bit
-    // exit code; sum(100)=5050 would truncate to 186.
-    expectRun("fn sumto(n: i32) -> i32 { if n == 0 { ret 0; } ret n + sumto(n - 1); }"
-              " fn main() -> i32 { ret sumto(20); }",
-        210);
-}
-
-TEST_F(RuntimeTest, RecursionNestedDepth)
-{
-    // Count nesting depth via two mutually-independent recursive helpers.
-    expectRun("fn down(n: i32) -> i32 { if n == 0 { ret 0; } ret 1 + down(n - 1); }"
-              " fn main() -> i32 { ret down(3) + down(4); }",
-        7);
-}
-
 // ── B: function pointers ───────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, FunctionPointerMultipleCalls)
@@ -2112,67 +406,14 @@ TEST_F(RuntimeTest, FunctionPointerMultipleCalls)
         24);
 }
 
-TEST_F(RuntimeTest, FunctionPointerReassignment)
-{
-    expectRun("fn dbl(x: i32) -> i32 { ret x * 2; } fn id(x: i32) -> i32 { ret x; }"
-              " fn main() -> i32 { let mut f = dbl; f = id; ret f(5); }",
-        5);
-}
-
-TEST_F(RuntimeTest, FunctionPointerChained)
-{
-    expectRun("fn inc(x: i32) -> i32 { ret x + 1; } fn main() -> i32 { let f = inc;"
-              " let a = f(10); let b = f(a); ret b; }",
-        12);
-}
-
-TEST_F(RuntimeTest, FunctionPointerMoveSemantics)
-{
-    // A function reference is a value: `let b = a` MOVES it, leaving `a`
-    // unusable (single-owner). Calling through the moved binding works.
-    expectRun("fn dbl(x: i32) -> i32 { ret x * 2; } fn main() -> i32 { let a = dbl;"
-              " let b = a; ret b(5); }",
-        10);
-}
-
-// ── B: bitwise & and | (infix) ─────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, BitAndBasic)
-{
-    expectRun("fn main() -> i32 { ret 6 & 3; }", 2);
-}
-
 TEST_F(RuntimeTest, BitOrBasic)
 {
     expectRun("fn main() -> i32 { ret 6 | 3; }", 7);
 }
 
-TEST_F(RuntimeTest, BitAndZero)
-{
-    expectRun("fn main() -> i32 { ret 7 & 0; }", 0);
-}
-
 TEST_F(RuntimeTest, BitOrMaxByte)
 {
     expectRun("fn main() -> i32 { ret 0 | 255; }", 255);
-}
-
-TEST_F(RuntimeTest, BitOpsCombined)
-{
-    // (12 & 10) | 3 = 8 | 3 = 11.
-    expectRun("fn main() -> i32 { ret (12 & 10) | 3; }", 11);
-}
-
-TEST_F(RuntimeTest, BitAndAssociativity)
-{
-    // 15 & 12 = 12, 12 & 10 = 8.
-    expectRun("fn main() -> i32 { ret 15 & 12 & 10; }", 8);
-}
-
-TEST_F(RuntimeTest, BitOrAssociativity)
-{
-    // 1 | 2 = 3, 3 | 4 = 7.
-    expectRun("fn main() -> i32 { ret 1 | 2 | 4; }", 7);
 }
 
 TEST_F(RuntimeTest, BitAndPrecedenceLowerThanCompare)
@@ -2183,69 +424,11 @@ TEST_F(RuntimeTest, BitAndPrecedenceLowerThanCompare)
     expectRun("fn main() -> i32 { ret 2 * 3 & 5; }", 4);
 }
 
-TEST_F(RuntimeTest, BitAndWithComparisons)
-{
-    expectRun("fn main() -> i32 { let a = 6 & 3; let b = 8 | 1;"
-              " if a < b { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, BitwiseOnI64)
-{
-    expectRun("fn main() -> i64 { let a = 12 as i64; let b = 10 as i64;"
-              " let c = a & b; ret c; }",
-        8);
-}
-
-// ── B: enums and match ─────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, EnumUnitDispatchValue)
-{
-    expectRun("enum E { A, B, C } fn main() -> i32 { let e = E::B;"
-              " let y = match e { A => 1, B => 2, C => 3 }; ret y; }",
-        2);
-}
-
-TEST_F(RuntimeTest, EnumPayloadMatch)
-{
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 { let o = O::Some(7);"
-              " match o { Some(v) => { ret v; }, None => { ret 0; } } }",
-        7);
-}
-
-TEST_F(RuntimeTest, EnumMultiPayload)
-{
-    expectRun("enum E { P(i32, i32), Q } fn main() -> i32 { let e = E::P(3, 4);"
-              " match e { P(a, b) => { ret a + b; }, Q => { ret 0; } } }",
-        7);
-}
-
 TEST_F(RuntimeTest, EnumWildcardArm)
 {
     expectRun("enum E { A, B, C } fn main() -> i32 { let e = E::C;"
               " match e { A => { ret 1; }, _ => { ret 9; } } }",
         9);
-}
-
-TEST_F(RuntimeTest, EnumValueArmNoBlock)
-{
-    expectRun("enum E { A, B } fn main() -> i32 { let e = E::A;"
-              " let y = match e { A => 10, B => 20 }; ret y; }",
-        10);
-}
-
-TEST_F(RuntimeTest, EnumMatchNonExhaustiveRejected)
-{
-    expectCompileFail("enum E { A, B } fn main() -> i32 { let e = E::A;"
-                      " match e { A => { ret 0; } } }",
-        "exhaustive");
-}
-
-TEST_F(RuntimeTest, EnumMatchNonEnumRejected)
-{
-    expectCompileFail("fn main() -> i32 { let x = 5; match x { 1 => { ret 0; },"
-                      " _ => { ret 1; } } }",
-        "");
 }
 
 TEST_F(RuntimeTest, EnumEqualityWithoutTraitRejected)
@@ -2255,32 +438,6 @@ TEST_F(RuntimeTest, EnumEqualityWithoutTraitRejected)
         "implement");
 }
 
-TEST_F(RuntimeTest, EnumWithPartialEqImpl)
-{
-    expectRun("enum E { A, B } impl PartialEq for E { fn eq(self, o: Self) -> bool {"
-              " ret true; } fn ne(self, o: Self) -> bool { ret false; } }"
-              " fn main() -> i32 { let e = E::A; if e == E::A { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, EnumNestedMatch)
-{
-    expectRun("enum A { X(i32), Y } enum B { M(i32), N } fn main() -> i32 {"
-              " let a = A::X(3); match a { X(v) => { match B::M(v) {"
-              " M(w) => { ret w; }, N => { ret 0; } } }, Y => { ret 0; } } }",
-        3);
-}
-
-TEST_F(RuntimeTest, EnumGenericTwoInstantiations)
-{
-    // The same generic enum instantiated with two different payload types.
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
-              " let a = O::Some(5); let b = O::Some('A');"
-              " let mut r = 0; match a { Some(v) => { r = v; }, None => { r = 0; } }"
-              " match b { Some(c) => { ret r + (c as i32); }, None => { ret r; } } }",
-        70);
-}
-
 // ── B: globals ─────────────────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, GlobalRead)
@@ -2288,26 +445,9 @@ TEST_F(RuntimeTest, GlobalRead)
     expectRun("let g = 10; fn main() -> i32 { ret g; }", 10);
 }
 
-TEST_F(RuntimeTest, GlobalWrite)
-{
-    expectRun("let g = 1; fn main() -> i32 { g = g + 5; ret g; }", 6);
-}
-
 TEST_F(RuntimeTest, GlobalMultipleSum)
 {
     expectRun("let a = 1; let b = 2; let c = 3; fn main() -> i32 { ret a + b + c; }", 6);
-}
-
-TEST_F(RuntimeTest, GlobalReadFromFunction)
-{
-    expectRun("let g = 5; fn get() -> i32 { ret g; } fn main() -> i32 { ret get(); }", 5);
-}
-
-TEST_F(RuntimeTest, GlobalMutatedInFunction)
-{
-    expectRun("let g = 0; fn bump() { g = g + 1; } fn main() -> i32 {"
-              " bump(); bump(); bump(); ret g; }",
-        3);
 }
 
 TEST_F(RuntimeTest, GlobalExprInitializerRejected)
@@ -2318,65 +458,11 @@ TEST_F(RuntimeTest, GlobalExprInitializerRejected)
         "global variable initializer must be a literal");
 }
 
-TEST_F(RuntimeTest, GlobalFloatLiteral)
-{
-    expectOutput("let g = 2.5; fn main() -> i32 { print_float(g); println(); ret 0; }",
-        "2.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, GlobalBoolLiteral)
-{
-    expectRun("let g = true; fn main() -> i32 { if g { ret 1; } ret 0; }", 1);
-}
-
-// ── B: generics ────────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, GenericIdentityFunction)
-{
-    expectRun("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 { ret id(42); }", 42);
-}
-
-TEST_F(RuntimeTest, GenericPickLarger)
-{
-    expectRun("fn pick<T: Numeric>(a: T, b: T) -> T { if a > b { ret a; } ret b; }"
-              " fn main() -> i32 { ret pick(3, 9); }",
-        9);
-}
-
-TEST_F(RuntimeTest, GenericStructPair)
-{
-    expectRun("struct Pair<T> { pub a: T, pub b: T } fn main() -> i32 {"
-              " let p = Pair { a: 3, b: 4 }; ret p.a + p.b; }",
-        7);
-}
-
 TEST_F(RuntimeTest, GenericStructNested)
 {
     expectRun("struct Box<T> { pub v: T } fn main() -> i32 { let b = Box { v: Box { v: 5 } };"
               " ret b.v.v; }",
         5);
-}
-
-TEST_F(RuntimeTest, GenericStructMethod)
-{
-    expectRun("struct W<T> { pub v: T } impl W<T> { fn get(self) -> T { ret self.v; } }"
-              " fn main() -> i32 { let w = W { v: 8 }; ret w.get(); }",
-        8);
-}
-
-TEST_F(RuntimeTest, GenericFloatInstantiation)
-{
-    expectOutput("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 {"
-                 " let f = id(3.5); print_float(f); println(); ret 0; }",
-        "3.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, GenericUnboundedAddRejected)
-{
-    expectCompileFail("fn f<T>(x: T) -> T { ret x + x; } fn main() -> i32 { ret 0; }",
-        "Numeric");
 }
 
 TEST_F(RuntimeTest, GenericBoundedAddWorks)
@@ -2386,58 +472,14 @@ TEST_F(RuntimeTest, GenericBoundedAddWorks)
         42);
 }
 
-TEST_F(RuntimeTest, GenericOperatorOverload)
-{
-    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
-              " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
-              " let a = V { x: 3 }; let b = V { x: 4 }; ret (a + b).x; }",
-        7);
-}
-
-// ── B: arrays ──────────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ArrayBasicIndex)
-{
-    expectRun("fn main() -> i32 { let a = [1, 2, 3]; ret a[0] + a[2]; }", 4);
-}
-
-TEST_F(RuntimeTest, ArrayMutableElement)
-{
-    expectRun("fn main() -> i32 { let mut a = [1, 2, 3]; a[1] = 9; ret a[1]; }", 9);
-}
-
 TEST_F(RuntimeTest, ArrayReferenceIndex)
 {
     expectRun("fn main() -> i32 { let a = [5, 6, 7]; let r = &a; ret r[0] + r[2]; }", 12);
 }
 
-TEST_F(RuntimeTest, ArrayLoopSum)
-{
-    expectRun("fn main() -> i32 { let a = [10, 20, 30]; let mut s = 0; let mut i = 0;"
-              " while i < 3 { s = s + a[i]; i = i + 1; } ret s; }",
-        60);
-}
-
-TEST_F(RuntimeTest, ArraySingleElement)
-{
-    expectRun("fn main() -> i32 { let a = [42]; ret a[0]; }", 42);
-}
-
 TEST_F(RuntimeTest, ArrayIndexLastElement)
 {
     expectRun("fn main() -> i32 { let a = [7, 8, 9]; ret a[2]; }", 9);
-}
-
-// ── B: strings ─────────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, StringNewIsEmpty)
-{
-    expectRun("fn main() -> i32 { let s = String::new(); ret s.len(); }", 0);
-}
-
-TEST_F(RuntimeTest, StringFromLiteral)
-{
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len(); }", 2);
 }
 
 TEST_F(RuntimeTest, StringPushChars)
@@ -2447,65 +489,11 @@ TEST_F(RuntimeTest, StringPushChars)
         2);
 }
 
-TEST_F(RuntimeTest, StringPushStr)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new(); s.push_str(\"hello\");"
-              " ret s.len(); }",
-        5);
-}
-
-TEST_F(RuntimeTest, StringGrowPastCap)
-{
-    // 30 pushes forces multiple buffer reallocations (cap starts at 16).
-    expectRun("fn main() -> i32 { let mut s = String::new(); let mut i = 0;"
-              " while i < 30 { s.push_char('a'); i = i + 1; } ret s.len(); }",
-        30);
-}
-
-TEST_F(RuntimeTest, StringIndexInBounds)
-{
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"abc\");"
-              " match s.index(1) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
-        98);
-}
-
 TEST_F(RuntimeTest, StringIndexOutOfBounds)
 {
     expectRun("fn main() -> i32 { let s = String::from_lit(\"abc\");"
               " match s.index(99) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
         0);
-}
-
-TEST_F(RuntimeTest, StringEmptyIndex)
-{
-    expectRun("fn main() -> i32 { let s = String::new();"
-              " match s.index(0) { Some(c) => { ret 1; }, None => { ret 0; } } }",
-        0);
-}
-
-TEST_F(RuntimeTest, StringToCstrPrints)
-{
-    expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\");"
-                 " let p = s.to_cstr(); print_str(p); println(); ret 0; }",
-        "hello\n",
-        0);
-}
-
-TEST_F(RuntimeTest, StringMutateByte)
-{
-    // `s.data[0] = 'x'` is no longer expressible from user code (the buffer is a
-    // stdlib-private raw pointer), so the round-trip goes through the safe API.
-    expectRun("fn main() -> i32 { let mut s = String::from_lit(\"hi\");"
-              " s.push_char('x'); match s.index(2) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
-        120);
-}
-
-TEST_F(RuntimeTest, StringPushStrThenIndex)
-{
-    expectRun("fn main() -> i32 { let mut s = String::from_lit(\"ab\");"
-              " s.push_str(\"cde\"); match s.index(4) {"
-              " Some(c) => { ret c as i32; }, None => { ret 0; } } }",
-        101);
 }
 
 // ── B: operator overloading ────────────────────────────────────────────────────
@@ -2518,57 +506,12 @@ TEST_F(RuntimeTest, OpOverloadSubtraction)
         7);
 }
 
-TEST_F(RuntimeTest, OpOverloadMultiplication)
-{
-    expectRun("struct V { pub x: i32 } impl Mul for V { fn mul(self, o: Self) -> V {"
-              " ret V { x: self.x * o.x }; } } fn main() -> i32 {"
-              " let a = V { x: 6 }; let b = V { x: 7 }; ret (a * b).x; }",
-        42);
-}
-
-TEST_F(RuntimeTest, OpOverloadDivision)
-{
-    expectRun("struct V { pub x: i32 } impl Div for V { fn div(self, o: Self) -> V {"
-              " ret V { x: self.x / o.x }; } } fn main() -> i32 {"
-              " let a = V { x: 20 }; let b = V { x: 4 }; ret (a / b).x; }",
-        5);
-}
-
 TEST_F(RuntimeTest, OpOverloadRemainder)
 {
     expectRun("struct V { pub x: i32 } impl Rem for V { fn rem(self, o: Self) -> V {"
               " ret V { x: self.x % o.x }; } } fn main() -> i32 {"
               " let a = V { x: 17 }; let b = V { x: 5 }; ret (a % b).x; }",
         2);
-}
-
-TEST_F(RuntimeTest, OpOverloadChainedPrecedence)
-{
-    // a + b * c: * binds tighter than + even under overloading → 1 + 6 = 7.
-    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
-              " ret V { x: self.x + o.x }; } } impl Mul for V { fn mul(self, o: Self) -> V {"
-              " ret V { x: self.x * o.x }; } } fn main() -> i32 {"
-              " let a = V { x: 1 }; let b = V { x: 2 }; let c = V { x: 3 };"
-              " let r = a + b * c; ret r.x; }",
-        7);
-}
-
-TEST_F(RuntimeTest, OpOverloadNotEqual)
-{
-    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
-              " ret self.x == o.x; } fn ne(self, o: Self) -> bool { ret self.x != o.x; } }"
-              " fn main() -> i32 { let a = V { x: 1 }; let b = V { x: 2 };"
-              " if a != b { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, OpOverloadEqual)
-{
-    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
-              " ret self.x == o.x; } fn ne(self, o: Self) -> bool { ret self.x != o.x; } }"
-              " fn main() -> i32 { let a = V { x: 5 }; let b = V { x: 5 };"
-              " if a == b { ret 1; } ret 0; }",
-        1);
 }
 
 TEST_F(RuntimeTest, OpOverloadLessThan)
@@ -2582,50 +525,9 @@ TEST_F(RuntimeTest, OpOverloadLessThan)
         1);
 }
 
-TEST_F(RuntimeTest, OpOverloadOnGeneric)
-{
-    expectRunWithPrologue("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
-                          " ret V { x: self.x + o.x }; } } fn sum<T: Add>(a: T, b: T) -> T { ret a + b; }"
-                          " fn main() -> i32 { let r = sum(V { x: 2 }, V { x: 5 }); ret r.x; }",
-        kMathPrologue,
-        7);
-}
-
-// ── E: option.lis ──────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, OptionIsSomeOnSome)
-{
-    expectRun("fn main() -> i32 { let o = Option::Some(7); if is_some(o) { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, OptionIsSomeOnNone)
-{
-    // `Option::None` standalone can't infer T — pin it via a return-type helper.
-    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
-              " fn main() -> i32 { let o = none_i(); if is_some(o) { ret 1; } ret 0; }",
-        0);
-}
-
-TEST_F(RuntimeTest, OptionIsNoneOnNone)
-{
-    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
-              " fn main() -> i32 { let o = none_i(); if is_none(o) { ret 1; } ret 0; }",
-        1);
-}
-
 TEST_F(RuntimeTest, OptionIsNoneOnSome)
 {
     expectRun("fn main() -> i32 { let o = Option::Some(3); if is_none(o) { ret 1; } ret 0; }", 0);
-}
-
-TEST_F(RuntimeTest, OptionUnwrapOrSome)
-{
-    expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(7), 0); }", 7);
-}
-
-TEST_F(RuntimeTest, OptionUnwrapOrNone)
-{
-    expectRun("fn main() -> i32 { ret unwrap_or(Option::None, 0); }", 0);
 }
 
 TEST_F(RuntimeTest, OptionUnwrapOrFallbackUsed)
@@ -2633,30 +535,6 @@ TEST_F(RuntimeTest, OptionUnwrapOrFallbackUsed)
     expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
               " fn main() -> i32 { let o = none_i(); ret unwrap_or(o, 42); }",
         42);
-}
-
-TEST_F(RuntimeTest, OptionAndSomeSome)
-{
-    // and(Some(1), Some(5)) → Some(5).
-    expectRun("fn main() -> i32 { let a = and(Option::Some(1), Option::Some(5));"
-              " match a { Some(v) => { ret v; }, None => { ret 0; } } }",
-        5);
-}
-
-TEST_F(RuntimeTest, OptionAndNoneSome)
-{
-    // and(None, Some(5)) → None.
-    expectRun("fn main() -> i32 { let a = and(Option::None, Option::Some(5));"
-              " match a { Some(v) => { ret 1; }, None => { ret 0; } } }",
-        0);
-}
-
-TEST_F(RuntimeTest, OptionOrSomeNone)
-{
-    // or(Some(1), Some(9)) → Some(1) — first Some wins.
-    expectRun("fn main() -> i32 { let a = or(Option::Some(1), Option::Some(9));"
-              " match a { Some(v) => { ret v; }, None => { ret 0; } } }",
-        1);
 }
 
 TEST_F(RuntimeTest, OptionOrNoneSome)
@@ -2667,48 +545,9 @@ TEST_F(RuntimeTest, OptionOrNoneSome)
         9);
 }
 
-TEST_F(RuntimeTest, OptionOrNoneNone)
-{
-    expectRun("fn none_i() -> Option<i32> { ret Option::None; }"
-              " fn main() -> i32 { let a = or(none_i(), none_i());"
-              " match a { Some(v) => { ret 1; }, None => { ret 0; } } }",
-        0);
-}
-
-TEST_F(RuntimeTest, OptionFunctionsChain)
-{
-    expectRun("fn main() -> i32 { let o = Option::Some(3);"
-              " let u = unwrap_or(o, 100); let s = is_some(Option::Some(u));"
-              " if s { ret u; } ret 0; }",
-        3);
-}
-
-// ── E: math.lis — min/max/clamp/abs ───────────────────────────────────────────
-
-TEST_F(RuntimeTest, MathMinBasic)
-{
-    expectRun("fn main() -> i32 { ret min(3, 7); }", 3);
-}
-
 TEST_F(RuntimeTest, MathMinEqual)
 {
     expectRun("fn main() -> i32 { ret min(5, 5); }", 5);
-}
-
-TEST_F(RuntimeTest, MathMinNegative)
-{
-    // min(-7, 3): -7 < 3 → -7. Take the magnitude to keep the exit code clean.
-    expectRun("fn main() -> i32 { let m = min(0 - 7, 3); if m < 0 { ret 0 - m; } ret m; }", 7);
-}
-
-TEST_F(RuntimeTest, MathMaxBasic)
-{
-    expectRun("fn main() -> i32 { ret max(3, 7); }", 7);
-}
-
-TEST_F(RuntimeTest, MathMaxEqual)
-{
-    expectRun("fn main() -> i32 { ret max(9, 9); }", 9);
 }
 
 TEST_F(RuntimeTest, MathMaxNegative)
@@ -2716,60 +555,14 @@ TEST_F(RuntimeTest, MathMaxNegative)
     expectRun("fn main() -> i32 { ret max(0 - 5, 2); }", 2);
 }
 
-TEST_F(RuntimeTest, MathClampWithin)
-{
-    expectRun("fn main() -> i32 { ret clamp(5, 0, 10); }", 5);
-}
-
-TEST_F(RuntimeTest, MathClampBelow)
-{
-    expectRun("fn main() -> i32 { ret clamp(0 - 1, 0, 10); }", 0);
-}
-
 TEST_F(RuntimeTest, MathClampAbove)
 {
     expectRun("fn main() -> i32 { ret clamp(11, 0, 10); }", 10);
 }
 
-TEST_F(RuntimeTest, MathClampEqual)
-{
-    expectRun("fn main() -> i32 { ret clamp(10, 0, 10); }", 10);
-}
-
-TEST_F(RuntimeTest, MathAbsPositive)
-{
-    expectRun("fn main() -> i32 { ret abs(7); }", 7);
-}
-
-TEST_F(RuntimeTest, MathAbsNegative)
-{
-    expectRun("fn main() -> i32 { ret abs(0 - 7); }", 7);
-}
-
 TEST_F(RuntimeTest, MathAbsZero)
 {
     expectRun("fn main() -> i32 { ret abs(0); }", 0);
-}
-
-TEST_F(RuntimeTest, MathFabsNegative)
-{
-    expectOutput("fn main() -> i32 { print_float(fabs(0.0 - 3.5)); println(); ret 0; }",
-        "3.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, MathFabsPositive)
-{
-    expectOutput("fn main() -> i32 { print_float(fabs(2.25)); println(); ret 0; }",
-        "2.250000\n",
-        0);
-}
-
-// ── E: math.lis — gcd/lcm/ipow ─────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, MathGcdBasic)
-{
-    expectRun("fn main() -> i32 { ret gcd(12, 18); }", 6);
 }
 
 TEST_F(RuntimeTest, MathGcdCoprime)
@@ -2783,44 +576,9 @@ TEST_F(RuntimeTest, MathGcdWithZero)
     expectRun("fn main() -> i32 { ret gcd(0, 5); }", 5);
 }
 
-TEST_F(RuntimeTest, MathGcdSame)
-{
-    expectRun("fn main() -> i32 { ret gcd(6, 6); }", 6);
-}
-
-TEST_F(RuntimeTest, MathGcdOneIsOne)
-{
-    expectRun("fn main() -> i32 { ret gcd(1, 100); }", 1);
-}
-
-TEST_F(RuntimeTest, MathLcmBasic)
-{
-    expectRun("fn main() -> i32 { ret lcm(4, 6); }", 12);
-}
-
-TEST_F(RuntimeTest, MathLcmCoprime)
-{
-    expectRun("fn main() -> i32 { ret lcm(3, 5); }", 15);
-}
-
-TEST_F(RuntimeTest, MathLcmWithZero)
-{
-    expectRun("fn main() -> i32 { ret lcm(0, 5); }", 0);
-}
-
 TEST_F(RuntimeTest, MathLcmSame)
 {
     expectRun("fn main() -> i32 { ret lcm(7, 7); }", 7);
-}
-
-TEST_F(RuntimeTest, MathIpowBasic)
-{
-    expectRun("fn main() -> i32 { ret ipow(2, 10); }", 1024);
-}
-
-TEST_F(RuntimeTest, MathIpowZeroExponent)
-{
-    expectRun("fn main() -> i32 { ret ipow(5, 0); }", 1);
 }
 
 TEST_F(RuntimeTest, MathIpowOneExponent)
@@ -2828,69 +586,15 @@ TEST_F(RuntimeTest, MathIpowOneExponent)
     expectRun("fn main() -> i32 { ret ipow(9, 1); }", 9);
 }
 
-TEST_F(RuntimeTest, MathIpowSmallBase)
-{
-    expectRun("fn main() -> i32 { ret ipow(3, 3); }", 27);
-}
-
-// ── E: math.lis — is_even/is_odd/sign ──────────────────────────────────────────
-
-TEST_F(RuntimeTest, MathIsEvenTrue)
-{
-    expectRun("fn main() -> i32 { if is_even(10) { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, MathIsEvenFalse)
-{
-    expectRun("fn main() -> i32 { if is_even(7) { ret 1; } ret 0; }", 0);
-}
-
-TEST_F(RuntimeTest, MathIsEvenNegative)
-{
-    expectRun("fn main() -> i32 { if is_even(0 - 4) { ret 1; } ret 0; }", 1);
-}
-
 TEST_F(RuntimeTest, MathIsOddTrue)
 {
     expectRun("fn main() -> i32 { if is_odd(7) { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, MathIsOddFalse)
-{
-    expectRun("fn main() -> i32 { if is_odd(10) { ret 1; } ret 0; }", 0);
 }
 
 TEST_F(RuntimeTest, MathIsOddNegative)
 {
     // (0-5) % 2 = -1 != 0 → odd.
     expectRun("fn main() -> i32 { if is_odd(0 - 5) { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, MathSignPositive)
-{
-    expectRun("fn main() -> i32 { ret sign(5); }", 1);
-}
-
-TEST_F(RuntimeTest, MathSignNegative)
-{
-    // sign(-5) = -1.
-    expectRun("fn main() -> i32 { let s = sign(0 - 5); if s < 0 { ret 0 - s; } ret s; }", 1);
-}
-
-TEST_F(RuntimeTest, MathSignZero)
-{
-    expectRun("fn main() -> i32 { ret sign(0); }", 0);
-}
-
-// ── E: math.lis — float helpers ────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, MathDegToRadHalfPi)
-{
-    // deg_to_rad(90) = π/2 ≈ 1.5707963...
-    expectOutput("fn main() -> i32 { let r = deg_to_rad(90.0);"
-                 " print_float(r); println(); ret 0; }",
-        "1.570796\n",
-        0);
 }
 
 TEST_F(RuntimeTest, MathRadToDegFullCircle)
@@ -2902,34 +606,6 @@ TEST_F(RuntimeTest, MathRadToDegFullCircle)
         0);
 }
 
-TEST_F(RuntimeTest, MathLerpMidpoint)
-{
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 0.5)); println(); ret 0; }",
-        "5.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, MathLerpStart)
-{
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 0.0)); println(); ret 0; }",
-        "0.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, MathLerpEnd)
-{
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 1.0)); println(); ret 0; }",
-        "10.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, MathLerpBeyondRange)
-{
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 2.0)); println(); ret 0; }",
-        "20.000000\n",
-        0);
-}
-
 // ── E: chars.lis ────────────────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, CharIsDigitTrue)
@@ -2937,44 +613,9 @@ TEST_F(RuntimeTest, CharIsDigitTrue)
     expectRun("fn main() -> i32 { if is_digit('5') { ret 1; } ret 0; }", 1);
 }
 
-TEST_F(RuntimeTest, CharIsDigitFalse)
-{
-    expectRun("fn main() -> i32 { if is_digit('a') { ret 1; } ret 0; }", 0);
-}
-
-TEST_F(RuntimeTest, CharIsAlphaLower)
-{
-    expectRun("fn main() -> i32 { if is_alpha('a') { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, CharIsAlphaUpper)
-{
-    expectRun("fn main() -> i32 { if is_alpha('Z') { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, CharIsAlphaNonLetter)
-{
-    expectRun("fn main() -> i32 { if is_alpha('1') { ret 1; } ret 0; }", 0);
-}
-
 TEST_F(RuntimeTest, CharIsAlphanumericDigit)
 {
     expectRun("fn main() -> i32 { if is_alphanumeric('7') { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, CharIsAlphanumericLetter)
-{
-    expectRun("fn main() -> i32 { if is_alphanumeric('x') { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, CharIsAlphanumericPunct)
-{
-    expectRun("fn main() -> i32 { if is_alphanumeric('!') { ret 1; } ret 0; }", 0);
-}
-
-TEST_F(RuntimeTest, CharIsWhitespaceSpace)
-{
-    expectRun("fn main() -> i32 { if is_whitespace(' ') { ret 1; } ret 0; }", 1);
 }
 
 TEST_F(RuntimeTest, CharIsWhitespaceTab)
@@ -2982,41 +623,9 @@ TEST_F(RuntimeTest, CharIsWhitespaceTab)
     expectRun("fn main() -> i32 { if is_whitespace('\\t') { ret 1; } ret 0; }", 1);
 }
 
-TEST_F(RuntimeTest, CharIsWhitespaceNewline)
-{
-    expectRun("fn main() -> i32 { if is_whitespace('\\n') { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, CharIsWhitespaceLetter)
-{
-    expectRun("fn main() -> i32 { if is_whitespace('a') { ret 1; } ret 0; }", 0);
-}
-
-TEST_F(RuntimeTest, CharDigitToInt)
-{
-    expectRun("fn main() -> i32 { ret digit_to_int('7'); }", 7);
-}
-
 TEST_F(RuntimeTest, CharDigitToIntZero)
 {
     expectRun("fn main() -> i32 { ret digit_to_int('0'); }", 0);
-}
-
-TEST_F(RuntimeTest, CharDigitToIntNonDigit)
-{
-    expectRun("fn main() -> i32 { ret digit_to_int('x'); }", 0);
-}
-
-TEST_F(RuntimeTest, CharDigitToIntNine)
-{
-    expectRun("fn main() -> i32 { ret digit_to_int('9'); }", 9);
-}
-
-// ── E: iterator.lis ────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, IteratorRangeSum1To5)
-{
-    expectRun("fn main() -> i32 { ret sum(range(1, 5)); }", 10);
 }
 
 TEST_F(RuntimeTest, IteratorRangeSumSingle)
@@ -3024,40 +633,9 @@ TEST_F(RuntimeTest, IteratorRangeSumSingle)
     expectRun("fn main() -> i32 { ret sum(range(4, 5)); }", 4);
 }
 
-TEST_F(RuntimeTest, IteratorRangeSumEmpty)
-{
-    expectRun("fn main() -> i32 { ret sum(range(5, 5)); }", 0);
-}
-
-TEST_F(RuntimeTest, IteratorRangeCount)
-{
-    expectRun("fn main() -> i32 { ret count(range(1, 5)); }", 4);
-}
-
 TEST_F(RuntimeTest, IteratorRangeCountEmpty)
 {
     expectRun("fn main() -> i32 { ret count(range(3, 3)); }", 0);
-}
-
-TEST_F(RuntimeTest, IteratorFirstSome)
-{
-    expectRun("fn main() -> i32 { let f = first(range(1, 5));"
-              " match f { Some(v) => { ret v; }, None => { ret 0; } } }",
-        1);
-}
-
-TEST_F(RuntimeTest, IteratorFirstEmpty)
-{
-    expectRun("fn main() -> i32 { let f = first(range(5, 5));"
-              " match f { Some(v) => { ret 1; }, None => { ret 0; } } }",
-        0);
-}
-
-TEST_F(RuntimeTest, IteratorLastSome)
-{
-    expectRun("fn main() -> i32 { let l = last(range(1, 5));"
-              " match l { Some(v) => { ret v; }, None => { ret 0; } } }",
-        4);
 }
 
 TEST_F(RuntimeTest, IteratorLastEmpty)
@@ -3067,35 +645,9 @@ TEST_F(RuntimeTest, IteratorLastEmpty)
         0);
 }
 
-TEST_F(RuntimeTest, IteratorNthValid)
-{
-    expectRun("fn main() -> i32 { let n = nth(range(10, 20), 3);"
-              " match n { Some(v) => { ret v; }, None => { ret 0; } } }",
-        13);
-}
-
-TEST_F(RuntimeTest, IteratorNthOutOfBounds)
-{
-    expectRun("fn main() -> i32 { let n = nth(range(10, 20), 99);"
-              " match n { Some(v) => { ret 1; }, None => { ret 0; } } }",
-        0);
-}
-
-TEST_F(RuntimeTest, IteratorNthZero)
-{
-    expectRun("fn main() -> i32 { let n = nth(range(5, 10), 0);"
-              " match n { Some(v) => { ret v; }, None => { ret 0; } } }",
-        5);
-}
-
 TEST_F(RuntimeTest, IteratorProductRange)
 {
     expectRun("fn main() -> i32 { ret product(range(1, 5)); }", 24);
-}
-
-TEST_F(RuntimeTest, IteratorProductEmpty)
-{
-    expectRun("fn main() -> i32 { ret product(range(3, 3)); }", 1);
 }
 
 TEST_F(RuntimeTest, IteratorSumThenCount)
@@ -3105,45 +657,9 @@ TEST_F(RuntimeTest, IteratorSumThenCount)
         20);
 }
 
-// ── F: Examples regression ─────────────────────────────────────────────────────
-// Every Examples/*.lis must keep compiling and producing its baseline exit code
-// (the documented outputs: borrow 55 / iterator 23 / match 8 / method_ref 10 /
-// operator 41 / ...). Prevents silent rot of the canonical examples.
-
-TEST_F(RuntimeTest, ExampleBorrow)
-{
-    expectExample("borrow", 55);
-}
-
-TEST_F(RuntimeTest, ExampleDrop)
-{
-    expectExample("drop", 0);
-}
-
-TEST_F(RuntimeTest, ExampleExample)
-{
-    expectExample("example", 0);
-}
-
-TEST_F(RuntimeTest, ExampleGenericType)
-{
-    expectExample("generic_type", 0);
-}
-
-TEST_F(RuntimeTest, ExampleIo)
-{
-    // io.lis reads from stdin; the baseline run with empty input exits 0.
-    expectExample("io", 0);
-}
-
 TEST_F(RuntimeTest, ExampleIterator)
 {
     expectExample("iterator", 23);
-}
-
-TEST_F(RuntimeTest, ExampleMatch)
-{
-    expectExample("match", 8);
 }
 
 TEST_F(RuntimeTest, ExampleMethodRef)
@@ -3151,52 +667,11 @@ TEST_F(RuntimeTest, ExampleMethodRef)
     expectExample("method_ref", 10);
 }
 
-TEST_F(RuntimeTest, ExampleOperator)
-{
-    expectExample("operator", 41);
-}
-
-TEST_F(RuntimeTest, ExampleOwnership)
-{
-    expectExample("ownership", 0);
-}
-
-TEST_F(RuntimeTest, ExamplePrint)
-{
-    expectExample("print", 0);
-}
-
 TEST_F(RuntimeTest, ExampleString)
 {
     expectExample("string", 0);
     // Result + the `?` operator (exit code = the first successful parse, 42).
     expectExample("result", 42);
-}
-
-// ── B2: more drop semantics ────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, DropImplCompilesAndRuns)
-{
-    expectRun("struct D { pub v: i32 } impl Drop for D { fn drop(self) { } }"
-              " fn main() -> i32 { let d = D { v: 5 }; ret d.v; }",
-        5);
-}
-
-TEST_F(RuntimeTest, DropRunsAtScopeEnd)
-{
-    // The drop body runs when the value goes out of scope; observable via a
-    // global counter written in drop. (Globals use `let`, no `mut` keyword.)
-    expectRun("let dropped = 0; struct D { pub v: i32 } impl Drop for D {"
-              " fn drop(self) { dropped = dropped + 1; } }"
-              " fn main() -> i32 { { let d = D { v: 1 }; } ret dropped; }",
-        1);
-}
-
-TEST_F(RuntimeTest, DropGenericType)
-{
-    expectRun("struct Box<T> { pub v: T } impl Drop for Box<i32> { fn drop(self) { } }"
-              " fn main() -> i32 { let b = Box { v: 5 }; ret b.v; }",
-        5);
 }
 
 TEST_F(RuntimeTest, DropMultipleValues)
@@ -3208,39 +683,6 @@ TEST_F(RuntimeTest, DropMultipleValues)
         2);
 }
 
-TEST_F(RuntimeTest, DropFieldWithNestedDrop)
-{
-    expectRun("struct Inner { pub v: i32 } impl Drop for Inner { fn drop(self) { } }"
-              " struct Outer { pub i: Inner, pub v: i32 } impl Drop for Outer { fn drop(self) { } }"
-              " fn main() -> i32 { let o = Outer { i: Inner { v: 1 }, v: 2 }; ret o.v; }",
-        2);
-}
-
-TEST_F(RuntimeTest, DropStringFrees)
-{
-    // String has impl Drop (frees the buffer) — must not double-free or leak.
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len(); }", 2);
-}
-
-// ── B2: more enums and match ───────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, EnumUnitConstructionAndDispatch)
-{
-    // A value-arm match must be `ret match ...` — a bare trailing match does not
-    // implicitly return its value.
-    expectRun("enum Color { Red, Green, Blue } fn main() -> i32 {"
-              " let c = Color::Blue; ret match c { Red => 1, Green => 2, Blue => 3 }; }",
-        3);
-}
-
-TEST_F(RuntimeTest, EnumPayloadCopyBinding)
-{
-    // A Copy payload (i32) is bound by value; both binding and scrutinee usable.
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 { let o = O::Some(9);"
-              " let y = match o { Some(v) => v, None => 0 }; ret y + 1; }",
-        10);
-}
-
 TEST_F(RuntimeTest, EnumWildcardWithPayload)
 {
     // Scrutinee must carry a concrete payload type so the wildcard arm's value
@@ -3250,29 +692,6 @@ TEST_F(RuntimeTest, EnumWildcardWithPayload)
         5);
 }
 
-TEST_F(RuntimeTest, EnumMatchExpressionValue)
-{
-    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
-              " ret match e { A => 1, B => 2 }; }",
-        2);
-}
-
-TEST_F(RuntimeTest, EnumPayloadTupleMatch)
-{
-    expectRun("enum E { P(i32, i32), Q } fn main() -> i32 { let e = E::P(2, 3);"
-              " match e { P(a, b) => { ret a * b; }, Q => { ret 0; } } }",
-        6);
-}
-
-TEST_F(RuntimeTest, EnumSameNameVariantsDifferentEnums)
-{
-    expectRun("enum A { X(i32) } enum B { X(i32) } fn main() -> i32 {"
-              " let a = A::X(1); let b = B::X(2);"
-              " let mut r = 0; match a { X(v) => { r = v; } }"
-              " match b { X(v) => { ret r + v; } } }",
-        3);
-}
-
 TEST_F(RuntimeTest, EnumMovePayloadThenRebind)
 {
     expectRun("enum O<T> { Some(T), None } fn main() -> i32 { let o = O::Some(4);"
@@ -3280,39 +699,9 @@ TEST_F(RuntimeTest, EnumMovePayloadThenRebind)
         8);
 }
 
-TEST_F(RuntimeTest, MatchValueThenSideEffect)
-{
-    // A value-arm match yields its value; side effects can run after on a global.
-    // (`tally`, not `count` — the stdlib already has a `count` function.)
-    expectRun("let tally = 0; enum E { A, B } fn main() -> i32 {"
-              " let e = E::A; let y = match e { A => 10, B => 20 };"
-              " tally = tally + y; ret tally; }",
-        10);
-}
-
-// ── B2: more strings ───────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, StringEmptyNewIndex)
-{
-    expectRun("fn main() -> i32 { let s = String::new();"
-              " match s.index(0) { Some(c) => { ret 1; }, None => { ret 0; } } }",
-        0);
-}
-
 TEST_F(RuntimeTest, StringPushStrToEmpty)
 {
     expectRun("fn main() -> i32 { let mut s = String::new(); s.push_str(\"abc\"); ret s.len(); }", 3);
-}
-
-TEST_F(RuntimeTest, StringIndexEachPosition)
-{
-    // Indexing two positions and combining the results. (`acc`, not `sum` — the
-    // stdlib already has a `sum` function.)
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"abc\");"
-              " let mut acc = 0; match s.index(0) { Some(c) => { acc = c as i32; },"
-              " None => { acc = 0; } } match s.index(2) { Some(c) => { ret acc + (c as i32); },"
-              " None => { ret acc; } } }",
-        97 + 99);
 }
 
 TEST_F(RuntimeTest, StringMutateAndGrow)
@@ -3325,71 +714,12 @@ TEST_F(RuntimeTest, StringMutateAndGrow)
         33);
 }
 
-TEST_F(RuntimeTest, StringDoubleAppend)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new();"
-              " s.push_str(\"ab\"); s.push_str(\"cd\"); ret s.len(); }",
-        4);
-}
-
-TEST_F(RuntimeTest, StringToCstrLengthMatches)
-{
-    // `to_cstr` returns a borrow of the buffer; it must be exactly the content
-    // (no `__strlen` — the heap primitives are stdlib-only now).
-    expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\");"
-                 " print_str(s.to_cstr()); ret s.len(); }",
-        "hello",
-        5);
-}
-
-TEST_F(RuntimeTest, StringNewThenPushStrThenIndex)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new(); s.push_str(\"xyz\");"
-              " match s.index(1) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
-        121);
-}
-
-// ── B2: more operator overloading ──────────────────────────────────────────────
-
-TEST_F(RuntimeTest, OpOverloadGreaterThan)
-{
-    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
-              " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
-              " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
-              " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
-              " fn main() -> i32 { let a = V { x: 5 }; let b = V { x: 2 };"
-              " if a > b { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, OpOverloadLeGe)
-{
-    // Operator-overload calls consume their operands (by-value self/other), so
-    // each comparison needs fresh struct values.
-    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
-              " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
-              " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
-              " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
-              " fn main() -> i32 { let a = V { x: 3 }; let b = V { x: 3 };"
-              " let c = V { x: 3 }; let d = V { x: 3 };"
-              " if a <= b && c >= d { ret 1; } ret 0; }",
-        1);
-}
-
 TEST_F(RuntimeTest, OpOverloadBitAnd)
 {
     expectRun("struct M { pub x: i32 } impl BitAnd for M { fn bitand(self, o: Self) -> M {"
               " ret M { x: self.x & o.x }; } } fn main() -> i32 {"
               " let a = M { x: 6 }; let b = M { x: 3 }; ret (a & b).x; }",
         2);
-}
-
-TEST_F(RuntimeTest, OpOverloadBitOr)
-{
-    expectRun("struct M { pub x: i32 } impl BitOr for M { fn bitor(self, o: Self) -> M {"
-              " ret M { x: self.x | o.x }; } } fn main() -> i32 {"
-              " let a = M { x: 6 }; let b = M { x: 3 }; ret (a | b).x; }",
-        7);
 }
 
 TEST_F(RuntimeTest, OpOverloadChainThree)
@@ -3401,49 +731,11 @@ TEST_F(RuntimeTest, OpOverloadChainThree)
         6);
 }
 
-TEST_F(RuntimeTest, OpOverloadMixedWithPrimitive)
-{
-    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
-              " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
-              " let a = V { x: 10 }; let b = V { x: 5 }; let v = a + b;"
-              " ret v.x + 100; }",
-        115);
-}
-
-// ── B2: more casts and widths ──────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, I16WidenToI32)
-{
-    expectRun("fn main() -> i32 { let a = 'A' as i16; ret a as i32; }", 65);
-}
-
 TEST_F(RuntimeTest, I8AndI16MixViaI32)
 {
     expectRun("fn main() -> i32 { let a = 'A' as i8; let b = 'B' as i16;"
               " ret (a as i32) + (b as i32); }",
         131);
-}
-
-TEST_F(RuntimeTest, I64ReturnFromCastChain)
-{
-    expectRun("fn main() -> i64 { let a = 'A' as i8; let b = a as i64; ret b; }", 65);
-}
-
-TEST_F(RuntimeTest, CharCompareChain)
-{
-    expectRun("fn main() -> i32 { if 'a' < 'b' && 'b' < 'c' { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, CharAsI32Arithmetic)
-{
-    expectRun("fn main() -> i32 { let c = 'A' as i32; let d = c + 32;"
-              " let e = d as char; ret e as i32; }",
-        97);
-}
-
-TEST_F(RuntimeTest, FloatCompareMixed)
-{
-    expectRun("fn main() -> i32 { if 2.5 < 3.5 && 3.5 < 4.5 { ret 1; } ret 0; }", 1);
 }
 
 TEST_F(RuntimeTest, FloatZeroAndNegative)
@@ -3454,60 +746,11 @@ TEST_F(RuntimeTest, FloatZeroAndNegative)
         0);
 }
 
-TEST_F(RuntimeTest, FloatIntMixComparison)
-{
-    // f64 and int compare? They must be the same type for a binary op — reject.
-    expectCompileFail("fn main() -> i32 { if 2.5 < 3 { ret 1; } ret 0; }",
-        "same type");
-}
-
-// ── B2: more globals ───────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, GlobalUsedInComputation)
-{
-    expectRun("let base = 10; fn main() -> i32 { ret base * 2 + 5; }", 25);
-}
-
-TEST_F(RuntimeTest, GlobalModifiedInLoop)
-{
-    expectRun("let g = 0; fn main() -> i32 { let mut i = 0;"
-              " while i < 5 { g = g + 1; i = i + 1; } ret g; }",
-        5);
-}
-
 TEST_F(RuntimeTest, GlobalCrossFunctionState)
 {
     expectRun("let g = 0; fn inc() { g = g + 1; } fn main() -> i32 {"
               " inc(); inc(); inc(); inc(); ret g; }",
         4);
-}
-
-TEST_F(RuntimeTest, GlobalShadowingRejected)
-{
-    expectCompileFail("let x = 1; let x = 2; fn main() -> i32 { ret x; }", "already");
-}
-
-// ── B2: more generics ──────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, GenericSwapLikeViaStruct)
-{
-    expectRun("struct Pair<T> { pub a: T, pub b: T } fn main() -> i32 {"
-              " let p = Pair { a: 1, b: 2 }; let q = Pair { a: p.b, b: p.a }; ret q.a; }",
-        2);
-}
-
-TEST_F(RuntimeTest, GenericEnumMethod)
-{
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
-              " let o = O::Some(42); match o { Some(v) => { ret v; }, None => { ret 0; } } }",
-        42);
-}
-
-TEST_F(RuntimeTest, GenericNestedThreeDeep)
-{
-    expectRun("struct B<T> { pub v: T } fn main() -> i32 {"
-              " let b = B { v: B { v: B { v: 3 } } }; ret b.v.v.v; }",
-        3);
 }
 
 TEST_F(RuntimeTest, GenericFunctionTwoParams)
@@ -3518,54 +761,12 @@ TEST_F(RuntimeTest, GenericFunctionTwoParams)
         9);
 }
 
-TEST_F(RuntimeTest, GenericStructWithTwoTypes)
-{
-    expectRun("struct M<T, U> { pub a: T, pub b: U } fn main() -> i32 {"
-              " let m = M { a: 3, b: 'x' }; ret m.a; }",
-        3);
-}
-
-// ── B2: more control flow ──────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ForBreakInsideNestedIf)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 10) {"
-              " if x == 4 { break; } if x > 1 { s = s + x; } } ret s; }",
-        5);
-}
-
-TEST_F(RuntimeTest, WhileNestedContinue)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 10 { i = i + 1; if (i % 3) == 0 { continue; } s = s + i; } ret s; }",
-        37);
-}
-
 TEST_F(RuntimeTest, ForWithContinueAndBreak)
 {
     // 1+2+3+4, skip 5, 6+7, break at 8 → 23.
     expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 20) {"
               " if x == 5 { continue; } if x == 8 { break; } s = s + x; } ret s; }",
         23);
-}
-
-TEST_F(RuntimeTest, NestedIfDeep)
-{
-    expectRun("fn main() -> i32 { let x = 5; let mut r = 0;"
-              " if x > 1 { if x > 2 { if x > 3 { if x > 4 { r = 1; } } } } ret r; }",
-        1);
-}
-
-TEST_F(RuntimeTest, ForIteratingComputedRange)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(2, 7) { s = s + x; } ret s; }", 20);
-}
-
-TEST_F(RuntimeTest, WhileWithLogicalCondition)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 10 && s < 15 { i = i + 1; s = s + i; } ret i; }",
-        5);
 }
 
 // NOTE: `if (x = 5) > 3` is not expressible — assignment is a statement, not an
@@ -3578,42 +779,6 @@ TEST_F(RuntimeTest, ArrayIndexFromVariable)
     expectRun("fn main() -> i32 { let a = [10, 20, 30]; let i = 2; ret a[i]; }", 30);
 }
 
-TEST_F(RuntimeTest, ArraySumWithMutableIndex)
-{
-    expectRun("fn main() -> i32 { let a = [1, 2, 3, 4]; let mut i = 0; let mut s = 0;"
-              " while i < 4 { s = s + a[i]; i = i + 1; } ret s; }",
-        10);
-}
-
-TEST_F(RuntimeTest, ArrayReferenceReassignElement)
-{
-    expectRun("fn main() -> i32 { let mut a = [1, 2, 3]; let r = &mut a;"
-              " r[0] = 9; ret r[0]; }",
-        9);
-}
-
-TEST_F(RuntimeTest, ArrayIndexCompare)
-{
-    expectRun("fn main() -> i32 { let a = [5, 6, 7]; if a[0] < a[2] { ret 1; } ret 0; }", 1);
-}
-
-// ── B2: misc expressions ───────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ModuloChain)
-{
-    expectRun("fn main() -> i32 { ret 100 % 9 % 4; }", 1);
-}
-
-TEST_F(RuntimeTest, DeepArithmeticNesting)
-{
-    expectRun("fn main() -> i32 { ret ((1 + 2) * (3 + 4)) - 5; }", 16);
-}
-
-TEST_F(RuntimeTest, BoolExpressionLogic)
-{
-    expectRun("fn main() -> i32 { if (1 < 2) && (3 > 2) || false { ret 1; } ret 0; }", 1);
-}
-
 TEST_F(RuntimeTest, FunctionComposition)
 {
     expectRun("fn dbl(x: i32) -> i32 { ret x * 2; } fn inc(x: i32) -> i32 { ret x + 1; }"
@@ -3621,79 +786,14 @@ TEST_F(RuntimeTest, FunctionComposition)
         10);
 }
 
-TEST_F(RuntimeTest, MultiStatementFunction)
-{
-    expectRun("fn main() -> i32 { let a = 1; let b = 2; let c = a + b;"
-              " let d = c * 3; ret d; }",
-        9);
-}
-
-TEST_F(RuntimeTest, ShadowedInDifferentFn)
-{
-    expectRun("fn f() -> i32 { let x = 1; ret x; } fn g() -> i32 { let x = 2; ret x; }"
-              " fn main() -> i32 { ret f() + g(); }",
-        3);
-}
-
-// ── B3: arithmetic & expressions ───────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ArithmeticModuloAssoc)
-{
-    expectRun("fn main() -> i32 { ret 17 % 5 % 3; }", 2);
-}
-
-TEST_F(RuntimeTest, ArithmeticUnaryViaSubtract)
-{
-    expectRun("fn main() -> i32 { let a = 0 - 10; ret 0 - a; }", 10);
-}
-
 TEST_F(RuntimeTest, ArithmeticManyOperands)
 {
     expectRun("fn main() -> i32 { ret 1 + 2 + 3 + 4 + 5 + 6; }", 21);
 }
 
-TEST_F(RuntimeTest, ArithmeticDivMulPriority)
-{
-    expectRun("fn main() -> i32 { ret 8 / 2 * 3; }", 12);
-}
-
-TEST_F(RuntimeTest, ArithmeticModOfSum)
-{
-    expectRun("fn main() -> i32 { ret (10 + 15) % 7; }", 4);
-}
-
-TEST_F(RuntimeTest, ComparisonChainVariables)
-{
-    expectRun("fn main() -> i32 { let a = 3; let b = 5; let c = 7;"
-              " if a < b && b < c { ret 1; } ret 0; }",
-        1);
-}
-
 TEST_F(RuntimeTest, BoolResultInArithmetic)
 {
     expectRun("fn main() -> i32 { let b = 5 > 3; if b { ret 10; } ret 20; }", 10);
-}
-
-TEST_F(RuntimeTest, NestedParens)
-{
-    expectRun("fn main() -> i32 { ret (((2))); }", 2);
-}
-
-TEST_F(RuntimeTest, EmptyFunctionBody)
-{
-    expectRun("fn noop() { ret; } fn main() -> i32 { noop(); ret 0; }", 0);
-}
-
-// NOTE: `a = b = 5` (chained assignment) is not expressible — assignment is a
-// statement, not a value. No test for it.
-
-// ── B3: floats & casts ─────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, FloatPrecisionAddition)
-{
-    expectOutput("fn main() -> i32 { print_float(0.1 + 0.2); println(); ret 0; }",
-        "0.300000\n",
-        0);
 }
 
 TEST_F(RuntimeTest, FloatNegativeZero)
@@ -3703,62 +803,14 @@ TEST_F(RuntimeTest, FloatNegativeZero)
         0);
 }
 
-TEST_F(RuntimeTest, FloatLargeExponent)
-{
-    expectOutput("fn main() -> i32 { print_float(1.5e5); println(); ret 0; }",
-        "150000.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, FloatCompareGreater)
-{
-    expectRun("fn main() -> i32 { if 7.5 >= 7.5 { ret 1; } ret 0; }", 1);
-}
-
 TEST_F(RuntimeTest, CharCompareNotEqual)
 {
     expectRun("fn main() -> i32 { if 'a' != 'b' { ret 1; } ret 0; }", 1);
 }
 
-TEST_F(RuntimeTest, CharRangeCheck)
-{
-    expectRun("fn main() -> i32 { let c = 'm';"
-              " if c >= 'a' && c <= 'z' { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, I64Negative)
-{
-    expectRun("fn main() -> i64 { let a = 0 as i64; ret a; }", 0);
-}
-
 TEST_F(RuntimeTest, I8ToI64ViaChain)
 {
     expectRun("fn main() -> i64 { let a = 'A' as i8; let b = a as i32; let c = b as i64; ret c; }", 65);
-}
-
-// ── B3: enums & match ──────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, EnumMatchWithMultipleSameType)
-{
-    expectRun("enum E { A, B, C } fn main() -> i32 { let mut r = 0;"
-              " let e = E::A; match e { A => { r = 1; }, B => { r = 2; }, C => { r = 3; } }"
-              " let f = E::C; match f { A => { ret r; }, B => { ret r + 1; }, C => { ret r + 2; } } }",
-        3);
-}
-
-TEST_F(RuntimeTest, EnumValueArmWithComputation)
-{
-    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
-              " ret match e { A => 10 * 2, B => 20 + 1 }; }",
-        21);
-}
-
-TEST_F(RuntimeTest, EnumMatchWildcardValue)
-{
-    expectRun("enum E { A, B, C } fn main() -> i32 { let e = E::C;"
-              " ret match e { A => 1, _ => 9 }; }",
-        9);
 }
 
 TEST_F(RuntimeTest, EnumNestedVariantConstruction)
@@ -3770,50 +822,11 @@ TEST_F(RuntimeTest, EnumNestedVariantConstruction)
         5);
 }
 
-TEST_F(RuntimeTest, EnumMatchConsumesScrutinee)
-{
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
-              " let o = O::Some(5); let y = match o { Some(v) => v, None => 0 }; ret y; }",
-        5);
-}
-
-// ── B3: strings ────────────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, StringPushManyChars)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new();"
-              " s.push_char('a'); s.push_char('b'); s.push_char('c');"
-              " s.push_char('d'); s.push_char('e'); ret s.len(); }",
-        5);
-}
-
-TEST_F(RuntimeTest, StringIndexAfterGrow)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new();"
-              " let mut i = 0; while i < 20 { s.push_char('x'); i = i + 1; }"
-              " match s.index(19) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
-        120);
-}
-
-TEST_F(RuntimeTest, StringMutateThenReadBack)
-{
-    expectRun("fn main() -> i32 { let mut s = String::from_lit(\"abc\");"
-              " s.push_str(\"z\"); match s.index(3) { Some(c) => { ret c as i32; }, None => { ret 0; } } }",
-        122);
-}
-
 TEST_F(RuntimeTest, StringLengthAfterPushStr)
 {
     expectRun("fn main() -> i32 { let mut s = String::from_lit(\"he\");"
               " s.push_str(\"llo\"); ret s.len(); }",
         5);
-}
-
-TEST_F(RuntimeTest, StringMultipleInFunction)
-{
-    expectRun("fn main() -> i32 { let a = String::from_lit(\"ab\");"
-              " let b = String::from_lit(\"cd\"); ret a.len() + b.len(); }",
-        4);
 }
 
 // ── B3: generics ───────────────────────────────────────────────────────────────
@@ -3825,37 +838,6 @@ TEST_F(RuntimeTest, GenericIdentityChain)
         5);
 }
 
-TEST_F(RuntimeTest, GenericDoubleParam)
-{
-    expectRun("fn add2<T: Numeric>(a: T, b: T) -> T { ret a + b; }"
-              " fn main() -> i32 { ret add2(3, 4); }",
-        7);
-}
-
-TEST_F(RuntimeTest, StructMethodMutatingField)
-{
-    // A &mut self method that mutates a field through self, observable after.
-    expectRun("struct C { pub v: i32 } impl C { fn set(self: &mut Self, x: i32) {"
-              " self.v = x; } } fn main() -> i32 { let mut c = C { v: 1 };"
-              " c.set(9); ret c.v; }",
-        9);
-}
-
-TEST_F(RuntimeTest, GenericEnumOfGeneric)
-{
-    expectRun("struct B<T> { pub v: T } enum O<T> { Some(T), None } fn main() -> i32 {"
-              " let b = B { v: 6 }; let o = O::Some(b);"
-              " match o { Some(bx) => { ret bx.v; }, None => { ret 0; } } }",
-        6);
-}
-
-TEST_F(RuntimeTest, GenericFunctionOnI64)
-{
-    expectRun("fn dbl<T: Numeric>(x: T) -> T { ret x + x; }"
-              " fn main() -> i64 { let a = 4 as i64; ret dbl(a); }",
-        8);
-}
-
 // ── B3: globals ────────────────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, GlobalFloatArithmetic)
@@ -3863,22 +845,6 @@ TEST_F(RuntimeTest, GlobalFloatArithmetic)
     expectOutput("let g = 2.0; fn main() -> i32 { print_float(g * 3.0); println(); ret 0; }",
         "6.000000\n",
         0);
-}
-
-TEST_F(RuntimeTest, GlobalBoolInCondition)
-{
-    expectRun("let flag = true; fn main() -> i32 { if flag { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, GlobalCharUsed)
-{
-    expectRun("let letter = 'q'; fn main() -> i32 { ret letter as i32; }", 113);
-}
-
-TEST_F(RuntimeTest, GlobalArrayNotLiteralRejected)
-{
-    expectCompileFail("let g = [1, 2]; fn main() -> i32 { ret 0; }",
-        "global variable initializer must be a literal");
 }
 
 // ── B3: arrays ─────────────────────────────────────────────────────────────────
@@ -3890,45 +856,6 @@ TEST_F(RuntimeTest, ArrayAllElementsSum)
         20);
 }
 
-TEST_F(RuntimeTest, ArrayIndexFromVariableZero)
-{
-    expectRun("fn main() -> i32 { let a = [7, 8]; let i = 0; ret a[i]; }", 7);
-}
-
-TEST_F(RuntimeTest, ArrayComparisonElement)
-{
-    expectRun("fn main() -> i32 { let a = [1, 5]; if a[0] < a[1] { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, ArrayRefIndexLoop)
-{
-    expectRun("fn main() -> i32 { let a = [10, 20, 30]; let r = &a; let mut s = 0;"
-              " let mut i = 0; while i < 3 { s = s + r[i]; i = i + 1; } ret s; }",
-        60);
-}
-
-// ── B3: operator overloading ───────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, OpOverloadDifferentTraits)
-{
-    expectRun("struct V { pub x: i32 } impl Add for V { fn add(self, o: Self) -> V {"
-              " ret V { x: self.x + o.x }; } } impl Sub for V { fn sub(self, o: Self) -> V {"
-              " ret V { x: self.x - o.x }; } } fn main() -> i32 {"
-              " let a = V { x: 10 }; let b = V { x: 3 }; let c = V { x: 2 };"
-              " let r = a - b + c; ret r.x; }",
-        9);
-}
-
-TEST_F(RuntimeTest, OpOverloadFloat)
-{
-    expectOutput("struct V { pub x: f64 } impl Add for V { fn add(self, o: Self) -> V {"
-                 " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
-                 " let a = V { x: 1.5 }; let b = V { x: 2.5 };"
-                 " print_float((a + b).x); println(); ret 0; }",
-        "4.000000\n",
-        0);
-}
-
 TEST_F(RuntimeTest, OpOverloadMethodCallSyntax)
 {
     // The trait method is directly callable too.
@@ -3938,51 +865,10 @@ TEST_F(RuntimeTest, OpOverloadMethodCallSyntax)
         7);
 }
 
-// ── B3: control flow ───────────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ForSumEvenOnly)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 11) {"
-              " if (x % 2) == 0 { s = s + x; } } ret s; }",
-        30);
-}
-
-TEST_F(RuntimeTest, WhileCountingDown)
-{
-    expectRun("fn main() -> i32 { let mut n = 10; let mut s = 0;"
-              " while n > 0 { s = s + n; n = n - 1; } ret s; }",
-        55);
-}
-
-TEST_F(RuntimeTest, BreakInsideNestedLoop)
-{
-    // Inner break exits only the inner loop.
-    expectRun("fn main() -> i32 { let mut c = 0; let mut i = 0; while i < 3 {"
-              " let mut j = 0; while j < 10 { c = c + 1; if j == 2 { break; } j = j + 1; }"
-              " i = i + 1; } ret c; }",
-        9);
-}
-
 TEST_F(RuntimeTest, ContinueInnerLoop)
 {
     expectRun("fn main() -> i32 { let mut s = 0; for i in range(1, 4) {"
               " for j in range(1, 4) { if j == 2 { continue; } s = s + 1; } } ret s; }",
-        6);
-}
-
-TEST_F(RuntimeTest, IfElseIfChainedFour)
-{
-    expectRun("fn main() -> i32 { let x = 40; let mut r = 0;"
-              " if x < 10 { r = 1; } else if x < 20 { r = 2; }"
-              " else if x < 30 { r = 3; } else { r = 4; } ret r; }",
-        4);
-}
-
-TEST_F(RuntimeTest, NestedWhileTwoCounters)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut pairs = 0;"
-              " while i < 3 { let mut j = 0; while j < 2 { pairs = pairs + 1; j = j + 1; }"
-              " i = i + 1; } ret pairs; }",
         6);
 }
 
@@ -3994,74 +880,11 @@ TEST_F(RuntimeTest, ForBreakExitCode)
         7);
 }
 
-TEST_F(RuntimeTest, RecursionMutualViaIndirect)
-{
-    expectRun("fn count2(n: i32) -> i32 { if n == 0 { ret 0; } ret 1 + count2(n - 1); }"
-              " fn main() -> i32 { ret count2(5) + count2(3); }",
-        8);
-}
-
-// ── B4: final runtime breadth ──────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, ArithmeticTripleNested)
-{
-    expectRun("fn main() -> i32 { ret ((1 + 2) * 3) + 4; }", 13);
-}
-
-TEST_F(RuntimeTest, CompareStringsViaLen)
-{
-    expectRun("fn main() -> i32 { let a = String::from_lit(\"aa\");"
-              " let b = String::from_lit(\"bbb\"); if a.len() < b.len() { ret 1; } ret 0; }",
-        1);
-}
-
-TEST_F(RuntimeTest, CharLoopFromA)
-{
-    expectRun("fn main() -> i32 { let mut c = 'a' as i32; let mut n = 0;"
-              " while c <= 'e' as i32 { n = n + 1; c = c + 1; } ret n; }",
-        5);
-}
-
-TEST_F(RuntimeTest, FloatSumOfInts)
-{
-    expectOutput("fn main() -> i32 { let a = 1 as f64; let b = 2 as f64;"
-                 " print_float(a + b); println(); ret 0; }",
-        "3.000000\n",
-        0);
-}
-
 TEST_F(RuntimeTest, EnumThreeWayDispatch)
 {
     expectRun("enum D { Up, Down, Left, Right } fn main() -> i32 {"
               " let d = D::Right; ret match d { Up => 1, Down => 2, Left => 3, Right => 4 }; }",
         4);
-}
-
-// NOTE: matching a struct FIELD that holds an enum (`match s.e`) is not
-// expressible — the match scrutinee must be a value binding, not a field access.
-// No test for it.
-
-TEST_F(RuntimeTest, GlobalCounterInMatch)
-{
-    expectRun("let hits = 0; enum E { A, B } fn main() -> i32 {"
-              " let e = E::A; match e { A => { hits = hits + 1; }, B => { hits = hits + 2; } }"
-              " ret hits; }",
-        1);
-}
-
-TEST_F(RuntimeTest, StringConcatViaPush)
-{
-    expectRun("fn main() -> i32 { let mut s = String::new();"
-              " s.push_str(\"foo\"); s.push_str(\"bar\"); ret s.len(); }",
-        6);
-}
-
-TEST_F(RuntimeTest, GenericIdOnFloat)
-{
-    expectOutput("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 {"
-                 " let f = id(2.5); print_float(f); println(); ret 0; }",
-        "2.500000\n",
-        0);
 }
 
 TEST_F(RuntimeTest, ForAccumulateProduct)
@@ -4076,38 +899,6 @@ TEST_F(RuntimeTest, WhileNegativeCondition)
         3);
 }
 
-TEST_F(RuntimeTest, IfReturnBothBranches)
-{
-    expectRun("fn main() -> i32 { let b = false; if b { ret 1; } else { ret 2; } }", 2);
-}
-
-TEST_F(RuntimeTest, MatchOnGenericEnumBothTypes)
-{
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
-              " let a = O::Some(3); let b = O::Some('x');"
-              " let mut r = 0; match a { Some(v) => { r = v; }, None => {} }"
-              " match b { Some(c) => { ret r + (c as i32); }, None => { ret r; } } }",
-        123);
-}
-
-// NOTE: arrays of structs are rejected (locked semantics: array elements are
-// Copy-only, and structs are not Copy) — covered by ArrayOfNonCopyElementsRejected.
-
-TEST_F(RuntimeTest, FloatLerpComposition)
-{
-    expectOutput("fn main() -> i32 { print_float(lerp(lerp(0.0, 10.0, 0.5), 100.0, 0.5));"
-                 " println(); ret 0; }",
-        "52.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, I16ArithmeticChain)
-{
-    expectRun("fn main() -> i32 { let a = 'A' as i16; let b = 'A' as i16;"
-              " let c = a + b; let d = c as i32; ret d; }",
-        130);
-}
-
 TEST_F(RuntimeTest, BoolNotViaCompare)
 {
     expectRun("fn main() -> i32 { let b = false; if b == false { ret 1; } ret 0; }", 1);
@@ -4120,59 +911,12 @@ TEST_F(RuntimeTest, MultiReturnFunctions)
         8);
 }
 
-TEST_F(RuntimeTest, StringReadViaIndexAll)
-{
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"xyz\");"
-              " let mut total = 0; let mut i = 0; while i < 3 {"
-              " match s.index(i) { Some(c) => { total = total + (c as i32); }, None => {} }"
-              " i = i + 1; } ret total; }",
-        120 + 121 + 122);
-}
-
-TEST_F(RuntimeTest, EnumWithTwoPayloadTypes)
-{
-    expectRun("enum M { A(i32), B(f64) } fn main() -> i32 { let m = M::A(7);"
-              " match m { A(v) => { ret v; }, B(_f) => { ret 0; } } }",
-        7);
-}
-
-TEST_F(RuntimeTest, GlobalIncrementFunction)
-{
-    expectRun("let g = 0; fn bump() { g = g + 1; } fn main() -> i32 {"
-              " bump(); bump(); bump(); ret g; }",
-        3);
-}
-
 TEST_F(RuntimeTest, WhileTrueWithContinue)
 {
     expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
               " while true { i = i + 1; if (i % 2) == 0 { continue; }"
               " if i > 5 { break; } s = s + i; } ret s; }",
         9);
-}
-
-// NOTE: `impl W<i32>` (method impl on a specific generic instantiation) resolves
-// self.v as the generic T, not i32 — a known limitation; GenericStructMethod
-// covers the non-specialized impl form.
-
-TEST_F(RuntimeTest, CharDigitClassification)
-{
-    expectRun("fn main() -> i32 { if is_digit('9') && is_alpha('z') { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, FloatDivisionPrecision)
-{
-    expectOutput("fn main() -> i32 { print_float(10.0 / 4.0); println(); ret 0; }",
-        "2.500000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, NestedForBreakInner)
-{
-    // Inner break stops j at 2; i=1:3, i=2:6, i=3:9 → 18.
-    expectRun("fn main() -> i32 { let mut s = 0; for i in range(1, 4) {"
-              " for j in range(1, 4) { if j > 2 { break; } s = s + i * j; } } ret s; }",
-        18);
 }
 
 // NOTE: an owned enum scrutinee is MOVED into the first match, so matching the
@@ -4186,47 +930,6 @@ TEST_F(RuntimeTest, StringComparisonLengths)
         1);
 }
 
-TEST_F(RuntimeTest, ArraySumThroughRef)
-{
-    expectRun("fn main() -> i32 { let a = [1, 2, 3]; let r = &a;"
-              " ret r[0] + r[1] + r[2]; }",
-        6);
-}
-
-TEST_F(RuntimeTest, MultipleGenericInstantiation)
-{
-    expectRun("fn dbl<T: Numeric>(x: T) -> T { ret x + x; }"
-              " fn main() -> i32 { let a = dbl(21); let b = dbl(2); ret a + b; }",
-        46);
-}
-
-TEST_F(RuntimeTest, BoolArithmeticGate)
-{
-    expectRun("fn main() -> i32 { let b = true; let x = b as i32; ret 5 * x; }", 5);
-}
-
-TEST_F(RuntimeTest, RecursionWithAccumulator)
-{
-    expectRun("fn sumto(n: i32, acc: i32) -> i32 { if n == 0 { ret acc; }"
-              " ret sumto(n - 1, acc + n); } fn main() -> i32 { ret sumto(10, 0); }",
-        55);
-}
-
-TEST_F(RuntimeTest, IfElseNestedThree)
-{
-    expectRun("fn main() -> i32 { let x = 5; let mut r = 0;"
-              " if x > 10 { r = 1; } else { if x > 3 { r = 2; } else { r = 3; } } ret r; }",
-        2);
-}
-
-TEST_F(RuntimeTest, FloatCastIntRoundTrip)
-{
-    expectOutput("fn main() -> i32 { let x = 5 as f64; let y = x + 0.5;"
-                 " print_float(y); println(); ret 0; }",
-        "5.500000\n",
-        0);
-}
-
 TEST_F(RuntimeTest, StringIndexNegative)
 {
     expectRun("fn main() -> i32 { let s = String::from_lit(\"abc\");"
@@ -4234,54 +937,11 @@ TEST_F(RuntimeTest, StringIndexNegative)
         0);
 }
 
-// (Enum-as-struct-field match is not expressible — see the note above.)
-
-TEST_F(RuntimeTest, WhileWithCompoundCondition)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; let mut s = 0;"
-              " while i < 6 && s < 12 { i = i + 1; s = s + i; } ret s; }",
-        15);
-}
-
-TEST_F(RuntimeTest, CharToLowerViaArith)
-{
-    expectRun("fn main() -> i32 { let upper = 'A' as i32; let lower = upper + 32;"
-              " let c = lower as char; ret c as i32; }",
-        97);
-}
-
-TEST_F(RuntimeTest, ForBreakPreservesLoopVar)
-{
-    expectRun("fn main() -> i32 { let mut lastv = 0; for x in range(1, 50) {"
-              " if x > 4 { break; } lastv = x; } ret lastv; }",
-        4);
-}
-
 TEST_F(RuntimeTest, MatchArmWithGlobalSideEffect)
 {
     expectRun("let n = 0; enum E { A, B } fn main() -> i32 {"
               " let e = E::A; match e { A => { n = n + 100; }, B => { n = n + 1; } } ret n; }",
         100);
-}
-
-TEST_F(RuntimeTest, MultipleStringsInStruct)
-{
-    expectRun("struct Pair { pub a: String, pub b: String } fn main() -> i32 {"
-              " let p = Pair { a: String::from_lit(\"ab\"), b: String::from_lit(\"cde\") };"
-              " ret p.a.len() + p.b.len(); }",
-        5);
-}
-
-TEST_F(RuntimeTest, GenericEnumMethodOnValue)
-{
-    // Inline construction pins T for the generic unwrap_or.
-    expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(9), 0); }", 9);
-}
-
-TEST_F(RuntimeTest, ArrayOfArraysNotAllowedSema)
-{
-    // Arrays of non-Copy elements are rejected by sema.
-    expectCompileFail("fn main() -> i32 { let a = [[1, 2], [3, 4]]; ret 0; }", "Copy");
 }
 
 TEST_F(RuntimeTest, ChainedMethodCalls)
@@ -4292,50 +952,9 @@ TEST_F(RuntimeTest, ChainedMethodCalls)
         9);
 }
 
-TEST_F(RuntimeTest, BoolLiteralInMatch)
-{
-    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
-              " let b = match e { A => true, B => false }; if b { ret 1; } ret 0; }",
-        0);
-}
-
-TEST_F(RuntimeTest, FloatMultiplyByIntCast)
-{
-    expectOutput("fn main() -> i32 { let x = 1.5; let n = 2 as f64;"
-                 " print_float(x * n); println(); ret 0; }",
-        "3.000000\n",
-        0);
-}
-
-TEST_F(RuntimeTest, NestedGenericEnums)
-{
-    expectRun("enum O<T> { Some(T), None } fn main() -> i32 {"
-              " let inner = O::Some(3); let outer = O::Some(inner);"
-              " match outer { Some(i) => { match i { Some(v) => { ret v; }, None => { ret 0; } } },"
-              " None => { ret 0; } } }",
-        3);
-}
-
-TEST_F(RuntimeTest, StringEmptyLenAfterNew)
-{
-    expectRun("fn main() -> i32 { let s = String::new(); if s.len() == 0 { ret 1; } ret 0; }", 1);
-}
-
 TEST_F(RuntimeTest, GlobalAndLocalShadowFree)
 {
     expectRun("let g = 5; fn main() -> i32 { let h = 3; ret g + h; }", 8);
-}
-
-// ── B5: final certainty batch ──────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, SimpleArithmeticSum)
-{
-    expectRun("fn main() -> i32 { ret 10 + 20; }", 30);
-}
-
-TEST_F(RuntimeTest, SimpleArithmeticSub)
-{
-    expectRun("fn main() -> i32 { ret 50 - 12; }", 38);
 }
 
 TEST_F(RuntimeTest, SimpleArithmeticMul)
@@ -4343,34 +962,9 @@ TEST_F(RuntimeTest, SimpleArithmeticMul)
     expectRun("fn main() -> i32 { ret 6 * 7; }", 42);
 }
 
-TEST_F(RuntimeTest, SimpleArithmeticDiv)
-{
-    expectRun("fn main() -> i32 { ret 81 / 9; }", 9);
-}
-
-TEST_F(RuntimeTest, SimpleComparisonEq)
-{
-    expectRun("fn main() -> i32 { if 5 == 5 { ret 1; } ret 0; }", 1);
-}
-
 TEST_F(RuntimeTest, SimpleComparisonNe)
 {
     expectRun("fn main() -> i32 { if 5 != 6 { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleComparisonLt)
-{
-    expectRun("fn main() -> i32 { if 3 < 4 { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleComparisonGt)
-{
-    expectRun("fn main() -> i32 { if 4 > 3 { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleIfTrue)
-{
-    expectRun("fn main() -> i32 { if true { ret 1; } ret 0; }", 1);
 }
 
 TEST_F(RuntimeTest, SimpleIfFalse)
@@ -4378,36 +972,9 @@ TEST_F(RuntimeTest, SimpleIfFalse)
     expectRun("fn main() -> i32 { if false { ret 1; } ret 0; }", 0);
 }
 
-TEST_F(RuntimeTest, SimpleWhileOnce)
-{
-    expectRun("fn main() -> i32 { let mut i = 0; while i < 1 { i = i + 1; } ret i; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleForRange)
-{
-    expectRun("fn main() -> i32 { let mut s = 0; for x in range(1, 3) { s = s + x; } ret s; }", 3);
-}
-
-TEST_F(RuntimeTest, SimpleFunctionCall)
-{
-    expectRun("fn add(a: i32, b: i32) -> i32 { ret a + b; } fn main() -> i32 { ret add(2, 3); }", 5);
-}
-
 TEST_F(RuntimeTest, SimpleGlobal)
 {
     expectRun("let g = 9; fn main() -> i32 { ret g; }", 9);
-}
-
-TEST_F(RuntimeTest, SimpleStructField)
-{
-    expectRun("struct S { pub v: i32 } fn main() -> i32 { let s = S { v: 4 }; ret s.v; }", 4);
-}
-
-TEST_F(RuntimeTest, SimpleEnumMatch)
-{
-    expectRun("enum E { A, B } fn main() -> i32 { let e = E::B;"
-              " match e { A => { ret 1; }, B => { ret 2; } } }",
-        2);
 }
 
 TEST_F(RuntimeTest, SimpleArrayIndex)
@@ -4415,34 +982,9 @@ TEST_F(RuntimeTest, SimpleArrayIndex)
     expectRun("fn main() -> i32 { let a = [1, 2, 3]; ret a[2]; }", 3);
 }
 
-TEST_F(RuntimeTest, SimpleCharLiteral)
-{
-    expectRun("fn main() -> i32 { ret 'A' as i32; }", 65);
-}
-
-TEST_F(RuntimeTest, SimpleStringLen)
-{
-    expectRun("fn main() -> i32 { let s = String::from_lit(\"ab\"); ret s.len(); }", 2);
-}
-
 TEST_F(RuntimeTest, SimpleModulo)
 {
     expectRun("fn main() -> i32 { ret 20 % 6; }", 2);
-}
-
-TEST_F(RuntimeTest, SimpleNegativeViaSubtract)
-{
-    expectRun("fn main() -> i32 { let a = 0 - 3; if a < 0 { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleBoolAnd)
-{
-    expectRun("fn main() -> i32 { if true && true { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleBoolOr)
-{
-    expectRun("fn main() -> i32 { if true || false { ret 1; } ret 0; }", 1);
 }
 
 TEST_F(RuntimeTest, SimpleNestedIf)
@@ -4450,31 +992,9 @@ TEST_F(RuntimeTest, SimpleNestedIf)
     expectRun("fn main() -> i32 { if true { if false { ret 1; } ret 2; } ret 0; }", 2);
 }
 
-TEST_F(RuntimeTest, SimpleDoubleNestedLoops)
-{
-    expectRun("fn main() -> i32 { let mut n = 0; for i in range(1, 3) {"
-              " for j in range(1, 3) { n = n + 1; } } ret n; }",
-        4);
-}
-
-TEST_F(RuntimeTest, SimpleReturnEarly)
-{
-    expectRun("fn main() -> i32 { ret 1; ret 2; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleUnreachableAfterReturn)
-{
-    expectRun("fn main() -> i32 { let mut x = 0; ret 5; x = x + 1; ret x; }", 5);
-}
-
 TEST_F(RuntimeTest, SimpleCharCompare)
 {
     expectRun("fn main() -> i32 { if 'a' == 'a' { ret 1; } ret 0; }", 1);
-}
-
-TEST_F(RuntimeTest, SimpleFloatLiteralPrint)
-{
-    expectOutput("fn main() -> i32 { print_float(1.0); println(); ret 0; }", "1.000000\n", 0);
 }
 
 TEST_F(RuntimeTest, SimpleBoolPrint)
@@ -4482,63 +1002,11 @@ TEST_F(RuntimeTest, SimpleBoolPrint)
     expectOutput("fn main() -> i32 { print_bool(true); println(); ret 0; }", "1\n", 0);
 }
 
-// ── module system (import) ────────────────────────────────────────────────────
-
-TEST_F(RuntimeTest, MultiFileFullImport)
-{
-    ASSERT_TRUE(compileMulti(
-        "impt math_lib;\n"
-        "fn main() -> i32 { ret math_lib::double_it(21); }",
-        {{"math_lib", "fn double_it(x: i32) -> i32 { ret x * 2; }"}}));
-    EXPECT_EQ(linkAndRun(), 42);
-}
-
-TEST_F(RuntimeTest, ModuleAliasImport)
-{
-    ASSERT_TRUE(compileMulti(
-        "impt math_lib as m;\n"
-        "fn main() -> i32 { ret m::double_it(21); }",
-        {{"math_lib", "fn double_it(x: i32) -> i32 { ret x * 2; }"}}));
-    EXPECT_EQ(linkAndRun(), 42);
-}
-
-TEST_F(RuntimeTest, ModuleNestedPathImport)
-{
-    ASSERT_TRUE(compileMulti(
-        "impt lib.nums;\n"
-        "fn main() -> i32 { ret nums::double_it(5) + nums::triple_it(10); }",
-        {{"lib.nums", "fn double_it(x: i32) -> i32 { ret x * 2; }\n"
-                      "fn triple_it(x: i32) -> i32 { ret x * 3; }"}}));
-    EXPECT_EQ(linkAndRun(), 40);
-}
-
 TEST_F(RuntimeTest, ModuleNotFoundRejected)
 {
     std::string diag;
     bool ok = compileMulti("impt no_such_module;\nfn main() -> i32 { ret 0; }", {}, &diag);
     EXPECT_FALSE(ok) << "importing a missing module must fail";
-}
-
-TEST_F(RuntimeTest, ModuleTypeIsolation)
-{
-    // Two modules each define their own `struct Vec2` and `fn make` — the
-    // module prefix keeps them from colliding.
-    ASSERT_TRUE(compileMulti(
-        "impt a;\n"
-        "impt b;\n"
-        "fn main() -> i32 { ret a::make(3) + b::make(4); }",
-        {{"a", "struct Vec2 { pub x: i32 }\nfn make(v: i32) -> i32 { ret v; }"},
-            {"b", "struct Vec2 { pub x: i32 }\nfn make(v: i32) -> i32 { ret v * 10; }"}}));
-    EXPECT_EQ(linkAndRun(), 43);
-}
-
-TEST_F(RuntimeTest, ModuleQualifiedStructLiteral)
-{
-    ASSERT_TRUE(compileMulti(
-        "impt geom;\n"
-        "fn main() -> i32 { let v = geom::Vec2 { x: 5, y: 6 }; ret v.x + v.y; }",
-        {{"geom", "struct Vec2 { pub x: i32, pub y: i32 }"}}));
-    EXPECT_EQ(linkAndRun(), 11);
 }
 
 TEST_F(RuntimeTest, ModuleQualifiedEnumVariant)
@@ -4550,28 +1018,6 @@ TEST_F(RuntimeTest, ModuleQualifiedEnumVariant)
     EXPECT_EQ(linkAndRun(), 7);
 }
 
-TEST_F(RuntimeTest, ModuleQualifiedTypeAnnotation)
-{
-    ASSERT_TRUE(compileMulti(
-        "impt geom;\n"
-        "fn area(v: geom::Vec2) -> i32 { ret v.x * v.y; }\n"
-        "fn main() -> i32 { ret area(geom::Vec2 { x: 3, y: 4 }); }",
-        {{"geom", "struct Vec2 { pub x: i32, pub y: i32 }"}}));
-    EXPECT_EQ(linkAndRun(), 12);
-}
-
-TEST_F(RuntimeTest, CircularImportRejected)
-{
-    // a.lis imports b, b.lis imports a — the cycle must be diagnosed.
-    std::string diag;
-    bool ok = compileMulti(
-        "impt a;\nfn main() -> i32 { ret a::f(); }",
-        {{"a", "impt b;\nfn f() -> i32 { ret b::g(); }"},
-            {"b", "impt a;\nfn g() -> i32 { ret 1; }"}},
-        &diag);
-    EXPECT_FALSE(ok) << "circular imports must be rejected";
-}
-
 TEST_F(RuntimeTest, ModuleCrossReference)
 {
     // Module a calls into module b (both imported by the main file).
@@ -4581,46 +1027,6 @@ TEST_F(RuntimeTest, ModuleCrossReference)
         {{"a", "impt b;\nfn call_b() -> i32 { ret b::seven(); }"},
             {"b", "fn seven() -> i32 { ret 7; }"}}));
     EXPECT_EQ(linkAndRun(), 7);
-}
-
-TEST_F(RuntimeTest, ModuleImportAfterLexErrorStillRejected)
-{
-    // A lex error (`@`) BEFORE an import must not be wiped by the module's nested
-    // Lexer::run() — which calls ResetErrorCount() and would otherwise zero the
-    // running total, letting a broken program compile (the parser gate would see
-    // 0 errors). This imports a FRESH module (not in the stdlib prologue) so
-    // loadModule actually runs the nested lexer. Regression for the
-    // error-count-reset bug.
-    std::string diag;
-    bool ok = compileMulti(
-        "@\nimpt fresh_mod;\nfn main() -> i32 { ret fresh_mod::f(); }",
-        {{"fresh_mod", "fn f() -> i32 { ret 1; }"}},
-        &diag);
-    EXPECT_FALSE(ok) << "a lex error before an import must still fail the compile";
-}
-
-// ── G: panic / never (the uninhabited type) ───────────────────────────────────
-//
-// panic(&i8) is a compiler builtin: it writes "panicked: <msg>" to stderr and
-// calls libc abort(). Its result type is never, the uninhabited type, so it
-// type-checks in ANY position (an argument, a return value, a match arm) while
-// never producing a value. Everything after a diverging call in the same
-// statement list is unreachable, and MIRBuilder::emit() drops it.
-//
-// ASSERTION NOTE: stdout must not be compared around a panic. abort() does not
-// flush stdio, so whatever the program printed before diverging is lost; stderr
-// is the observable channel (see expectPanic).
-
-TEST_F(RuntimeTest, PanicAbortsWithMessage)
-{
-    expectPanic("fn main() -> i32 { panic(\"boom\"); ret 0; }", "panicked: boom");
-}
-
-// The statement after a diverging call must not run: reaching 'ret 7' would
-// exit 7 instead of aborting.
-TEST_F(RuntimeTest, PanicSkipsFollowingStatements)
-{
-    expectPanic("fn main() -> i32 { panic(\"stop\"); ret 7; }", "panicked: stop");
 }
 
 TEST_F(RuntimeTest, NeverFunctionDiverges)
@@ -4636,23 +1042,6 @@ TEST_F(RuntimeTest, NeverFunctionForwardsItsMessage)
     expectPanic("fn die(m: &i8) -> never { panic(m); }\n"
                 "fn main() -> i32 { die(\"via a param\"); ret 0; }",
         "panicked: via a param");
-}
-
-// ret panic(...) in a VALUE-returning function: never coerces to any type.
-TEST_F(RuntimeTest, ReturnOfPanicSatisfiesAnyReturnType)
-{
-    expectPanic("fn classify(n: i32) -> i32 { if n > 0 { ret 1; } ret panic(\"negative\"); }\n"
-                "fn main() -> i32 { ret classify(0 - 1); }",
-        "panicked: negative");
-}
-
-// A diverging BLOCK arm (statement match) next to a normal arm.
-TEST_F(RuntimeTest, DivergingBlockArmInMatch)
-{
-    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
-                "fn get(o: Option<i32>) -> i32 { match o { Some(v) => { ret v; }, None => { panic(\"none arm\"); }, } }\n"
-                "fn main() -> i32 { let n = nothing(); ret get(n); }",
-        "panicked: none arm");
 }
 
 // A diverging VALUE arm must not fix the match's type: 'None => panic(..)' is
@@ -4674,63 +1063,6 @@ TEST_F(RuntimeTest, DivergingValueArmDoesNotFixMatchType)
         "panicked: no value");
 }
 
-// When EVERY value arm diverges the match itself is never and still coerces to
-// the declared return type. (This used to store a valueless operand and trap
-// inside LLVM.)
-TEST_F(RuntimeTest, AllDivergingArmsMakeTheMatchNever)
-{
-    expectPanic("fn pick(o: Option<i32>) -> i32 {\n"
-                "    ret match o { Some(v) => panic(\"some\"), None => panic(\"none\"), };\n"
-                "}\n"
-                "fn main() -> i32 { let o = Option::Some(1); ret pick(o); }",
-        "panicked: some");
-}
-
-// Divergence nested inside a larger expression: the enclosing builder keeps
-// emitting (the remaining argument, the call itself) and emit() drops those
-// unreachable statements.
-TEST_F(RuntimeTest, DivergenceInsideNestedCallArguments)
-{
-    expectPanic("fn add(a: i32, b: i32) -> i32 { ret a + b; }\n"
-                "fn main() -> i32 { ret add(panic(\"in an argument\"), 5); }",
-        "panicked: in an argument");
-}
-
-// never is a legal type for a binding (the language's bottom type): the binding
-// can simply never hold a value.
-TEST_F(RuntimeTest, NeverTypedBindingDeclarationAllowed)
-{
-    expectRun("fn main() -> i32 { let x: never; ret 0; }", 0);
-}
-
-// ...but READING such a binding is an error: no value of an uninhabited type can
-// exist.
-TEST_F(RuntimeTest, NeverBindingCannotBeRead)
-{
-    expectCompileFail("fn main() -> i32 { let x: never; print_int(x); ret 0; }",
-        "uninhabited type 'never'");
-}
-
-// Bottom coercion is uniform across the value positions: a never-valued
-// initialiser, assignment and array element all satisfy the surrounding type.
-TEST_F(RuntimeTest, NeverCoercesInLetInitializer)
-{
-    expectPanic("fn main() -> i32 { let x: i32 = panic(\"let-init\"); ret 0; }",
-        "panicked: let-init");
-}
-
-TEST_F(RuntimeTest, NeverCoercesInAssignment)
-{
-    expectPanic("fn main() -> i32 { let mut x = 0; x = panic(\"assign\"); ret x; }",
-        "panicked: assign");
-}
-
-TEST_F(RuntimeTest, NeverCoercesAsArrayElement)
-{
-    expectPanic("fn main() -> i32 { let a = [panic(\"elem\"), 2, 3]; ret 0; }",
-        "panicked: elem");
-}
-
 // A function declared to return never must actually diverge; the check lives in
 // MIRBuilder (conservative: the body must contain at least one diverging call).
 TEST_F(RuntimeTest, NeverFunctionMustDiverge)
@@ -4741,82 +1073,16 @@ TEST_F(RuntimeTest, NeverFunctionMustDiverge)
         "but never diverges");
 }
 
-// ...and it must NOT reject a body that diverges through another never function,
-// nor one that diverges inside a while-true loop (whose exit edge exists
-// statically — that is exactly why the check is not a full path analysis).
-TEST_F(RuntimeTest, NeverFunctionDivergingIndirectly)
-{
-    expectPanic("fn inner() -> never { panic(\"inner\"); }\n"
-                "fn outer() -> never { inner(); }\n"
-                "fn main() -> i32 { outer(); ret 0; }",
-        "panicked: inner");
-}
-
-TEST_F(RuntimeTest, NeverFunctionDivergingInsideWhileTrue)
-{
-    expectPanic("fn spin() -> never {\n"
-                "    let mut i = 0;\n"
-                "    while true { i = i + 1; if i > 3 { panic(\"stop\"); } }\n"
-                "}\n"
-                "fn main() -> i32 { spin(); ret 0; }",
-        "panicked: stop");
-}
-
-// A value whose generic arguments cannot be inferred keeps the type DEFINITION
-// (whose fields still contain the bare parameter). That is rejected with an
-// explanation instead of reaching codegen.
-TEST_F(RuntimeTest, UninferredGenericArgumentInCallRejected)
-{
-    expectCompileFail("fn get(o: Option<i32>) -> i32 { ret 0; }\n"
-                      "fn main() -> i32 { ret get(Option::None); }",
-        "cannot infer the generic argument(s) of 'Option'");
-}
-
-TEST_F(RuntimeTest, UninferredGenericArgumentInLetRejected)
-{
-    expectCompileFail("fn main() -> i32 { let n: Option<i32> = Option::None; ret 0; }",
-        "cannot infer the generic argument(s) of 'Option'");
-    expectCompileFail("fn main() -> i32 { let n = Option::None; ret 0; }",
-        "cannot infer the generic argument(s) of 'Option'");
-}
-
 TEST_F(RuntimeTest, BareGenericParameterTypeRejected)
 {
     expectCompileFail("fn f(o: Option) -> i32 { ret 0; }\nfn main() -> i32 { ret f(Option::Some(1)); }",
         "without its argument(s)");
 }
 
-// The inferred forms still work when the arguments ARE inferable.
-TEST_F(RuntimeTest, GenericInferenceStillWorks)
-{
-    expectRun("fn get(o: Option<i32>) -> i32 { match o { Some(v) => { ret v; }, None => { ret 0; }, } }\n"
-              "fn main() -> i32 { let o = Option::Some(9); ret get(o); }",
-        9);
-}
-
-TEST_F(RuntimeTest, PanicArgumentTypeIsChecked)
-{
-    expectCompileFail("fn main() -> i32 { panic(42); ret 0; }",
-        "builtin 'panic' expects an argument of type '&int8'");
-}
-
 TEST_F(RuntimeTest, PanicArityIsChecked)
 {
     expectCompileFail("fn main() -> i32 { panic(); ret 0; }",
         "builtin 'panic' expects 1 argument, got 0");
-}
-
-TEST_F(RuntimeTest, PanicNameIsReserved)
-{
-    expectCompileFail("fn panic() { }\nfn main() -> i32 { ret 0; }",
-        "is reserved by the compiler");
-}
-
-// void is a no-value type: a void-typed binding could never be read.
-TEST_F(RuntimeTest, VoidTypedVariableRejected)
-{
-    expectCompileFail("fn side() { }\nfn main() -> i32 { let x = side(); ret 0; }",
-        "cannot have type 'void'");
 }
 
 // ── H: Option::unwrap / expect (stdlib) ───────────────────────────────────────
@@ -4831,102 +1097,12 @@ TEST_F(RuntimeTest, OptionUnwrapReturnsThePayload)
     expectRun("fn main() -> i32 { let a = Option::Some(7); ret a.unwrap(); }", 7);
 }
 
-TEST_F(RuntimeTest, OptionExpectReturnsThePayload)
-{
-    expectRun("fn main() -> i32 { let a = Option::Some(41); ret a.expect(\"must be some\"); }", 41);
-}
-
-TEST_F(RuntimeTest, OptionUnwrapOnNoneAborts)
-{
-    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
-                "fn main() -> i32 { let n = nothing(); ret n.unwrap(); }",
-        "panicked: called unwrap on a None value");
-}
-
-TEST_F(RuntimeTest, OptionExpectOnNoneUsesTheCallerMessage)
-{
-    expectPanic("fn nothing() -> Option<i32> { ret Option::None; }\n"
-                "fn main() -> i32 { let n = nothing(); ret n.expect(\"the config value must be present\"); }",
-        "panicked: the config value must be present");
-}
-
-// unwrap takes self BY VALUE, so the option is moved (and could not be unwrapped
-// twice).
-TEST_F(RuntimeTest, OptionUnwrapMovesTheOption)
-{
-    expectCompileFail("fn main() -> i32 {\n"
-                      "    let a = Option::Some(1);\n"
-                      "    let x = a.unwrap();\n"
-                      "    let y = a.unwrap();\n"
-                      "    ret x + y;\n"
-                      "}",
-        "use of moved value: 'a'");
-}
-
-// A non-Copy payload is moved out of the enum and owned by the caller
-// (exactly one drop of the String buffer).
-TEST_F(RuntimeTest, OptionUnwrapNonCopyPayload)
-{
-    expectOutput("fn main() -> i32 {\n"
-                 "    let o = Option::Some(String::from_lit(\"payload\"));\n"
-                 "    let s = o.unwrap();\n"
-                 "    print_str(s.to_cstr());\n"
-                 "    println();\n"
-                 "    ret 0;\n"
-                 "}",
-        "payload\n", 0);
-}
-
-// Chained directly on a construction, and on the Option a stdlib helper returns.
-TEST_F(RuntimeTest, OptionUnwrapChained)
-{
-    expectRun("fn main() -> i32 { ret Option::Some(3).unwrap(); }", 3);
-}
-
 TEST_F(RuntimeTest, OptionUnwrapOnHelperResult)
 {
     // first(range(1, 5)) is Option<i32> holding 1.
     expectRun("fn main() -> i32 { ret first(range(1, 5)).unwrap(); }", 1);
     // unwrap_or stays available (and non-panicking) alongside unwrap.
     expectRun("fn main() -> i32 { ret unwrap_or(Option::Some(4), 0) + Option::Some(5).unwrap(); }", 9);
-}
-
-// ── I: enums with several non-Copy payload slots ──────────────────────────────
-//
-// A match arm that RETURNS EARLY consumes the scrutinee temp; the OTHER variant's
-// payload slot was never written on that path, so dropping it would release
-// uninitialized memory. Observable with a Drop counter: before the fix the bogus
-// drop ran once per early exit (21 here instead of 11).
-
-TEST_F(RuntimeTest, EnumTwoNonCopyPayloadsNoBogusDrop)
-{
-    expectRun("let g_drops = 0;\n"
-              "struct Leaf { pub v: i32 }\n"
-              "impl Drop for Leaf { fn drop(self) { g_drops = g_drops + 1; } }\n"
-              "enum P { A(Leaf), B(Leaf) }\n"
-              "fn f(p: P) -> i32 { match p { A(a) => { ret 1; }, B(b) => { ret 2; } } }\n"
-              "fn main() -> i32 { let x = f(P::A(Leaf { v: 1 })); ret g_drops * 10 + x; }",
-        11);
-}
-
-// A two-parameter generic ENUM is what Result<T, E> needs: construct, match, a
-// generic function over both parameters, and a method on the generic enum.
-TEST_F(RuntimeTest, GenericEnumWithTwoParameterTypes)
-{
-    expectRun("enum Pair<A, B> { Both(A, B), Neither }\n"
-              "fn main() -> i32 { let p = Pair::Both(3, 'x');\n"
-              "    match p { Both(a, b) => { ret a; }, Neither => { ret 0; } } }",
-        3);
-}
-
-TEST_F(RuntimeTest, GenericEnumTwoTypesThroughGenericFunction)
-{
-    expectRun("enum Pair<A, B> { Both(A, B), Neither }\n"
-              "fn pick<X, Y>(p: Pair<X, Y>) -> X {\n"
-              "    match p { Both(a, b) => { ret a; }, Neither => { panic(\"empty\"); } }\n"
-              "}\n"
-              "fn main() -> i32 { let p = Pair::Both(9, 'y'); ret pick(p); }",
-        9);
 }
 
 TEST_F(RuntimeTest, GenericEnumTwoTypesImplMethod)
@@ -4937,30 +1113,6 @@ TEST_F(RuntimeTest, GenericEnumTwoTypesImplMethod)
               "}\n"
               "fn main() -> i32 { let p = Pair::Both(11, 'z'); ret p.first(); }",
         11);
-}
-
-TEST_F(RuntimeTest, GenericEnumTwoTypesNonCopyPayloads)
-{
-    expectOutput("enum Pair<A, B> { Both(A, B), Neither }\n"
-                 "fn main() -> i32 {\n"
-                 "    let p = Pair::Both(String::from_lit(\"hello\"), String::from_lit(\"world\"));\n"
-                 "    match p { Both(a, b) => { print_str(a.to_cstr()); }, Neither => { print_int(0); } }\n"
-                 "    println();\n"
-                 "    ret 0;\n"
-                 "}",
-        "hello\n", 0);
-}
-
-// ── J: definite assignment (a let without an initializer) ────────────────────
-//
-// Option B of the spec decision: a Move binding must have an initializer (the
-// scope-exit drop would otherwise release an unconstructed value); a Copy binding
-// may be declared without one, but every use must be definitely assigned —
-// flow-merged with AND across if/match, conservatively reset across a loop.
-
-TEST_F(RuntimeTest, UninitCopyBindingAssignThenRead)
-{
-    expectRun("fn main() -> i32 { let mut x: i32; x = 5; ret x; }", 5);
 }
 
 TEST_F(RuntimeTest, UninitCopyBindingUnusedIsAllowed)
@@ -4981,57 +1133,12 @@ TEST_F(RuntimeTest, UninitBothBranchesAssignAccepted)
         1);
 }
 
-TEST_F(RuntimeTest, UninitOneBranchMissingRejected)
-{
-    expectCompileFail("fn main() -> i32 { let mut x: i32; let c = 1;\n"
-                      "    if c > 0 { x = 1; }\n"
-                      "    ret x; }",
-        "use of uninitialized value");
-}
-
-// A branch that cannot fall through (it returns) contributes no state: the other
-// branch decides.
-TEST_F(RuntimeTest, UninitReturningBranchDoesNotBlock)
-{
-    expectRun("fn f(c: bool) -> i32 { let mut x: i32;\n"
-              "    if c { x = 1; } else { ret 9; }\n"
-              "    ret x; }\n"
-              "fn main() -> i32 { ret f(true); }",
-        1);
-}
-
 TEST_F(RuntimeTest, UninitMatchAllArmsAssignAccepted)
 {
     expectRun("fn main() -> i32 { let mut x: i32; let o = Option::Some(1);\n"
               "    match o { Some(v) => { x = v; }, None => { x = 2; } }\n"
               "    ret x; }",
         1);
-}
-
-TEST_F(RuntimeTest, UninitMatchArmMissingAssignRejected)
-{
-    expectCompileFail("fn main() -> i32 { let mut x: i32; let o = Option::Some(1);\n"
-                      "    match o { Some(v) => { x = v; }, None => { } }\n"
-                      "    ret x; }",
-        "use of uninitialized value");
-}
-
-// The loop body may run zero times, so an assignment inside it does not make the
-// binding definitely assigned afterwards (conservative, like Rust).
-TEST_F(RuntimeTest, UninitAssignedOnlyInsideLoopRejected)
-{
-    expectCompileFail("fn main() -> i32 { let mut x: i32; let mut i = 0;\n"
-                      "    while i < 3 { x = 1; i = i + 1; }\n"
-                      "    ret x; }",
-        "use of uninitialized value");
-}
-
-TEST_F(RuntimeTest, UninitAssignedBeforeLoopAccepted)
-{
-    expectRun("fn main() -> i32 { let mut x: i32; x = 0; let mut i = 0;\n"
-              "    while i < 3 { i = i + 1; let y = x + 1; }\n"
-              "    ret x; }",
-        0);
 }
 
 // Code after a branch that always returns is unreachable, so it is not checked.
@@ -5041,36 +1148,6 @@ TEST_F(RuntimeTest, UninitChecksSkippedInUnreachableCode)
               "    if c > 0 { ret 1; } else { ret 2; }\n"
               "    ret x; }",
         1);
-}
-
-TEST_F(RuntimeTest, UninitMoveOfUninitRejected)
-{
-    expectCompileFail("fn main() -> i32 { let x: i32; let y = x; ret y; }",
-        "use of uninitialized value");
-}
-
-TEST_F(RuntimeTest, UninitBorrowOfUninitRejected)
-{
-    expectCompileFail("fn main() -> i32 { let x: i32; let r = &x; ret 0; }",
-        "use of uninitialized value");
-}
-
-// Writing a FIELD through an uninitialized reference needs the binding first.
-// Since `&mut T` stopped being Copy the code is rejected even earlier: the
-// binding itself cannot be declared without an initializer (E3012).
-TEST_F(RuntimeTest, UninitFieldWriteThroughUninitRefRejected)
-{
-    expectCompileFail("struct P { pub v: i32 }\n"
-                      "fn main() -> i32 { let mut r: &mut P; r.v = 1; ret 0; }",
-        "without an initializer");
-}
-
-// A Move binding cannot be declared without an initializer at all.
-TEST_F(RuntimeTest, UninitMoveBindingWithoutInitializerRejected)
-{
-    expectCompileFail("fn main() -> i32 { let s: String; ret 0; }", "without an initializer");
-    expectCompileFail("struct P { pub v: i32 }\nfn main() -> i32 { let p: P; ret 0; }",
-        "without an initializer");
 }
 
 // ── K: Result and the postfix ? operator (error propagation) ─────────────────
@@ -5094,79 +1171,6 @@ TEST_F(RuntimeTest, ResultConstructAndHelpers)
         6);
 }
 
-TEST_F(RuntimeTest, ResultUnwrapAndExpect)
-{
-    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(3); }\n"
-              "fn main() -> i32 { let r = one(); ret r.unwrap() + one().expect(\"wanted a value\"); }",
-        6);
-    expectPanic("fn bad() -> Result<i32, i32> { ret Result::Err(9); }\n"
-                "fn main() -> i32 { let r = bad(); ret r.unwrap(); }",
-        "panicked: called unwrap on an Err value");
-    expectPanic("fn bad() -> Result<i32, i32> { ret Result::Err(9); }\n"
-                "fn main() -> i32 { let r = bad(); ret r.expect(\"a value was required\"); }",
-        "panicked: a value was required");
-}
-
-// On the Ok path the operator yields the payload.
-TEST_F(RuntimeTest, TryOperatorPropagatesOkPayload)
-{
-    expectRun("fn ok42() -> Result<i32, i32> { ret Result::Ok(42); }\n"
-              "fn f() -> Result<i32, i32> { let v = ok42()?; ret Result::Ok(v + 1); }\n"
-              "fn main() -> i32 { let r = f();\n"
-              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0 - e; } } }",
-        43);
-}
-
-// The Err path returns Err(e) from the enclosing function immediately: the
-// statements after the operator must not run (the second one would otherwise add).
-TEST_F(RuntimeTest, TryOperatorPropagatesErrAndSkipsRest)
-{
-    expectRun("fn bad() -> Result<i32, i32> { ret Result::Err(7); }\n"
-              "fn f() -> Result<i32, i32> {\n"
-              "    let v = bad()?;\n"
-              "    let w = bad()?;\n"
-              "    ret Result::Ok(v + w);\n"
-              "}\n"
-              "fn main() -> i32 { let r = f();\n"
-              "    match r { Ok(v) => { ret v; }, Err(e) => { ret e; } } }",
-        7);
-}
-
-TEST_F(RuntimeTest, TryOperatorChainedInOneExpression)
-{
-    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
-              "fn two() -> Result<i32, i32> { ret Result::Ok(2); }\n"
-              "fn f() -> Result<i32, i32> { ret Result::Ok(one()? + two()? + one()?); }\n"
-              "fn main() -> i32 { let r = f();\n"
-              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 100; } } }",
-        4);
-}
-
-TEST_F(RuntimeTest, TryOperatorInsideMatchArmAndLoop)
-{
-    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
-              "fn wrap(c: i32) -> Result<i32, i32> { ret Result::Ok(c); }\n"
-              "fn pick(c: i32) -> Result<i32, i32> {\n"
-              "    match wrap(c) {\n"
-              "        Ok(v) => { let w = one()?; ret Result::Ok(v + w); },\n"
-              "        Err(e) => { ret Result::Err(e); },\n"
-              "    }\n"
-              "}\n"
-              "fn main() -> i32 { let r = pick(5);\n"
-              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0; } } }",
-        6);
-    expectRun("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
-              "fn f() -> Result<i32, i32> {\n"
-              "    let mut s = 0;\n"
-              "    let mut i = 0;\n"
-              "    while i < 3 { s = s + one()?; i = i + 1; }\n"
-              "    ret Result::Ok(s);\n"
-              "}\n"
-              "fn main() -> i32 { let r = f();\n"
-              "    match r { Ok(v) => { ret v; }, Err(e) => { ret 0; } } }",
-        3);
-}
-
 // The operator may be followed by member access, and used as a statement.
 TEST_F(RuntimeTest, TryOperatorSuffixAndStatementForms)
 {
@@ -5184,54 +1188,6 @@ TEST_F(RuntimeTest, TryOperatorSuffixAndStatementForms)
         9);
 }
 
-// Non-Copy payloads travel through the operator on both paths exactly once.
-TEST_F(RuntimeTest, TryOperatorNonCopyPayloads)
-{
-    expectOutput("fn make() -> Result<String, String> { ret Result::Ok(String::from_lit(\"payload\")); }\n"
-                 "fn f() -> Result<String, String> { let a = make()?; ret Result::Ok(a); }\n"
-                 "fn main() -> i32 { let r = f();\n"
-                 "    match r { Ok(v) => { print_str(v.to_cstr()); }, Err(e) => { print_str(e.to_cstr()); } }\n"
-                 "    println();\n"
-                 "    ret 0;\n"
-                 "}",
-        "payload\n", 0);
-    expectOutput("fn bad() -> Result<i32, String> { ret Result::Err(String::from_lit(\"inner\")); }\n"
-                 "fn f() -> Result<i32, String> { let v = bad()?; ret Result::Ok(v); }\n"
-                 "fn main() -> i32 { let r = f();\n"
-                 "    match r { Ok(v) => { print_int(v); }, Err(e) => { print_str(e.to_cstr()); } }\n"
-                 "    println();\n"
-                 "    ret 0;\n"
-                 "}",
-        "inner\n", 0);
-}
-
-// A whole-module import exposes module-qualified names — the way to reach
-// result::unwrap_or when option's unwrap_or is imported as well.
-TEST_F(RuntimeTest, ResultQualifiedAccessFromWholeModuleImport)
-{
-    expectRunWithPrologue(
-        "impt result;\n"
-        "fn bad() -> result::Result<i32, i32> { ret result::Result::Err(4); }\n"
-        "fn main() -> i32 { ret result::unwrap_or(bad(), 11); }",
-        "",
-        11);
-}
-
-TEST_F(RuntimeTest, TryOperatorRequiresResultOperand)
-{
-    expectCompileFail("fn f() -> Result<i32, i32> { let x = 5?; ret Result::Ok(x); }\n"
-                      "fn main() -> i32 { ret 0; }",
-        "requires a 'Result' value");
-}
-
-TEST_F(RuntimeTest, TryOperatorRequiresResultReturningFunction)
-{
-    expectCompileFail("fn one() -> Result<i32, i32> { ret Result::Ok(1); }\n"
-                      "fn f() -> i32 { let x = one()?; ret x; }\n"
-                      "fn main() -> i32 { ret 0; }",
-        "requires the enclosing function to return");
-}
-
 TEST_F(RuntimeTest, TryOperatorRequiresMatchingErrorType)
 {
     expectCompileFail("fn bad() -> Result<i32, i32> { ret Result::Err(1); }\n"
@@ -5240,10 +1196,8 @@ TEST_F(RuntimeTest, TryOperatorRequiresMatchingErrorType)
         "does not match the function error type");
 }
 
-// A void generic argument would become a void struct field (LLVM rejects that).
-TEST_F(RuntimeTest, VoidGenericArgumentRejected)
-{
-    expectCompileFail("fn f() -> Result<void, i32> { ret Result::Ok(1); }\nfn main() -> i32 { ret 0; }",
-        "cannot be a generic argument");
-}
+// The end-to-end in-process path (compile a Lis snippet, JIT it, run it) is what
+// expectRun/expectOutput do for ~500 cases; the trivial module above covers the
+// JIT plumbing on its own.
+
 

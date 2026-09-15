@@ -85,6 +85,9 @@ struct Context
 
     std::unique_ptr<MIRProgram> mirProgram;
 
-    llvm::LLVMContext llvmContext;
+    // Held by unique_ptr (not by value) so a consumer that needs to own a
+    // context can take it — the test harness hands the module AND its context to
+    // the ORC JIT, which owns both until the JIT is destroyed.
+    std::unique_ptr<llvm::LLVMContext> llvmContext = std::make_unique<llvm::LLVMContext>();
     std::unique_ptr<llvm::Module> module;
 };
