@@ -431,15 +431,13 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+/// A loop. `for` has no representation of its own: HIRBuilder desugars it
+/// into `while true { let __opt = __it.next(); match __opt { ... } }`, so
+/// every HIRLoop reaching the later stages is a while (with a condition;
+/// the desugared form uses the literal `true`).
 class HIRLoop : public HIRStmt
 {
 public:
-    enum class Kind
-    {
-        While,
-        For
-    };
-    Kind kind;
     std::optional<std::unique_ptr<HIRExpr>> cond;
     std::unique_ptr<HIRBlock> body;
     void accept(HIRVisitor *visitor) override

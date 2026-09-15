@@ -677,6 +677,102 @@ TEST_F(RuntimeTest, DropStringFrees)
     expectRun("fn main() -> i32 { let s = String::from_lit(\"hi\"); ret s.len(); }", 2);
 }
 
+// ── Conditional drops (drop flags) ─────────────────────────────────────────────
+//
+// A value moved out on ONE path is still owned on the others, so its drop has
+// no static home at the branch. The old lowering dropped it on the edge where
+// it happened to be owned, right before the join — which RELEASED it while the
+// rest of its scope was still live (observable through Drop, and a
+// use-after-free for an alias the borrow checker does not track), and for a
+// partial move it also left the scope-end decomposition to run again (double
+// free). Slots are now dropped at the scope end under a run-time ownership bit.
+
+TEST_F(RuntimeTest, ConditionalMoveDropRunsAtScopeEnd)
+{
+    // Before the fix the counter already read 100 here: the else edge had
+    // dropped `a` before the join, i.e. before this statement ran.
+    expectRun("let g = 0;\n"
+              "struct D { pub v: i32 }\n"
+              "impl Drop for D { fn drop(self) { g = g + 100; } }\n"
+              "fn main() -> i32 { let a = D { v: 1 }; let c = 0;"
+              " if c == 1 { let b = a; } let observed = g; ret observed; }",
+        0);
+}
+
+TEST_F(RuntimeTest, ConditionalMoveOfParameterDropRunsAtExit)
+{
+    // By-value parameters are owned locals too: moving one on a single path
+    // must neither lose its destructor nor run it twice (0 / 200 would be bugs).
+    const std::string src =
+        "let g = 0;\n"
+        "struct D { pub v: i32 }\n"
+        "impl Drop for D { fn drop(self) { g = g + 100; } }\n"
+        "fn f(s: D, c: i32) -> i32 { if c == 1 { let b = s; } ret 0; }\n"
+        "fn main() -> i32 { let r = f(D { v: 1 }, ";
+    expectRun(src + "0); ret g; }", 100);
+    expectRun(src + "1); ret g; }", 100);
+}
+
+TEST_F(RuntimeTest, ConditionalPartialMoveDropsEachFieldOnce)
+{
+    // A partial move on one path only. Each field must be released exactly
+    // once: the moved-out A by its new owner, B by the scope-end drop. The
+    // counter is positional (A = *10+1, B = *10+2), so a double free or a
+    // lost drop shows up as a different number, not merely as a crash.
+    const std::string src =
+        "let g = 0;\n"
+        "struct A { pub v: i32 }\n"
+        "impl Drop for A { fn drop(self) { g = g * 10 + 1; } }\n"
+        "struct B { pub v: i32 }\n"
+        "impl Drop for B { fn drop(self) { g = g * 10 + 2; } }\n"
+        "struct P { pub a: A, pub b: B }\n"
+        "fn f(c: i32) -> i32 { let s = P { a: A { v: 1 }, b: B { v: 2 } };"
+        " if c == 1 { let x = s.a; } ret 0; }\n"
+        "fn main() -> i32 { let r = f(";
+    // c == 0: nothing moved, so A then B are released at the scope end (12).
+    expectRun(src + "0); ret g; }", 12);
+    // c == 1: the moved-out A goes first (at the end of the then block), then
+    // the surviving B at the scope end — still 12, never 22 (double free) and
+    // never 2 (the moved A lost, or B alone).
+    expectRun(src + "1); ret g; }", 12);
+}
+
+TEST_F(RuntimeTest, FailedMemberAccessReportsNoCascade)
+{
+    // An expression whose analysis failed has NO type (null is the analyzer's
+    // error convention), so nothing downstream can pile a second diagnostic on
+    // top of the real one: the old fallback type was a hard-coded i32, which
+    // made `g(s.nope)` add a bogus "argument type mismatch", and the index
+    // path's `void` fallback made `let y = x[0];` add "variable y cannot have
+    // type void". Two uses of the unknown field, two diagnostics — no more.
+    std::string diag;
+    ASSERT_FALSE(compileCapture("struct S { pub a: i32 }\n"
+                                "fn g(s: S) -> i32 { ret s.a; }\n"
+                                "fn main() -> i32 { let s = S { a: 1 };\n"
+                                "    let x = s.nope;\n"
+                                "    ret g(s.nope); }",
+        diag));
+    size_t count = 0;
+    for (size_t pos = diag.find("error["); pos != std::string::npos;
+         pos = diag.find("error[", pos + 1))
+        ++count;
+    EXPECT_EQ(count, 2u) << "expected exactly one diagnostic per failed member access, got:\n"
+                         << diag;
+}
+
+TEST_F(RuntimeTest, ConditionalMoveKeepsUntrackedAliasAlive)
+{
+    // The early drop was a use-after-free through an alias the borrow checker
+    // cannot see: `p` is a raw pointer into `a`'s buffer (String::to_cstr()),
+    // and the second allocation is what reuses the block the early drop
+    // released. Before the fix this printed garbage bytes instead of 'hello'.
+    expectOutput("fn main() -> i32 { let a = String::from_lit(\"hello\");"
+                 " let p = a.to_cstr(); let c = 0; if c == 1 { let b = a; }"
+                 " let z = String::from_lit(\"ZZZZZZZZZZZZZZZZ\");"
+                 " print_str(p); println(); ret 0; }",
+        "hello\n", 0);
+}
+
 TEST_F(RuntimeTest, EnumPayloadCopyBinding)
 {
     // A Copy payload (i32) is bound by value; both binding and scrutinee usable.

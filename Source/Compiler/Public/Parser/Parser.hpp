@@ -46,6 +46,11 @@ protected:
     /// Sentinel returned by currentToken()/getToken() for an empty stream.
     static Token eofToken_;
 
+    /// True once the end of the stream has been reported at the current cursor
+    /// position (reset by advance()), so a loop that cannot make progress does
+    /// not flood the log with identical "Unexpected finish" diagnostics.
+    bool eofReported_ = false;
+
     /** While parsing a `for x in <iterable>`, a bare identifier followed by `{`
      *  is ambiguous (struct literal vs loop body). In that context we require
      *  the identifier to be a known struct type for it to be a struct literal. */
@@ -101,7 +106,16 @@ protected:
 
     inline void advance()
     {
-        currentPos += 1;
+        // Clamped: an unbounded cursor made "past the end" indistinguishable
+        // from "sitting on the last token" for every caller (see
+        // reportUnexpectedFinish). A parser loop can no longer walk away from
+        // the stream, and consume() on a mismatch stops at the end instead of
+        // advancing past it.
+        if (currentPos < tokenStream->size())
+        {
+            currentPos += 1;
+            eofReported_ = false; // a new position may report its own EOF
+        }
     }
 
     inline bool finished()
@@ -112,22 +126,7 @@ protected:
     inline Token &getToken(size_t pos)
     {
         if (pos >= tokenStream->size())
-        {
-            if (tokenStream->empty())
-                return eofToken_; // empty stream — nothing to log against
-            Logger::LogInfo logInfo;
-            // Guard against currentPos == 0: currentPos - 1 would wrap to SIZE_MAX.
-            // A failed consume() can push currentPos PAST the end (size+1), so
-            // clamp anchor to the last valid token — at(size()) throws.
-            size_t anchor = currentPos > 0 ? currentPos - 1 : 0;
-            if (anchor >= tokenStream->size())
-                anchor = tokenStream->size() - 1;
-            initLogInfo(tokenStream->at(anchor), logInfo, "Unexpeced finish", E_UnexpectFinish);
-            logInfo.exit = false;
-
-            Logger::Log(Logger::LogLevel::ERROR, logInfo);
-            return tokenStream->at(anchor);
-        }
+            return reportUnexpectedFinish();
 
         return tokenStream->at(pos);
     }
@@ -135,24 +134,40 @@ protected:
     inline Token &currentToken()
     {
         if (finished())
+            return reportUnexpectedFinish();
+
+        return tokenStream->at(currentPos);
+    }
+
+    /**
+     * Report the end of the stream ONCE per cursor position and hand back the
+     * EOF sentinel (TokenCode::UNDEFINED — no real token carries it).
+     *
+     * The old version returned the LAST token instead, so check()/match() saw a
+     * phantom token forever and error recovery kept "parsing" one token past
+     * the end: that is how `fn f(mut self)` corrupted the heap (0xC0000374)
+     * instead of reporting a parameter error.
+     */
+    inline Token &reportUnexpectedFinish()
+    {
+        if (tokenStream->empty())
+            return eofToken_; // nothing to log against
+
+        if (!eofReported_)
         {
-            if (tokenStream->empty())
-                return eofToken_; // empty stream — nothing to log against
+            eofReported_ = true;
             Logger::LogInfo logInfo;
-            // Guard against currentPos == 0: currentPos - 1 would wrap to SIZE_MAX.
-            // A failed consume() can push currentPos PAST the end (size+1), so
-            // clamp anchor to the last valid token — at(size()) throws.
+            // Anchor the caret on the last real token (the cursor is clamped to
+            // size(), so currentPos - 1 is it; guard the wrap at 0).
             size_t anchor = currentPos > 0 ? currentPos - 1 : 0;
             if (anchor >= tokenStream->size())
                 anchor = tokenStream->size() - 1;
-            initLogInfo(tokenStream->at(anchor), logInfo, "Unexpect finish", E_UnexpectFinish);
+            initLogInfo(tokenStream->at(anchor), logInfo, "Unexpected finish", E_UnexpectFinish);
             logInfo.exit = false;
 
             Logger::Log(Logger::LogLevel::ERROR, logInfo);
-            return tokenStream->at(anchor);
         }
-
-        return tokenStream->at(currentPos);
+        return eofToken_;
     }
 
     inline bool match(TokenCode code)

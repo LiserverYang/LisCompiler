@@ -82,7 +82,13 @@ MIRPlace MIRBuilder::makeTempPlace(std::shared_ptr<Type> type)
     // needsDrop(), not "!Copy": a `&mut T` temp is non-Copy yet owns nothing,
     // so tracking it as an owned local would only queue a no-op drop.
     if (!ownedLocalsStack_.empty() && place.type && place.type->needsDrop())
+    {
         ownedLocalsStack_.back().push_back(place);
+        // Temps are moved conditionally just like named locals (`let r =
+        // if c { s } else { t };` hands one of two owned temps over), so
+        // they need the same runtime drop flags.
+        registerDropSlots(place);
+    }
 
     return place;
 }
@@ -188,6 +194,8 @@ void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
         // A fresh whole value re-owns every field — clear any stale partial
         // move record so a later drop decomposes nothing.
         partiallyMovedFields_.erase(lhs.index);
+        // ...and re-arm the run-time ownership bits of every slot.
+        writeSlotFlags(lhs.index, {}, true);
     }
     else if (lhs.base == PlaceBase::Local)
     {
@@ -212,6 +220,10 @@ void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
                 if (pmIt->second.empty())
                     partiallyMovedFields_.erase(pmIt);
             }
+
+            // The re-assigned field owns a value again: re-arm the bits of
+            // every slot at or under it.
+            writeSlotFlags(lhs.index, lhsPath, true);
         }
     }
 
@@ -220,6 +232,17 @@ void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
 
 void MIRBuilder::emitDrop(MIRPlace place)
 {
+    // A local that was moved out on ONLY SOME paths has no static answer:
+    // whether it still owns each of its slots is a run-time fact, recorded
+    // in the drop flags. Handle it before the movedLocals_ short-circuit
+    // below, which is exactly the test that cannot be trusted here.
+    if (place.base == PlaceBase::Local && place.projections.empty()
+        && dynamicSlots_.count(place.index))
+    {
+        emitDropDynamic(place);
+        return;
+    }
+
     // A moved-out local no longer owns its value — dropping it would double-free.
     if (place.base == PlaceBase::Local && movedLocals_.count(place.index))
         return;
@@ -305,12 +328,224 @@ void MIRBuilder::emitDropPartial(MIRPlace place,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Drop slots & drop flags (conditional drops)
+// ─────────────────────────────────────────────────────────────────────────────
+// A value moved out on ONE branch is still owned on the others, so its drop
+// has no single static home. The old lowering compensated by dropping it on
+// the edge where it was still owned, right before the join:
+//
+//     let a = String::from_lit("hello");
+//     let p = a.to_cstr();
+//     if c == 1 { let b = a; }      // a moved only on the taken edge
+//     ...                           // <- the else edge dropped `a` HERE
+//
+// That is not merely early: it RELEASES the value while the rest of its scope
+// may still hold untracked aliases (`p` above -> use-after-free), and it makes
+// the destructor run at a point the language says it does not. It was also
+// simply wrong for partial moves, where the early per-field drop and the
+// scope-end decomposition both ran (double free).
+//
+// The fix is the one Rust uses: give every drop SLOT a run-time ownership bit.
+// The bit is written true where the slot becomes live (the declaration),
+// cleared by the move that ends its life, and tested by the drop -- which now
+// sits at the scope end, where the language says it belongs. Because the set
+// and the clear both happen on the path that performs them, the bit needs no
+// phi and no merge write: every path through a branch already carries the
+// right value, including a path sealed by an early break or return.
+//
+// Only slots whose ownership actually differs across two edges take this path
+// (markConditionalMoves); every other local keeps the purely static drop, so
+// code that never conditionally moves a value is byte-for-byte unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string MIRBuilder::slotKey(size_t local, const std::vector<std::string> &path)
+{
+    std::string key = std::to_string(local);
+    for (const auto &field : path)
+    {
+        key += '.';
+        key += field;
+    }
+    return key;
+}
+
+void MIRBuilder::collectDropSlots(const std::shared_ptr<Type> &type,
+    std::vector<std::string> &prefix,
+    std::vector<DropSlot> &out)
+{
+    size_t before = out.size();
+
+    // The SAME recursion emitDropPartial() walks: a field is decomposed when
+    // it needs a drop (needsDrop(): not Copy, not a pointer/reference) and is
+    // not an array (arrays of Copy elements own nothing in v1).
+    if (auto ct = std::dynamic_pointer_cast<CustomType>(type))
+    {
+        for (const auto &field : ct->getFields())
+        {
+            if (!field.type || !field.type->needsDrop()) continue;
+            if (field.type->getKind() == Type::Kind::Array) continue;
+            prefix.push_back(field.name);
+            collectDropSlots(field.type, prefix, out);
+            prefix.pop_back();
+        }
+    }
+
+    // Nothing to decompose into: the value is its own drop target (a String,
+    // an enum with tag-aware glue, or a struct whose fields are all Copy).
+    if (out.size() == before)
+        out.push_back(DropSlot{.path = prefix, .type = type});
+}
+
+void MIRBuilder::registerDropSlots(const MIRPlace &place)
+{
+    if (place.base != PlaceBase::Local || !place.projections.empty())
+        return;
+    if (!place.type || !place.type->needsDrop())
+        return;
+    if (dropSlots_.count(place.index))
+        return;
+
+    std::vector<DropSlot> slots;
+    std::vector<std::string> prefix;
+    collectDropSlots(place.type, prefix, slots);
+    dropSlots_[place.index] = slots;
+
+    // Create the ownership bits HERE, at the declaration, rather than lazily
+    // when the first conditional move is seen. A lazy flag would be born
+    // inside one branch edge and could then be read by a path that never
+    // passed a write to it (a sibling edge sealed by break/continue, whose
+    // drop runs at the enclosing scope end). Declaring the bit with its value
+    // and clearing it on the move keeps it defined on every path by
+    // construction.
+    for (const auto &slot : slots)
+    {
+        size_t flag = newLocal("_owns" + std::to_string(++tempCtr_),
+            context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL),
+            /*isMutable=*/true,
+            /*isTemp=*/true,
+            /*isArg=*/false);
+        dropFlags_[slotKey(place.index, slot.path)] = flag;
+
+        MIRConst bit;
+        bit.kind = MIRConst::Kind::Bool;
+        bit.value = true;
+        bit.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+        emitAssign(localPlace(flag), MIRRValueUse{.operand = std::move(bit)});
+    }
+}
+
+void MIRBuilder::writeSlotFlags(size_t local, const std::vector<std::string> &path, bool owned)
+{
+    auto it = dropSlots_.find(local);
+    if (it == dropSlots_.end())
+        return;
+
+    for (const auto &slot : it->second)
+    {
+        // A move/re-arm of `path` only touches the slots at or under it:
+        // moving `s.a` leaves the slot `s.b` alone.
+        if (path.size() > slot.path.size()) continue;
+        if (!std::equal(path.begin(), path.end(), slot.path.begin())) continue;
+
+        auto flagIt = dropFlags_.find(slotKey(local, slot.path));
+        if (flagIt == dropFlags_.end()) continue;
+
+        MIRConst bit;
+        bit.kind = MIRConst::Kind::Bool;
+        bit.value = owned;
+        bit.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+        emitAssign(localPlace(flagIt->second), MIRRValueUse{.operand = std::move(bit)});
+    }
+}
+
+bool MIRBuilder::slotMoved(
+    const std::unordered_set<size_t> &moved,
+    const std::unordered_map<size_t, std::vector<std::vector<std::string>>> &partial,
+    size_t local,
+    const std::vector<std::string> &path)
+{
+    if (moved.count(local))
+        return true;
+
+    auto it = partial.find(local);
+    if (it == partial.end())
+        return false;
+
+    for (const auto &movedPath : it->second)
+    {
+        if (movedPath.size() > path.size())
+            continue; // moved INside this slot -- the slot still owns the rest
+        if (std::equal(movedPath.begin(), movedPath.end(), path.begin()))
+            return true;
+    }
+    return false;
+}
+
+void MIRBuilder::emitDropDynamic(const MIRPlace &place)
+{
+    auto it = dropSlots_.find(place.index);
+    if (it == dropSlots_.end())
+        return;
+
+    const auto &dynamic = dynamicSlots_[place.index];
+
+    for (const auto &slot : it->second)
+    {
+        MIRPlace leaf = place;
+        for (const auto &field : slot.path)
+            leaf.projections.push_back(Projection{ProjectionKind::Field, field, 0});
+        leaf.type = slot.type;
+
+        std::string key = slotKey(place.index, slot.path);
+        auto flagIt = dropFlags_.find(key);
+
+        // A branch can only be appended to a block that is still open. When
+        // one is not (a diverging call above sealed it with MIRTermDiverge)
+        // the drops are unreachable and emit() discards the statement.
+        if (dynamic.count(key) && flagIt != dropFlags_.end()
+            && std::holds_alternative<MIRTermUnreachable>(currentBlock().terminator))
+        {
+            BasicBlockId ownedBB = newBlock("drop_owned");
+            BasicBlockId doneBB = newBlock("drop_done");
+            sealBlock(curBB_,
+                MIRTermBranch{
+                    .cond = MIROperand(MIRCopy{localPlace(flagIt->second)}),
+                    .thenBlock = ownedBB,
+                    .elseBlock = doneBB,
+                });
+            switchTo(ownedBB);
+            emit(MIRStmtDrop{.place = leaf});
+            sealBlock(curBB_, MIRTermGoto{.target = doneBB});
+            switchTo(doneBB);
+        }
+        else if (!slotMoved(movedLocals_, partiallyMovedFields_, place.index, slot.path))
+        {
+            emit(MIRStmtDrop{.place = leaf});
+        }
+    }
+
+    // The drop consumed whatever the local still owned, so the bits are the
+    // truth from here on: a second drop site reached on the same path (the
+    // block-end sweep after an explicit `x;`) releases nothing. The old
+    // lowering got this from movedLocals_, which cannot be path-sensitive.
+    writeSlotFlags(place.index, {}, false);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers: operand helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 MIROperand MIRBuilder::placeToOperand(MIRPlace place)
 {
-    if (isCopyType(place.type))
+    // Copy types (primitives, raw pointers, shared references) transfer by
+    // value. A POINTER-LIKE type is not a Move source even when it is not
+    // Copy: `&mut T` is non-Copy (duplicating it would break exclusivity),
+    // but an operand of it owns nothing to transfer, and the common case is
+    // an IMPLICIT REBORROW — `s.push_str(&mut x)` passes a temporary borrow
+    // of `x`, so recording `x` as moved would be a lie (the borrow checker
+    // has already accepted the later uses of `x`). Only aggregates own a
+    // value that a move has to hand over.
+    if (isCopyType(place.type) || (place.type && place.type->isPointerLike()))
         return MIRCopy{.place = std::move(place)};
 
     // A non-Copy local read as an operand is a *move* — the source no longer
@@ -323,6 +558,8 @@ MIROperand MIRBuilder::placeToOperand(MIRPlace place)
             // stale partial-move record so a later re-assign can't re-decompose.
             movedLocals_.insert(place.index);
             partiallyMovedFields_.erase(place.index);
+            // Every slot's run-time bit drops with it.
+            writeSlotFlags(place.index, {}, false);
         }
         else
         {
@@ -349,11 +586,15 @@ MIROperand MIRBuilder::placeToOperand(MIRPlace place)
                 std::vector<std::string> path;
                 for (const auto &proj : place.projections)
                     path.push_back(proj.field);
+                // Clear the bits of the slots that just left (a slot is dead
+                // when it, or an ancestor of it, was moved out).
+                writeSlotFlags(place.index, path, false);
                 partiallyMovedFields_[place.index].push_back(std::move(path));
             }
             else
             {
                 movedLocals_.insert(place.index);
+                writeSlotFlags(place.index, {}, false);
             }
         }
     }
@@ -532,6 +773,11 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     partiallyMovedFields_.clear();
     ownedLocalsStack_.clear();
     loopTargets_.clear();
+    // Drop flags are per-function too: local indices restart, so a slot of
+    // fn A must never be matched against a flag of the same index in fn B.
+    dropSlots_.clear();
+    dropFlags_.clear();
+    dynamicSlots_.clear();
 
     // ── local[0]: return slot ────────────────────────────────────────────────
     newLocal("_0", fn->returnType, /*isMut=*/true, /*isTemp=*/true);
@@ -569,6 +815,16 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
     // ── entry basic block ────────────────────────────────────────────────────
     BasicBlockId entry = newBlock("entry");
     switchTo(entry);
+
+    // Drop flags for the by-value owned parameters. Deferred until here
+    // because registering a place EMITS its 'owns its value' initialisation,
+    // and there was no block to emit into before the entry block existed.
+    // A parameter is movable like any other local:
+    //     fn take(s: String) -> i32 { if c { let b = s; } ret 0; }
+    // moves `s` on one edge only, and the drop at function exit must test
+    // the same runtime bit.
+    for (const auto &place : ownedLocalsStack_.back())
+        registerDropSlots(place);
 
     // ── lower body ───────────────────────────────────────────────────────────
     buildBlock(fn->body.get());
@@ -746,8 +1002,13 @@ void MIRBuilder::buildVarDecl(HIRVarDecl *decl)
 
     // Non-Copy locals declared in this block are owned by this scope and get
     // dropped when the block ends.
+    // Registering the place also creates its drop flags, initialised to
+    // 'owns its value' (see registerDropSlots).
     if (!ownedLocalsStack_.empty() && decl->type && decl->type->needsDrop())
+    {
         ownedLocalsStack_.back().push_back(localPlace(idx));
+        registerDropSlots(localPlace(idx));
+    }
 
     if (decl->init.has_value())
     {
@@ -775,8 +1036,15 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
     // re-inits of a let) must not drop the local that is being (re)initialized.
     // emitDrop respects the partial-move decomposition, so `x = x.field` drops
     // only the other fields.
+    // The test is only 'does this place hold a value that needs a drop' —
+    // emitDrop() decides whether THIS path still owns one: statically from the
+    // moved-set for a local whose ownership is path-independent, and through
+    // the run-time drop flags for a local that was moved on only some paths.
+    // (The old `&& !movedLocals_.count(...)` skipped the drop of a
+    // conditionally-moved local, whose old value IS still owned on the paths
+    // that did not move it — overwriting it there would leak it.)
     if (lhs.base == PlaceBase::Local && lhs.projections.empty()
-        && lhs.type && lhs.type->needsDrop() && !movedLocals_.count(lhs.index))
+        && lhs.type && lhs.type->needsDrop())
         emitDrop(localPlace(lhs.index));
 
     // emitAssign re-arms ownership on a whole-root-local write.
@@ -837,9 +1105,13 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
     bool elseFell = fellThrough();
     OwnershipState elseSt{movedLocals_, partiallyMovedFields_};
 
-    // 7. Path-specific drops: an outer local owned on THIS edge but dead on the
-    //    sibling edge (moved there) must be dropped here before the join, or it
-    //    leaks on this path. Then seal each real edge with a Goto to the join.
+    // 7. Record the conditional moves, then seal each real edge with a Goto to
+    //    the join. An outer local owned on THIS edge but dead on the sibling
+    //    was moved on only some paths: its drop is NOT emitted here (that
+    //    would release the value while the rest of its scope can still reach
+    //    it — a use-after-free for every untracked alias, and a destructor
+    //    running at the wrong point), it is emitted at the scope end under
+    //    the slot's run-time ownership bit. See the drop-flag section above.
     //
     //    Seal the branch's END block (thenEnd/elseEnd), never its entry block.
     //    The pre-fix code sealed thenId/elseId: for a branch with nested control
@@ -851,7 +1123,7 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
     if (thenFell)
     {
         switchTo(thenEnd);
-        emitPathDrops(thenSt, elseSt);
+        markConditionalMoves(thenSt, elseSt);
         sealBlock(curBB_, MIRTermGoto{.target = joinId});
     }
     else if (std::holds_alternative<MIRTermUnreachable>(body_->blocks[thenEnd].terminator))
@@ -860,7 +1132,7 @@ void MIRBuilder::buildIf(HIRIf *ifStmt)
     if (elseFell)
     {
         switchTo(elseEnd);
-        emitPathDrops(elseSt, thenSt);
+        markConditionalMoves(elseSt, thenSt);
         sealBlock(curBB_, MIRTermGoto{.target = joinId});
     }
     else if (std::holds_alternative<MIRTermUnreachable>(body_->blocks[elseEnd].terminator))
@@ -1028,6 +1300,10 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
             emit(MIRStmtDrop{.place = mval});
             movedLocals_.insert(mval.index);
             partiallyMovedFields_.erase(mval.index);
+            // This raw drop bypasses emitDrop(), so clear the scrutinee's
+            // drop flags by hand: a later scope-end drop (emitDropDynamic)
+            // must not release the same payload a second time.
+            writeSlotFlags(mval.index, {}, false);
         }
 
         if (arm.body)
@@ -1076,36 +1352,50 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// emitPathDrops — drop outer locals owned on this path but dead on the sibling
+// markConditionalMoves — record per-slot ownership that differs across the
+// two edges of a branch
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// This is the whole replacement for the old emitPathDrops(), which dropped a
+// local on the edge where it was still owned. That drop was placed before the
+// join and therefore ran while the value's scope was still open:
+//
+//     let a = String::from_lit("hello");
+//     let p = a.to_cstr();                 // an alias the borrow checker does
+//     if c == 1 { let b = a; }             //   not track (a raw pointer)
+//     print_str(p);                        // <- read AFTER the early drop
+//
+// printed freed memory, and with a Drop counter the destructor was observable
+// before the statements that follow the if. For a PARTIAL move it was worse:
+// the early per-field drop and the scope-end decomposition both ran, which is
+// a double free.
+//
+// Nothing is dropped here any more. A slot that the two edges disagree about
+// is marked DYNAMIC, and emitDropDynamic() emits its drop at the scope end
+// under the slot's run-time ownership bit — which each edge has already set
+// correctly, because the bit is written where the slot becomes live and where
+// it is moved out.
 
-void MIRBuilder::emitPathDrops(const OwnershipState &self, const OwnershipState &sibling)
+void MIRBuilder::markConditionalMoves(const OwnershipState &self, const OwnershipState &sibling)
 {
-    // Make the global state reflect THIS path so emitDrop's movedLocals_ check
-    // matches ownership on this edge.
-    movedLocals_ = self.moved;
-    partiallyMovedFields_ = self.partial;
-
     // The branch's own frame was already popped by buildBlock; these are the
     // enclosing scopes' locals — the ones that outlive the if.
     for (const auto &frame : ownedLocalsStack_)
     {
         for (const auto &place : frame)
         {
-            size_t i = place.index;
-            if (self.moved.count(i)) continue; // not owned on this path
-
-            if (sibling.moved.count(i))
-            {
-                // Fully moved on the sibling path → drop the whole value here.
-                emitDrop(place);
+            auto slotIt = dropSlots_.find(place.index);
+            if (slotIt == dropSlots_.end())
                 continue;
-            }
-            auto sit = sibling.partial.find(i);
-            if (sit != sibling.partial.end() && !sit->second.empty())
+
+            for (const auto &slot : slotIt->second)
             {
-                // Fields moved on the sibling path → drop those fields here.
-                emitDropPartial(place, sit->second);
+                bool ownedHere = !slotMoved(self.moved, self.partial, place.index, slot.path);
+                bool ownedThere = !slotMoved(sibling.moved, sibling.partial, place.index, slot.path);
+                if (ownedHere == ownedThere)
+                    continue; // both edges agree — the static drop is exact
+
+                dynamicSlots_[place.index].insert(slotKey(place.index, slot.path));
             }
         }
     }
@@ -1134,10 +1424,11 @@ void MIRBuilder::buildLoop(HIRLoop *loop)
     sealBlock(curBB_, MIRTermGoto{.target = headerId});
     switchTo(headerId);
 
-    if (loop->kind == HIRLoop::Kind::While)
+    // There is no `for` kind here: HIRBuilder desugars `for x in it` into
+    // `while true { let __opt = __it.next(); match __opt { ... } }`, so the
+    // header branch is always driven by loop->cond.
+    if (loop->cond.has_value())
     {
-        assert(loop->cond.has_value() && "while loop must have a condition");
-
         MIROperand cond = exprToOperand(loop->cond->get());
         sealBlock(curBB_, MIRTermBranch{
                               .cond = std::move(cond),
@@ -1145,24 +1436,11 @@ void MIRBuilder::buildLoop(HIRLoop *loop)
                               .elseBlock = exitId,
                           });
     }
-    else // For – iterator-based; lowered similarly for now.
+    else
     {
-        // TODO: proper iterator protocol (next() call + option check).
-        // For now we treat the cond expression as a boolean hasNext().
-        if (loop->cond.has_value())
-        {
-            MIROperand cond = exprToOperand(loop->cond->get());
-            sealBlock(curBB_, MIRTermBranch{
-                                  .cond = std::move(cond),
-                                  .thenBlock = bodyId,
-                                  .elseBlock = exitId,
-                              });
-        }
-        else
-        {
-            // Infinite for-loop (no condition): unconditional entry into body.
-            sealBlock(curBB_, MIRTermGoto{.target = bodyId});
-        }
+        // No condition (defensive: the desugared form always has one):
+        // unconditional entry into the body.
+        sealBlock(curBB_, MIRTermGoto{.target = bodyId});
     }
 
     // Make break/continue inside this loop resolve to its exit/header.

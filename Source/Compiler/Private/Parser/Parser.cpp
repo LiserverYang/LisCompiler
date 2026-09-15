@@ -758,7 +758,21 @@ std::unique_ptr<TypeNode> Parser::parseType()
     logError(currentToken(), "expected type", E_ExpectType);
     advance(); // consume the bad token — generic-arg loops (Foo<,,,>) need progress
 
-    return nullptr;
+    // Return the (nameless) node instead of nullptr. Two reasons, both real
+    // crashes before this fix:
+    //  1. Locals destruct in reverse construction order, so on an early return
+    //     the local `type` was freed BEFORE `recorder` ran its destructor —
+    //     which then wrote position/length into freed heap memory (0xC0000374
+    //     heap corruption for any malformed type: `let x: ;`, `struct S { v: }`,
+    //     `fn f() -> {}`).
+    //  2. Every caller stores the result unscreened (`var->type = parseType()`,
+    //     `member->type = parseType()`, a return type, a generic argument), so a
+    //     nullptr travelled into later passes and was dereferenced there
+    //     (0xC0000005 access violation).
+    // Moving the node out on every path keeps the recorder pointing at a live
+    // object; the empty type name is then reported cleanly by the semantic
+    // analyzer ("the type '' cannot be found") on top of the error above.
+    return type;
 }
 
 std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
@@ -848,6 +862,9 @@ std::vector<std::unique_ptr<Param>> Parser::parseParameterList()
     {
         do
         {
+            if (finished())
+                break; // the end of the stream is not a parameter (and the
+                       // cursor is clamped there, so looping would never end)
             params.push_back(parseParameter());
         } while (match(TokenCode::COMMA));
     }

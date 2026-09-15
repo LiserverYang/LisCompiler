@@ -690,7 +690,6 @@ void HIRBuilder::visit(ForStmt *node)
     auto loop = std::make_unique<HIRLoop>();
     loop->position = position;
     loop->length = length;
-    loop->kind = HIRLoop::Kind::While;
 
     auto trueLit = std::make_unique<HIRLiteral>();
     trueLit->position = position;
@@ -766,7 +765,6 @@ void HIRBuilder::visit(WhileStmt *node)
     auto result = std::make_unique<HIRLoop>();
     result->position = node->position;
     result->length = node->length;
-    result->kind = HIRLoop::Kind::While;
 
     node->condition->accept(this);
     result->cond = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());

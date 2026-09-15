@@ -277,6 +277,25 @@ private:
      *  apply. */
     bool tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Type> &paramTy, HIRNode &errNode);
 
+    /** Type-check a call's arguments against its parameter types — the one
+     *  place every call form shares, so the rules cannot drift between a free
+     *  function, an instance method, a static method and a trait method:
+     *    - analyse the argument (its type is what the check needs),
+     *    - typesCompatible() rather than equals(), so a `&mut T` argument
+     *      satisfies a `&T` parameter,
+     *    - a REFERENCE argument to a REFERENCE parameter is reborrowed and the
+     *      caller keeps it; anything else follows the by-value copy/move rules
+     *      and the source is consumed (handleMoveSource).
+     *  `paramOffset` is 1 for a method call (params[0] is the receiver, which
+     *  is not an argument) and 0 for a free function or static method. When
+     *  `explainUninferredGeneric` is set, a context-free generic value
+     *  (`f(Option::None)` with an `Option<i32>` parameter) is explained as an
+     *  inference failure instead of a bare mismatch. */
+    void checkCallArgs(const std::vector<std::unique_ptr<HIRExpr>> &args,
+        const std::vector<std::shared_ptr<Type>> &params,
+        size_t paramOffset,
+        HIRCall &call,
+        bool explainUninferredGeneric);
     /** Recognize a builtin print call (`print_str/int/float/bool/char`, `println`)
      *  by callee name, validate its args, set the call's type to VOID, and return
      *  true if `node` is such a builtin call (skipping normal call resolution).

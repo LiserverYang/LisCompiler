@@ -80,16 +80,6 @@ std::string literalKindToString(HIRLiteral::Kind kind)
     }
 }
 
-// 将循环类型枚举转换为可读字符串
-std::string loopKindToString(HIRLoop::Kind kind)
-{
-    switch (kind)
-    {
-    case HIRLoop::Kind::While: return "while";
-    case HIRLoop::Kind::For: return "for";
-    default: return "unknown";
-    }
-}
 
 std::string typeToString(const std::shared_ptr<Type> &type)
 {
@@ -287,7 +277,8 @@ public:
     void visit(HIRLoop *node)
     {
         printCommon(node);
-        os << " [LoopStmt] kind: " << detail::loopKindToString(node->kind);
+        // Every HIRLoop is a while: `for` is desugared in HIRBuilder.
+        os << " [LoopStmt]";
     }
 
     void visit(HIRReturn *node)

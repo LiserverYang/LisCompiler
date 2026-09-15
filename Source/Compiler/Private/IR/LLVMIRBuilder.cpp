@@ -623,19 +623,12 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
                 if (isFP)
                     return builder_->CreateFAdd(lhs, rhs);
 
-                llvm::Type* lhsTy = lhs->getType();
-                llvm::Type* rhsTy = rhs->getType();
-                llvm::Type* i8    = llvm::Type::getInt8Ty(builder_->getContext());
-
-                if (lhsTy->isPointerTy() && rhsTy->isIntegerTy())
-                    return builder_->CreateGEP(i8, lhs, rhs);           // ptr + int
-                if (rhsTy->isPointerTy() && lhsTy->isIntegerTy())
-                    return builder_->CreateGEP(i8, rhs, lhs);           // int + ptr
-
-                // ptr + ptr is semantically invalid — surface it loudly rather than
-                // silently emitting broken IR.
-                assert(!lhsTy->isPointerTy() && !rhsTy->isPointerTy() &&
-                    "BUG: pointer + pointer reached binary Add lowering");
+                // No pointer arithmetic here: sema's operand rule rejects every
+                // reference/raw-pointer operand of `+` (only ints, floats and
+                // operator-trait structs qualify), so a pointer reaching this
+                // point is a compiler bug and must be loud.
+                assert(!lhs->getType()->isPointerTy() && !rhs->getType()->isPointerTy()
+                    && "BUG: pointer operand reached binary Add lowering");
 
                 return builder_->CreateAdd(lhs, rhs);
             }
@@ -645,22 +638,10 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
                 if (isFP)
                     return builder_->CreateFSub(lhs, rhs);
 
-                llvm::Type* lhsTy = lhs->getType();
-                llvm::Type* rhsTy = rhs->getType();
-                llvm::Type* i8    = llvm::Type::getInt8Ty(builder_->getContext());
-
-                if (lhsTy->isPointerTy() && rhsTy->isIntegerTy()) {
-                    // ptr - int  →  GEP with negated offset
-                    llvm::Value* neg = builder_->CreateNeg(rhs);
-                    return builder_->CreateGEP(i8, lhs, neg);
-                }
-                if (lhsTy->isPointerTy() && rhsTy->isPointerTy()) {
-                    // ptr - ptr  →  byte difference as i64
-                    llvm::Type* i64 = llvm::Type::getInt64Ty(builder_->getContext());
-                    llvm::Value* lhsInt = builder_->CreatePtrToInt(lhs, i64);
-                    llvm::Value* rhsInt = builder_->CreatePtrToInt(rhs, i64);
-                    return builder_->CreateSub(lhsInt, rhsInt);
-                }
+                // Pointer arithmetic is rejected by sema (see the Add case), and
+                // the stdlib works with explicit casts instead.
+                assert(!lhs->getType()->isPointerTy() && !rhs->getType()->isPointerTy()
+                    && "BUG: pointer operand reached binary Sub lowering");
 
                 return builder_->CreateSub(lhs, rhs);
             }

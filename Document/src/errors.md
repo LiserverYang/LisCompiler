@@ -35,7 +35,6 @@
 | 2007 | Expected `(` |
 | 2008 | Expected `)` |
 | 2009 | Expected `:` |
-| 2010 | Undefined type |
 | 2011 | Expected keyword |
 | 2012 | Expected `;` |
 | 2013 | Expected `=` |
@@ -43,6 +42,8 @@
 | 2015 | Expected expression |
 | 2016 | Invalid literal type（也用于数字字面量溢出） |
 | 2017 | Multiple-defined trait |
+
+> 2010 已废弃：原为「Undefined type」预留，解析器从未发出过（未知类型名不是语法错误）。
 
 解析器有错误恢复：一次编译报告多个语法错误（`synchronize()` 跳到安全重启点），
 最终以非零退出码结束。
@@ -54,7 +55,7 @@
 | 3001 | Semantic error（通用） |
 | 3002 | Type mismatch |
 | 3003 | Undefined identifier（模块错误也归此码：cannot find module 'x' / circular import: module 'x' / module 'x' has no member 'y' / selective import of 'y' conflicts with an existing name） |
-| 3004 | cannot assign to immutable variable 'x'（及字段/元素/共享引用变体） |
+| 3004 | cannot assign to immutable variable 'x'（及字段/元素变体）；对共享裸指针 `*T` 的写入是 cannot assign through a shared raw pointer. |
 | 3005 | use of moved value: 'x'（含 partially moved / moved inside loop 变体） |
 | 3011 | use of uninitialized value: 'x'（读取/借用/移动未定值的 `let x;` 绑定） |
 | 3012 | cannot declare 'x' without an initializer: 'T' is not a Copy type, so the binding could be released while uninitialized |
@@ -62,9 +63,9 @@
 | 3014 | indexing the raw pointer '*mut int8' is only allowed inside the standard library: it is unchecked C pointer arithmetic（`__deref`/`__deref_mut` 同码） |
 | 3015 | field 'v' of 'S' is private; add 'pub', or access it inside a method of that type |
 
-> 3006–3010（Arg mismatch / Generic / Trait / Return type / Cast）在 ErrorID.hpp 中定义，
-> 但语义分析器实际未使用 —— 实参/泛型/trait/返回/cast 类错误均落到 3001/3002 或带消息
-> 的 3001。E2016 用于字面量溢出（语义层）。
+> 3006–3010 已废弃（Arg mismatch / Generic / Trait / Return type / Cast 各自预留过一号，
+> 但从未发出过）：实参/泛型/trait/返回/cast 类错误一律用 3001/3002 加具体消息，
+> 这是分析器唯一的约定。E2016 用于字面量溢出（语义层）。
 
 ## E4xxx 借用检查
 

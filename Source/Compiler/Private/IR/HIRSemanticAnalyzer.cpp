@@ -2365,8 +2365,58 @@ bool HIRSemanticAnalyzer::tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Typ
     return true;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// checkCallArgs — the shared argument type-check for every call form
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The four call paths (free function, instance method, static method, trait
+// method) each used to carry their own copy of this loop, and the copies had
+// drifted apart: one guarded the argument type before comparing, one skipped
+// the reborrow for non-place arguments, one indexed parameters with a +1
+// offset without saying so. One helper, one rule set.
+
+void HIRSemanticAnalyzer::checkCallArgs(
+    const std::vector<std::unique_ptr<HIRExpr>> &args,
+    const std::vector<std::shared_ptr<Type>> &params,
+    size_t paramOffset,
+    HIRCall &call,
+    bool explainUninferredGeneric)
+{
+    for (size_t i = 0; i < args.size() && i + paramOffset < params.size(); ++i)
+    {
+        analyzeExpr(args[i].get());
+        const std::shared_ptr<Type> &paramTy = params[i + paramOffset];
+
+        // A context-free generic value (`get(Option::None)` where the parameter
+        // is Option<i32>) keeps the type DEFINITION; explain the real problem
+        // instead of a bare mismatch (and instead of letting a generic-param
+        // field reach codegen). Only where monomorphization will NOT repair it:
+        // a monomorphized call carries typedGenericParams, and
+        // MIRMonomorphization rewrites both the argument operand AND its carrier
+        // local from the definition to the instantiation (that is why
+        // `unwrap_or(Option::None, 0)` works).
+        if (explainUninferredGeneric && call.typedGenericParams.empty() && paramTy
+            && args[i]->type && isUninferredGenericDefinition(paramTy, args[i]->type))
+            log(*args[i], "cannot infer the generic argument(s) of '" + displayName(std::static_pointer_cast<CustomType>(args[i]->type)->getOriginName()) + "'; write them explicitly (e.g. 'Option<i32>::None').");
+        else if (!typesCompatible(paramTy, args[i]->type))
+            log(*args[i], "argument type mismatch.");
+
+        // A by-value non-Copy argument consumes its source (`foo(p)` moves p); a
+        // reference argument to a reference parameter is reborrowed instead.
+        if (!tryReborrowArg(args[i].get(), paramTy, call))
+            handleMoveSource(args[i].get(), call);
+    }
+}
 void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
 {
+    // A source whose analysis FAILED has no type, so it is not a move of
+    // anything: the real error was already reported, and the bookkeeping below
+    // would only manufacture follow-on diagnostics. `let x = s.nope;` used to
+    // mark the path `s.nope` as moved, so the next `s.nope` reported "use of
+    // moved value" on top of "struct 'S' has no field 'nope'".
+    if (!source || !source->type)
+        return;
+
     // Borrow-check: moving a place that is currently borrowed would leave the
     // borrow dangling — reject it. Only genuinely non-Copy sources are moved;
     // a Copy source is a read (handled by the NameRef/MemberAccess read check
@@ -2441,10 +2491,19 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
 
     std::shared_ptr<Type> initType;
 
+    // True when the initializer's OWN analysis failed (its type is null —
+    // the file's error convention, see visit(HIRMemberAccess)). The
+    // diagnostics below are then restatements of that one real error, so
+    // they are suppressed: `let x = s.nope;` used to add "cannot infer type
+    // for 'x'" and then a bogus "cannot have type 'void'" on top of the
+    // actual "struct 'S' has no field 'nope'".
+    bool initFailed = false;
+
     if (node->init.has_value())
     {
         analyzeExpr(node->init.value().get());
         initType = node->init.value()->type;
+        initFailed = !initType;
 
         // Globals live in static storage: only a literal initializer can be
         // embedded in the object file. Anything else (a call, an array built at
@@ -2488,7 +2547,10 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
     {
         if (!initType)
         {
-            log(*node, "cannot infer type for '" + node->name + "'.");
+            // Only a declaration with no initializer at all is a genuine
+            // cannot-infer; a failed initializer was already reported.
+            if (!initFailed)
+                log(*node, "cannot infer type for '" + node->name + "'.");
             node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         }
         else
@@ -2511,7 +2573,8 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
     // Report it as the semantic error it is. (`never` is deliberately NOT
     // rejected here — the uninhabited type is allowed on a binding; reading it
     // is what visit(HIRNameRef) rejects.)
-    if (node->type && node->type->equals(context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID)))
+    if (!initFailed && node->type
+        && node->type->equals(context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID)))
     {
         log(*node, "variable '" + node->name + "' cannot have type 'void': void has no value.", E_TypeMismatch);
     }
@@ -3010,7 +3073,7 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
     // statements after it are unreachable (which also suppresses their
     // definite-assignment diagnostics).
     bool neverFallsThrough = false;
-    if (node->kind == HIRLoop::Kind::While && node->cond.has_value())
+    if (node->cond.has_value())
     {
         if (auto *lit = dynamic_cast<HIRLiteral *>(node->cond.value().get());
             lit && lit->kind == HIRLiteral::Kind::Bool)
@@ -3891,17 +3954,9 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
             }
         }
 
-        // Type-check args against params[1..].
-        for (size_t i = 0; i < node->args.size() && i + 1 < paramTypes.size(); ++i)
-        {
-            analyzeExpr(node->args[i].get());
-            if (node->args[i]->type && !typesCompatible(paramTypes[i + 1], node->args[i]->type))
-                log(*node->args[i], "argument type mismatch.");
-            // A reference argument to a reference parameter is REBORROWED (no
-            // move); anything else follows the by-value copy/move rules.
-            if (!tryReborrowArg(node->args[i].get(), paramTypes[i + 1], *node))
-                handleMoveSource(node->args[i].get(), *node);
-        }
+        // Type-check args against params[1..] (params[0] is the receiver).
+        checkCallArgs(node->args, paramTypes,
+            /*paramOffset=*/1, *node, /*explainUninferredGeneric=*/false);
 
         // Insert self as arg[0] (a &mut/& reference to the receiver).
         if (paramTypes.empty() || !std::dynamic_pointer_cast<ReferenceType>(paramTypes[0]))
@@ -4391,31 +4446,10 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         if (node->args.size() != instantiatedFuncType->getParams().size())
             log(*node, "argument count mismatch.");
 
-        // 参数类型检查（使用实例化后的具体类型）
-        for (size_t i = 0; i < node->args.size() && i < instantiatedFuncType->getParams().size(); ++i)
-        {
-            analyzeExpr(node->args[i].get());
-            // A context-free generic value (`get(Option::None)` where the
-            // parameter is Option<i32>) keeps the type DEFINITION; explain the
-            // real problem instead of a bare mismatch (and instead of letting a
-            // generic-param field reach codegen).
-            // Only where monomorphization will NOT repair it: a monomorphized
-            // call carries typedGenericParams, and MIRMonomorphization rewrites
-            // both the argument operand AND its carrier local from the definition
-            // to the instantiation (that is why `unwrap_or(Option::None, 0)`
-            // works). With no mono step, the definition reaches codegen and
-            // crashes on its generic-param field.
-            if (node->typedGenericParams.empty() && instantiatedFuncType->getParams()[i] && node->args[i]->type
-                && isUninferredGenericDefinition(instantiatedFuncType->getParams()[i], node->args[i]->type))
-                log(*node->args[i], "cannot infer the generic argument(s) of '" + displayName(std::static_pointer_cast<CustomType>(node->args[i]->type)->getOriginName()) + "'; write them explicitly (e.g. 'Option<i32>::None').");
-            else if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
-                log(*node->args[i], "argument type mismatch.");
-            // A by-value non-Copy arg consumes the source (`foo(p)` moves p); a
-            // reference argument to a reference parameter is reborrowed instead.
-            if (!tryReborrowArg(node->args[i].get(), instantiatedFuncType->getParams()[i], *node))
-                handleMoveSource(node->args[i].get(), *node);
-        }
-
+        // 参数类型检查（使用实例化后的具体类型）。Free functions get the
+        // context-free-generic explanation (see checkCallArgs).
+        checkCallArgs(node->args, instantiatedFuncType->getParams(),
+            /*paramOffset=*/0, *node, /*explainUninferredGeneric=*/true);
         // 设置返回值类型为实例化后的类型
         node->type = instantiatedFuncType->getReturnType();
         break;
@@ -4593,17 +4627,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             }
         }
 
-        for (size_t i = 0; i < node->args.size() && i + 1 < instantiatedFuncType->getParams().size(); ++i)
-        {
-            analyzeExpr(node->args[i].get());
-            // typesCompatible (not equals): a `&mut T` argument satisfies a
-            // `&T` param (`s.push_str(&mut x)`), matching the builtin /
-            // dispatch / regular call paths.
-            if (!typesCompatible(instantiatedFuncType->getParams()[i + 1], node->args[i]->type))
-                log(*node->args[i], "argument type mismatch.");
-            if (!tryReborrowArg(node->args[i].get(), instantiatedFuncType->getParams()[i + 1], *node))
-                handleMoveSource(node->args[i].get(), *node);
-        }
+        // params[0] is the receiver, which is not an argument.
+        checkCallArgs(node->args, instantiatedFuncType->getParams(),
+            /*paramOffset=*/1, *node, /*explainUninferredGeneric=*/false);
 
         // Insert the receiver as arg[0]. A `&self` / `&mut self` method borrows
         // the receiver (HIRRef); a BY-VALUE `self` method (`fn drop(self)`)
@@ -4763,14 +4789,8 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         if (node->args.size() != it->params.size())
             log(*node, "static method '" + node->methodName + "' expects " + std::to_string(it->params.size()) + " arguments, got " + std::to_string(node->args.size()) + ".");
 
-        for (size_t i = 0; i < node->args.size() && i < it->params.size(); ++i)
-        {
-            analyzeExpr(node->args[i].get());
-            if (!typesCompatible(instantiatedFuncType->getParams()[i], node->args[i]->type))
-                log(*node->args[i], "argument type mismatch.");
-            if (!tryReborrowArg(node->args[i].get(), instantiatedFuncType->getParams()[i], *node))
-                handleMoveSource(node->args[i].get(), *node);
-        }
+        checkCallArgs(node->args, instantiatedFuncType->getParams(),
+            /*paramOffset=*/0, *node, /*explainUninferredGeneric=*/false);
 
         node->type = instantiatedFuncType->getReturnType();
 
@@ -4794,8 +4814,14 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
     if (auto ref = std::dynamic_pointer_cast<ReferenceType>(objTy))
         objTy = ref->getBaseType();
 
-    node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32); // fallback
-
+    // No invented type on the failure paths below. An expression whose
+    // analysis failed has NO type: null is this file's established 'analysis
+    // failed' state (see the `if (!objTy) return;` above), and
+    // typesCompatible() treats a null operand as compatible — so one real
+    // error does not cascade into a second, misleading one at every
+    // enclosing use (`ret g(s.nope)` used to add a bogus "argument type
+    // mismatch" because the fallback was a hard-coded i32), and the LSP has
+    // nothing wrong to show on hover.
     auto ct = std::dynamic_pointer_cast<CustomType>(objTy);
     if (!ct)
     {
@@ -4836,7 +4862,9 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
     auto objTy = node->object->type;
     if (!objTy) return;
 
-    node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+    // Same convention as visit(HIRMemberAccess): no invented type, null it is.
+    // (The old `void` fallback produced a second, bogus diagnostic —
+    // `let y = x[0];` on an int reported 'variable y cannot have type void').
 
     // The element type comes from the place UNDER the references: an array
     // [T; N] yields T (bounds-checked), a RAW POINTER *T / *mut T yields T as

@@ -27,7 +27,8 @@ ERRORID E_ExpectARBRACE = 2006;
 ERRORID E_ExpectALPAREN = 2007;
 ERRORID E_ExpectARPAREN = 2008;
 ERRORID E_ExpectACOLON = 2009;
-ERRORID E_UndefinedType = 2010;
+// 2010 is retired: it was declared for "undefined type" but the parser has
+// never emitted it (an unknown type name is not a parse error).
 ERRORID E_ExpectedKeyword = 2011;
 ERRORID E_ExpectASEMI = 2012;
 ERRORID E_ExpectAnASSIGN = 2013;
@@ -43,11 +44,10 @@ ERRORID E_TypeMismatch = 3002;
 ERRORID E_UndefinedIdentifier = 3003;
 ERRORID E_AssignToImmutable = 3004;
 ERRORID E_UseOfMovedValue = 3005;
-ERRORID E_ArgMismatch = 3006;
-ERRORID E_GenericError = 3007;
-ERRORID E_TraitError = 3008;
-ERRORID E_ReturnTypeMismatch = 3009;
-ERRORID E_CastError = 3010;
+// 3006-3010 are retired (argument mismatch / generic / trait / return type /
+// cast): they were declared but never emitted. Every one of those failures is
+// reported as E3001 or E3002 with a specific message, which is the single
+// convention the analyzer follows.
 ERRORID E_UseOfUninitializedValue = 3011;   // read/borrow/move of a `let x;` binding
 ERRORID E_UninitializedNonCopyBinding = 3012; // `let x: <Move>;` without an initializer
 ERRORID E_UnsafeBuiltinOutsideStdlib = 3013;  // heap primitive called outside the stdlib

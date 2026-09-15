@@ -637,6 +637,38 @@ TEST_F(ParserTest, ValidArrayType)
 // A leading `*` in TYPE position is unambiguous (the language has no deref
 // operator in expressions), and no new reserved word is introduced for it.
 
+// ── P0 regression: a malformed TYPE is a diagnostic, never a crash ───────────
+// parseType()'s error path used to `return nullptr`, which (a) freed the node
+// while the position recorder was still bound to it — a write-after-free that
+// corrupted the heap (0xC0000374) — and (b) handed a nullptr to callers that
+// store it unscreened, dereferenced later (0xC0000005). Every case below used
+// to kill the compiler with no output at all; a crash fails these tests by
+// taking the whole test process down, which is exactly the guard we want.
+
+TEST_F(ParserTest, MalformedTypeInLetReportsError)
+{
+    parseSource("fn main() -> i32 { let x: ; ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MalformedTypeInStructFieldReportsError)
+{
+    parseSource("struct S { v: } fn main() -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MalformedReturnTypeReportsError)
+{
+    parseSource("fn f() -> { ret 0; } fn main() -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
+TEST_F(ParserTest, MutInParameterPositionReportsError)
+{
+    parseSource("fn f(mut x: i32) -> i32 { ret 0; } fn main() -> i32 { ret 0; }");
+    EXPECT_GT(Logger::GetErrorCount(), 0);
+}
+
 TEST_F(ParserTest, ValidPointerType)
 {
     parseSource("fn f(p: *mut i8) -> i32 { ret 0; } fn main() -> i32 { ret 0; }");

@@ -109,6 +109,50 @@ private:
     std::unordered_map<size_t, std::vector<std::vector<std::string>>> partiallyMovedFields_;
 
     /**
+     * --- Drop slots and drop flags (conditional drops) -------------------
+     *
+     * A DROP SLOT is one leaf of a local's drop decomposition: the place a
+     * single drop statement targets -- the local itself for a type with no
+     * droppable fields (String, an enum, ...), or a Field path inside it for
+     * a struct of droppable fields. collectDropSlots() walks exactly the
+     * recursion emitDropPartial() does, so one slot is precisely one drop
+     * statement the static decomposition would have emitted.
+     */
+    struct DropSlot
+    {
+        std::vector<std::string> path; // Field names from the root ('' = root)
+        std::shared_ptr<Type> type;    // type of the place at `path`
+    };
+
+    /** local index -> its drop slots, in drop order (filled on registration). */
+    std::unordered_map<size_t, std::vector<DropSlot>> dropSlots_;
+
+    /**
+     * Slot key (local + path, see slotKey) -> the i1 local holding that
+     * slot's RUNTIME ownership bit: true while the slot still owns a value
+     * that must be released, false once it was moved out (or dropped).
+     *
+     * Rust's Drop trait needs exactly this. Ownership is flow-sensitive: a
+     * value moved out on ONE path is still owned on the others, so the drop
+     * cannot be placed statically without either freeing it early or leaking
+     * it. Freeing early is the worse half -- it is observable (destructor
+     * order) and it is a use-after-free for every alias the borrow checker
+     * does not track (a raw pointer out of String::to_cstr(), say). Each slot
+     * therefore carries a bit: set when the slot becomes live, cleared by the
+     * move that ends its life, and tested by the drop.
+     */
+    std::unordered_map<std::string, size_t> dropFlags_;
+
+    /**
+     * Slots whose ownership DIFFERS between two control-flow paths (a
+     * conditional move). Their drop is emitted as `if (flag) drop(slot)` at
+     * the scope end instead of being decided statically.
+     */
+    std::unordered_map<size_t, std::unordered_set<std::string>> dynamicSlots_;
+
+    /**
+     * Enclosing loop targets, innermost last.
+    /**
      * Enclosing loop targets, innermost last. break lowers to
      * Goto{breakTarget} (the loop exit), continue to Goto{continueTarget}
      * (the loop header). ownedFrameBase is the index into ownedLocalsStack_
@@ -160,11 +204,47 @@ private:
         std::unordered_map<size_t, std::vector<std::vector<std::string>>> partial;
     };
 
-    /** On THIS branch's edge, drop outer-scope locals that are owned here but
-     *  dead on the SIBLING branch (moved out there) — otherwise they leak on
-     *  this path while the join suppresses the drop. Sets the global state to
-     *  `self` so emitDrop's movedLocals_ check reflects this path. */
-    void emitPathDrops(const OwnershipState &self, const OwnershipState &sibling);
+    /** On the edge of a two-way branch, record every owned local whose drop
+     *  slot is owned here but moved out on the SIBLING edge (or vice versa).
+     *  Such a slot is a CONDITIONAL move: its drop is emitted under its
+     *  runtime flag at the scope end. Nothing is dropped here — see
+     *  emitDropDynamic for why placing the drop on this edge is wrong. */
+    void markConditionalMoves(const OwnershipState &self, const OwnershipState &sibling);
+
+    // ── drop slots / drop flags ─────────────────────────────────
+    /** Stable key for a slot: the local index, then each Field name. */
+    static std::string slotKey(size_t local, const std::vector<std::string> &path);
+
+    /** Collect the drop slots of `type` under `prefix`, walking the SAME
+     *  recursion emitDropPartial() uses (a field is decomposed when it needs
+     *  a drop and is not an array). A type that decomposes into nothing is
+     *  its own slot, so a slot set is never empty. */
+    static void collectDropSlots(const std::shared_ptr<Type> &type,
+        std::vector<std::string> &prefix,
+        std::vector<DropSlot> &out);
+
+    /** Register `place` as an owned local/temp: remember its drop slots and
+     *  give each one a drop flag initialised to 'owns its value'. Called for
+     *  every place pushed onto ownedLocalsStack_. */
+    void registerDropSlots(const MIRPlace &place);
+
+    /** Set the drop flags of every slot at or under `path` (empty path = all
+     *  of them) to `owned`. No-op for a place that has no slots. */
+    void writeSlotFlags(size_t local, const std::vector<std::string> &path, bool owned);
+
+    /** Is slot `path` of `local` moved out in this ownership state? A slot is
+     *  dead when the root is moved, or when a recorded move path is a prefix
+     *  of it (moving `s.a` kills the slot `s.a.b` too). */
+    static bool slotMoved(const std::unordered_set<size_t> &moved,
+        const std::unordered_map<size_t, std::vector<std::vector<std::string>>> &partial,
+        size_t local,
+        const std::vector<std::string> &path);
+
+    /** Drop a local that has conditional-move slots: emit `if (flag) drop`
+     *  for each dynamic slot and the plain drop for the rest, then clear the
+     *  flags (a drop consumes whatever it released, so a second drop site on
+     *  the same path releases nothing). */
+    void emitDropDynamic(const MIRPlace &place);
 
     // ── expression builders ───────────────────────────────────────────────────
     // Every buildExpr* returns the MIRPlace that holds the result.
