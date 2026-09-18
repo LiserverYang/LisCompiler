@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -40,17 +41,27 @@ namespace
 // Save/restore C stdout so we can read the Logger's diagnostics.
 int g_savedStdout = -1;
 
-// P12: a fixed "bc_test_out.txt" in the CWD is a collision hazard: two test
-// binaries running from the same directory (or a leftover from a killed run)
-// silently overwrite each other. Key the temp file by process id so every
-// process gets its own path; the `_getpid`/`getpid` pair is already covered by
-// the platform <process.h>/<unistd.h> includes above.
+// Scratch file holding the captured diagnostics.
+//
+// Two properties matter. It is keyed by PROCESS ID, because two shard binaries
+// running at the same time (or a leftover from a killed run) would otherwise
+// silently overwrite each other's capture. And it lives in the TEMP directory,
+// never the working directory: it is removed by readCaptured(), but a test that
+// dies in between — or a shard killed mid-run — used to leave
+// `bc_test_out_<pid>.txt` behind in the CWD, which is the repository root when
+// the suite runs from there. A dozen builds of that left ~100 files in the tree.
 const char *captureFileName()
 {
 #ifdef _WIN32
-    static std::string name = "bc_test_out_" + std::to_string(_getpid()) + ".txt";
+    static const std::string name =
+        (std::filesystem::temp_directory_path()
+            / ("bc_test_out_" + std::to_string(_getpid()) + ".txt"))
+            .string();
 #else
-    static std::string name = "bc_test_out_" + std::to_string(getpid()) + ".txt";
+    static const std::string name =
+        (std::filesystem::temp_directory_path()
+            / ("bc_test_out_" + std::to_string(getpid()) + ".txt"))
+            .string();
 #endif
     return name.c_str();
 }

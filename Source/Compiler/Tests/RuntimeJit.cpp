@@ -25,6 +25,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <mutex>
 #include <string>
 
@@ -84,7 +85,12 @@ FILE *LisJitIobFunc(int Index)
 
 void CaptureStdout(int &Saved, std::string &Path)
 {
-    Path = "lis_jit_out_" + std::to_string(LIS_GETPID()) + ".txt";
+    // TEMP, not the CWD: the file is removed by RestoreStdout below, but a
+    // process that dies in between must not litter the directory the suite was
+    // started from (the repository root). Pid-keyed so shards cannot collide.
+    Path = (std::filesystem::temp_directory_path()
+               / ("lis_jit_out_" + std::to_string(LIS_GETPID()) + ".txt"))
+               .string();
     std::fflush(stdout);
     Saved = LIS_DUP(1);
     FILE *F = std::freopen(Path.c_str(), "w", stdout);
@@ -204,7 +210,9 @@ int RunModuleInJit(std::unique_ptr<llvm::Module> Mod,
     bool RedirectedIn = false;
     if (In)
     {
-        InPath = "lis_jit_in_" + std::to_string(LIS_GETPID()) + ".txt";
+        InPath = (std::filesystem::temp_directory_path()
+                 / ("lis_jit_in_" + std::to_string(LIS_GETPID()) + ".txt"))
+                 .string();
         FILE *Written = std::fopen(InPath.c_str(), "wb");
         if (Written)
         {
