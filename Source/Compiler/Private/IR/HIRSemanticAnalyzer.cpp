@@ -70,6 +70,27 @@ bool typesCompatible(const std::shared_ptr<Type> &expected, const std::shared_pt
     return expected->equals(actual);
 }
 
+/// True when a RAW field type mentions `name` BY VALUE — i.e. somewhere that is
+/// not behind a reference or a raw pointer (those hold an address, so they stop
+/// the expansion). `struct S<T> { pub v: S<S<T>> }` mentions S inside its own
+/// generic argument and therefore expands forever: resolving the field would
+/// instantiate S with S as its own argument, recursively, until the stack died
+/// (measured 0xC0000005 inside instantiateCustom <-> substitute). Checking the
+/// SOURCE spelling catches it before any instantiation happens; Rust rejects the
+/// same definition with E0391. Mutual cycles that need no generic argument
+/// (`struct A { pub b: B } struct B { pub a: A }`) are caught afterwards by
+/// checkForRecursiveTypes, which walks the resolved types.
+bool RawTypeMentionsSelf(const HIRRawType &type, const std::string &name)
+{
+    // A reference or a raw pointer holds an ADDRESS: the type stays finite even
+    // when it points at itself, so the walk stops there.
+    if (type.isRef || type.isPtr) return false;
+    if (!name.empty() && type.name == name) return true;
+    for (const auto &arg : type.genericArgs)
+        if (RawTypeMentionsSelf(arg, name)) return true;
+    if (type.element && RawTypeMentionsSelf(*type.element, name)) return true;
+    return false;
+}
 /// True if ty is the uninhabited (never) type.
 ///
 /// never is the language bottom type: an expression of it never produces a
@@ -858,6 +879,106 @@ void HIRSemanticAnalyzer::setModuleForItem(size_t index)
                            : std::string();
 }
 
+// ---------------------------------------------------------------------------
+// checkForRecursiveTypes — a type that contains itself by value is infinite
+// ---------------------------------------------------------------------------
+//
+// `struct A { pub a: A }` has no finite layout, so the LLVM lowering produces an
+// opaque `%A` and `__drop_A` GEPs into it; the module verifier then rejects the
+// IR ("GEP into unsized type!") and the compiler used to die with that message
+// plus an uncaught exception. Rust reports E0072 here. Note that a cycle through
+// a POINTER or REFERENCE is fine (the field is an address, not the value), which
+// is why only by-value containment is followed.
+
+namespace
+{
+/// Depth-first walk of the by-value containment graph starting at `type`.
+/// `stack` is the chain of names currently being expanded — re-entering one of
+/// them is a cycle. `finite` memoizes the types already proven finite so a
+/// diamond-shaped graph is walked once.
+bool ReachesItselfByName(const std::shared_ptr<CustomType> &type,
+    std::vector<std::string> &stack,
+    std::unordered_set<std::string> &finite)
+{
+    if (!type) return false;
+    const std::string &name = type->getName();
+    if (finite.count(name)) return false;
+    if (std::find(stack.begin(), stack.end(), name) != stack.end()) return true;
+
+    stack.push_back(name);
+    for (const auto &field : type->getFields())
+    {
+        if (!field.type) continue;
+        // By-value containment only: a pointer/reference/function field holds an
+        // address, so it stops the walk.
+        if (auto inner = std::dynamic_pointer_cast<CustomType>(field.type))
+        {
+            if (ReachesItselfByName(inner, stack, finite))
+            {
+                stack.pop_back();
+                return true;
+            }
+        }
+        else if (auto array = std::dynamic_pointer_cast<ArrayType>(field.type))
+        {
+            if (auto element = std::dynamic_pointer_cast<CustomType>(array->getElementType()))
+            {
+                if (ReachesItselfByName(element, stack, finite))
+                {
+                    stack.pop_back();
+                    return true;
+                }
+            }
+        }
+    }
+    stack.pop_back();
+    finite.insert(name);
+    return false;
+}
+} // namespace
+
+void HIRSemanticAnalyzer::checkForRecursiveTypes(HIRProgram *program)
+{
+    if (!program) return;
+
+    std::unordered_set<std::string> finite;
+    for (size_t i = 0; i < program->items.size(); ++i)
+    {
+        HIRNode *item = program->items[i].get();
+        std::string typeName;
+        if (auto *s = dynamic_cast<HIRStruct *>(item))
+            typeName = s->name;
+        else if (auto *e = dynamic_cast<HIREnum *>(item))
+            typeName = e->name;
+        else
+            continue;
+
+        // The HIR name is the source name; the registered CustomType is keyed by
+        // the module-internal name, so ask the symbol table (as preRegister does).
+        auto *symbol = SymbolTable::getInstance().lookupSymbol(typeName);
+        if (!symbol || !symbol->type) continue;
+        auto custom = std::dynamic_pointer_cast<CustomType>(symbol->type);
+        if (!custom) continue;
+
+        setModuleForItem(i);
+        std::vector<std::string> stack;
+        if (ReachesItselfByName(custom, stack, finite))
+        {
+            std::string chain = stack.empty() ? custom->getName() : stack.front();
+            for (size_t k = 1; k < stack.size(); ++k)
+                chain += " -> " + stack[k];
+            log(*item,
+                "recursive type '" + displayName(custom->getName())
+                    + "' has infinite size: it contains itself by value (" + chain
+                    + "). Store it behind a pointer or reference instead.",
+                E_RecursiveType);
+            // Reported once per cycle: the remaining types of the same cycle would
+            // only repeat it.
+            finite.insert(custom->getName());
+        }
+    }
+}
+
 void HIRSemanticAnalyzer::visit(HIRProgram *node)
 {
     if (!node) return;
@@ -1055,8 +1176,28 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     for (size_t i = 0; i < node->items.size(); ++i)
     {
         setModuleForItem(i);
+        context->typeContext->clearInstantiationOverflow();
         node->items[i]->accept(this);
+
+        // TypeContext stops an instantiation that expands without end (a type
+        // used inside its own type argument: `struct S<T> { pub v: S<S<T>> }`)
+        // but has no source position to report it at, so the check lands here,
+        // on the item that triggered it.
+        if (context->typeContext->hasInstantiationOverflow())
+        {
+            log(*node->items[i],
+                "type instantiation is too deep: a type is used inside its own type "
+                "argument and expands without end, so it has no finite layout. "
+                "Store the recursive part behind a pointer or reference instead.",
+                E_RecursiveType);
+            context->typeContext->clearInstantiationOverflow();
+        }
     }
+
+    // Pass 3: a type that contains itself by value has no finite layout. This
+    // has to run after every body is analyzed (a cycle may cross two items, and
+    // pass 1b only creates empty shells).
+    checkForRecursiveTypes(node);
 }
 
 // ============================================================
@@ -1106,6 +1247,28 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
             continue;
         }
         seen.insert(member.name);
+
+        // A field that names THIS type by value cannot have a finite layout:
+        // `struct S<T> { pub v: S<S<T>> }` instantiates S with itself as the
+        // argument, forever. Reject it before resolving (the resolution IS the
+        // recursion), and give the field a primitive so the rest of the analysis
+        // still has a type to work with — the error gate stops the pipeline.
+        if (RawTypeMentionsSelf(member.rawType, node->name))
+        {
+            log(*node,
+                "recursive type '" + node->name
+                    + "' has infinite size: a field names the type itself by value "
+                    "(directly, or inside a generic argument). Store the recursive "
+                    "part behind a pointer or reference instead.",
+                E_RecursiveType);
+            member.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+            CustomType::Field bad;
+            bad.name = member.name;
+            bad.type = member.type;
+            bad.isPublic = member.isPublic;
+            fields.push_back(std::move(bad));
+            continue;
+        }
 
         member.type = resolveType(member.rawType, *node);
         CustomType::Field f;
@@ -1176,6 +1339,21 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildEnumType(HIREnum *node)
         vi.name = variant.name;
         for (size_t j = 0; j < variant.payloadRawTypes.size(); ++j)
         {
+            // Same rule as a struct field: a payload naming the enum itself by
+            // value (`enum E<T> { A(E<E<T>>) }`) expands forever. `enum E { A(E) }`
+            // takes this path too, so the check covers both spellings.
+            if (RawTypeMentionsSelf(variant.payloadRawTypes[j], node->name))
+            {
+                log(*node,
+                    "recursive type '" + node->name
+                        + "' has infinite size: a variant payload names the type itself "
+                        "by value. Store it behind a pointer or reference instead.",
+                    E_RecursiveType);
+                variant.payloadTypes.push_back(
+                    context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32));
+                continue;
+            }
+
             auto pt = resolveType(variant.payloadRawTypes[j], *node);
             variant.payloadTypes.push_back(pt);
             vi.payloadTypes.push_back(pt);

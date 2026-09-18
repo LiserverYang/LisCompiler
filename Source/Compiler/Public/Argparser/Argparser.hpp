@@ -14,6 +14,21 @@
 #include <stdexcept>
 
 /**
+ * A malformed COMMAND LINE (unknown option, missing value, stray positional).
+ * It derives from std::runtime_error so existing handlers keep working, but the
+ * driver catches it separately: the user typed something wrong, which is not a
+ * compiler bug and must not be reported as one.
+ */
+class ArgParseError : public std::runtime_error
+{
+public:
+    explicit ArgParseError(const std::string &what)
+        : std::runtime_error(what)
+    {
+    }
+};
+
+/**
  * The create info of argparser
  */
 struct ArgparserCreateInfo

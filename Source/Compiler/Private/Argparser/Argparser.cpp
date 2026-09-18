@@ -81,7 +81,7 @@ void Argparser::run()
             // beacuse it is a unkown argument
             if (!found)
             {
-                throw std::runtime_error("Unknown option: " + arg);
+                throw ArgParseError("Unknown option: " + arg);
             }
         }
         // otherwise, it is the positional argument
@@ -104,13 +104,13 @@ void Argparser::run()
                 }
                 else
                 {
-                    throw std::runtime_error("Unexpected positional argument: " + arg);
+                    throw ArgParseError("Unexpected positional argument: " + arg);
                 }
             }
             // it must be a illegal positional argument
             else
             {
-                throw std::runtime_error("Too many positional arguments: " + arg);
+                throw ArgParseError("Too many positional arguments: " + arg);
             }
         }
     }
@@ -118,7 +118,7 @@ void Argparser::run()
     // here we process the ungiven positional argument
     if (posIndex < rules.size() && !rules[posIndex].name.empty() && rules[posIndex].name[0][0] != '-')
     {
-        throw std::runtime_error("Excepted positional argument: " + rules[posIndex].name[0]);
+        throw ArgParseError("Excepted positional argument: " + rules[posIndex].name[0]);
     }
 }
 

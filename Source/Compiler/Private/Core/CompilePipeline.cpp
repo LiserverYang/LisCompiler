@@ -80,7 +80,17 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         {
             // this pass is to read file
             ctx->filePath = ctx->args->getArg("filePath");
-            ctx->fileValue = (std::stringstream{} << std::ifstream{ctx->filePath, std::ios::binary}.rdbuf()).str();
+            std::ifstream input{ctx->filePath, std::ios::binary};
+            if (!input)
+            {
+                // A stream that failed to open leaves rdbuf() EMPTY, so a missing
+                // (or unreadable) input used to compile as an empty program, exit
+                // 0 and even write an a.o. That is a usage error: name the file and
+                // stop. ArgParseError makes the driver report it as one, not as an
+                // internal compiler error.
+                throw ArgParseError("cannot open input file '" + ctx->filePath + "'");
+            }
+            ctx->fileValue = (std::stringstream{} << input.rdbuf()).str();
             // The main file's directory is appended AFTER the stdlib dir: the
             // stdlib modules always win over same-named user files (e.g. an
             // Examples/iterator.lis must not shadow the stdlib's iterator).

@@ -503,6 +503,37 @@ std::shared_ptr<CustomType> TypeContext::instantiateCustom(
     assert(generic);
     assert(generic->getGenericParams().size() == args.size());
 
+    // Instantiation is recursive by nature (`S<S<T>>` instantiates S, whose
+    // fields instantiate S again with a larger argument, ...). A definition such
+    // as `struct S<T> { pub v: S<S<T>> }` never reaches a finite normal form:
+    // before this guard the recursion ran until the stack died (measured:
+    // 0xC0000005 inside instantiateCustom <-> substitute). Stop, flag it, and
+    // hand back the UNSUBSTITUTED definition — the analyzer reports the flag as
+    // a diagnostic, and the error gate keeps such a type out of codegen.
+    struct InstantiationDepthGuard
+    {
+        size_t &depth;
+        explicit InstantiationDepthGuard(size_t &d)
+            : depth(d)
+        {
+            ++depth;
+        }
+        ~InstantiationDepthGuard()
+        {
+            --depth;
+        }
+    } guard(instantiationDepth_);
+    if (instantiationDepth_ > kMaxInstantiationDepth)
+    {
+        instantiationOverflow_ = true;
+        // A FRESH empty type, never the definition: the definition still carries
+        // the growing argument, so handing it back lets the caller keep expanding
+        // it (measured: an endless hasGenericParam walk). The analyzer reports the
+        // flag, and the error gate keeps this placeholder out of codegen.
+        return std::make_shared<CustomType>("$type_overflow_" + std::to_string(++overflowSerial_),
+            std::vector<CustomType::Field>{});
+    }
+
     // Detect whether this instantiation is fully concrete (no generic params
     // anywhere inside the args). Only concrete ones are cached for codegen.
     std::function<bool(const std::shared_ptr<Type> &)> hasGenericParam =

@@ -3,6 +3,7 @@
 // (see TestModule.py). Keep new tests in whichever file fits; the split is
 // purely about compile time.
 
+#include "Core/InternalError.hpp"
 #include "RuntimeTestFixture.hpp"
 
 
@@ -824,6 +825,71 @@ TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
 // (0xC00000FD) and no diagnostic at all. The parser now refuses to descend past
 // the limit and reports it, which bounds the AST every later pass can see.
 
+// ── Recursive types (E3018) and the internal-error path ───────────────────────
+//
+// A type that contains itself BY VALUE has no finite layout. It used to reach the
+// LLVM lowering, which produced an opaque/unsized type, failed the module
+// verifier ("GEP into unsized type!") and aborted the compiler with that message.
+// Rust rejects the same definitions (E0072 / E0391).
+
+TEST_F(RuntimeTest, RecursiveStructRejected)
+{
+    expectCompileFail("struct A { pub a: A }\nfn main() -> i32 { ret 0; }",
+        "infinite size");
+}
+
+TEST_F(RuntimeTest, MutuallyRecursiveStructsRejected)
+{
+    expectCompileFail("struct A { pub b: B }\nstruct B { pub a: A }\nfn main() -> i32 { ret 0; }",
+        "infinite size");
+}
+
+TEST_F(RuntimeTest, RecursiveEnumRejected)
+{
+    expectCompileFail("enum E { A(E) }\nfn main() -> i32 { ret 0; }",
+        "infinite size");
+}
+
+TEST_F(RuntimeTest, RecursiveThroughGenericRejected)
+{
+    // The stdlib's own Option would carry the payload by value: still infinite.
+    expectCompileFail("struct Node { pub next: Option<Node> }\nfn main() -> i32 { ret 0; }",
+        "infinite size");
+}
+
+TEST_F(RuntimeTest, SelfNestingGenericRejected)
+{
+    // `S<S<T>>` used to expand forever inside TypeContext::instantiateCustom and
+    // kill the process with a stack fault; the raw-type check stops it before any
+    // instantiation happens.
+    expectCompileFail("struct S<T> { pub v: S<S<T>> }\nfn main() -> i32 { ret 0; }",
+        "infinite size");
+}
+
+TEST_F(RuntimeTest, RecursiveThroughPointerStillCompiles)
+{
+    // The rule is about by-VALUE containment: a pointer (or reference) field holds
+    // an address, so the type stays finite.
+    // (A raw pointer cannot be fabricated from an integer — that is its own
+    // tested rule — so the snippet only has to prove the TYPE is accepted.)
+    expectRun("struct Node { pub next: *mut Node, pub v: i32 }"
+              " fn main() -> i32 { ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, InternalErrorReportIsActionable)
+{
+    // An internal compiler error is a BUG report, so the report has to say so, show
+    // where it happened, and tell the user where to file it. (The end-to-end path
+    // is main()'s catch in Source/Main/Private/Main.cpp.)
+    testing::internal::CaptureStderr();
+    ReportInternalCompilerError("unit test: deliberate failure");
+    std::string err = testing::internal::GetCapturedStderr();
+    EXPECT_NE(err.find("internal compiler error: unit test: deliberate failure"), std::string::npos) << err;
+    EXPECT_NE(err.find("This is a bug in the COMPILER"), std::string::npos) << err;
+    EXPECT_NE(err.find("https://github.com/LiserverYang/LisCompiler/issues/new"), std::string::npos) << err;
+    EXPECT_NE(err.find("Stack trace"), std::string::npos) << err;
+}
 TEST_F(RuntimeTest, DeeplyNestedExpressionRejected)
 {
     expectCompileFail("fn f() -> i32 { ret " + std::string(400, '(') + "1"

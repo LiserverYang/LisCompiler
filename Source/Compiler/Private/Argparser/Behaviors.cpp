@@ -23,7 +23,7 @@ int setAsValue(Argparser *parser, std::string argName)
     // to avoid outing of bounds
     if (parser->pos >= parser->argc - 1)
     {
-        throw std::runtime_error("Except a value for argument: " + argName);
+        throw ArgParseError("Except a value for argument: " + argName);
     }
 
     parser->args->setArg(argName, parser->argv[parser->pos + 1]);

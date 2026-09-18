@@ -165,6 +165,35 @@ public:
         return instantiatedCustoms;
     }
 
+    /** How deeply instantiation may nest before the type is declared to have no
+     *  finite form. Instantiating `S<S<T>>` needs S's fields substituted, which
+     *  instantiates `S<S<S<T>>>`, and so on: a definition like
+     *  `struct S<T> { pub v: S<S<T>> }` expands without end and used to run the
+     *  recursion until the stack died (0xC0000005 inside
+     *  instantiateCustom <-> substitute). Legitimate nesting (`Option<Result<..>>`)
+     *  is a handful of levels, so 32 is far past anything writable by hand. */
+    static constexpr size_t kMaxInstantiationDepth = 32;
+
+    /** True once an instantiation was cut off at kMaxInstantiationDepth. TypeContext
+     *  has no source positions, so the ANALYZER turns this into a diagnostic. */
+    bool hasInstantiationOverflow() const
+    {
+        return instantiationOverflow_;
+    }
+    void clearInstantiationOverflow()
+    {
+        instantiationOverflow_ = false;
+    }
+
+    /** Every struct/enum DEFINITION registered so far. The infinite-size check
+     *  (HIRSemanticAnalyzer::checkForRecursiveTypes) walks all of them, which
+     *  is why this exposes the table itself rather than a lookup. */
+    const std::unordered_map<std::string, std::shared_ptr<CustomType>> &
+    getCustoms() const
+    {
+        return customs;
+    }
+
     void printTypeTable() const;
 
 private:
@@ -186,4 +215,9 @@ private:
     std::unordered_map<std::string, std::shared_ptr<GenericParamType>> gParams;
     std::unordered_map<std::string, std::shared_ptr<CustomType>> instantiatedCustoms;
     std::unordered_map<std::pair<void *, size_t>, std::shared_ptr<ArrayType>, ArrayHash> arrayCache;
+    /// Current instantiateCustom() nesting, the sticky overflow flag, and the
+    /// serial that keeps placeholder names unique.
+    size_t instantiationDepth_ = 0;
+    bool instantiationOverflow_ = false;
+    size_t overflowSerial_ = 0;
 };

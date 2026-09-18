@@ -8,7 +8,7 @@
 |---|---|---|
 | E1xxx | 1001–1004 | 词法 |
 | E2xxx | 2001–2018 | 语法 |
-| E3xxx | 3001–3016 | 语义（HIR） |
+| E3xxx | 3001–3018 | 语义（HIR） |
 | E4xxx | 4001–4007 | 借用检查 |
 | E5xxx | 5001–5005 | 枚举 / match |
 | E6xxx | 6001–6003 | 错误传播（`?` / Result） |
@@ -65,6 +65,7 @@
 | 3015 | field 'v' of 'S' is private; add 'pub', or access it inside a method of that type |
 | 3016 | cannot move out of 'P': the type implements Drop, so its fields are released together by its own destructor（非 Copy 字段不可移出实现 `Drop` 的类型；Copy 字段与整值移动不受限） |
 | 3017 | cannot move out of 'r.s': it is behind the reference '&mut P', so the value is only borrowed here and the referent still owns it（非 Copy 字段不可穿过引用移出；Copy 字段读取、引用本身的移动不受限） |
+| 3018 | recursive type 'A' has infinite size: it contains itself by value / a field names the type itself by value（自引用的结构体/枚举/泛型；穿过指针或引用不受限） |
 
 > 3006–3010 已废弃（Arg mismatch / Generic / Trait / Return type / Cast 各自预留过一号，
 > 但从未发出过）：实参/泛型/trait/返回/cast 类错误一律用 3001/3002 加具体消息，

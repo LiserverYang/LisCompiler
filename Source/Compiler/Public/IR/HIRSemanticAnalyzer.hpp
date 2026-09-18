@@ -395,6 +395,14 @@ private:
     void preRegister(HIRNode *item);
     /** Build the CustomType for a struct (used by preRegister and full analysis). */
     std::shared_ptr<Type> buildStructType(HIRStruct *node);
+    /** Reject types that contain themselves BY VALUE (`struct A { pub a: A }`,
+     *  `enum E { A(E) }`, or a cycle through several types). Such a type has
+     *  infinite size: the LLVM lowering gets an opaque/unsized type, the module
+     *  verifier rejects it (`GEP into unsized type!`) and the compiler used to
+     *  abort with that message instead of a diagnostic. Runs once, after every
+     *  struct/enum body has been analyzed, over the whole program. */
+    void checkForRecursiveTypes(HIRProgram *program);
+
     /** Build the CustomType for an enum (fat tagged union) — used by the
      *  pre-registration pass and the full analysis. */
     std::shared_ptr<Type> buildEnumType(HIREnum *node);
