@@ -18,9 +18,33 @@
 /**
  * Parser is a grammer parser，it will generate AST from TokenStream
  */
+class Parser;
+
+/**
+ * RAII nesting guard for the recursive-descent entry points (expressions,
+ * statements, types). Holding one means "I am one level deeper"; constructing
+ * it past the parser's limit reports E_NestingTooDeep and yields false, and the
+ * caller must then return a placeholder WITHOUT descending any further.
+ */
+class ParserDepthGuard
+{
+public:
+    explicit ParserDepthGuard(Parser *parser);
+    ~ParserDepthGuard();
+    explicit operator bool() const
+    {
+        return ok_;
+    }
+
+private:
+    Parser *parser_;
+    bool ok_;
+};
+
 class Parser : public Pass
 {
     friend class PositionRecorder;
+    friend class ParserDepthGuard;
 
 public:
     Parser() = default;
@@ -65,6 +89,37 @@ protected:
      *  (marks every CastExpr in its expression tree, relaxing the
      *  integer-narrowing ERROR to a warning). */
     bool pendingIKnow_ = false;
+
+    /**
+     * Nesting budget for the recursive-descent functions.
+     *
+     * The parser, the HIR builder, the analyzer, the MIR builder and the LLVM
+     * lowering all walk the same tree RECURSIVELY, so how deep a program may
+     * nest was bounded by nothing but the process stack. Before this guard a
+     * valid `0 - (0 - (...))` nested ~350 deep, or a ~512-term `a - b - c - ...`
+     * chain, killed the compiler with a stack overflow (0xC00000FD) and no
+     * diagnostic at all. Refusing to descend past `maxDepth_` bounds the AST
+     * depth every later pass can see, and reports it instead.
+     *
+     * 256 is thousands of tokens of hand-written nesting (real code nests a
+     * handful of levels); `--max-depth N` raises or lowers it. A left-deep
+     * chain is counted against the same budget, because it costs one stack
+     * frame per link downstream even when the parser builds it iteratively.
+     */
+    size_t maxDepth_ = 256;
+    size_t depth_ = 0;
+    bool depthReported_ = false;
+
+    /** Enter one nesting level; false (and reported) once the limit is hit. */
+    bool enterDepth();
+    void leaveDepth()
+    {
+        if (depth_ > 0) --depth_;
+    }
+    /** Report E_NestingTooDeep once per parse (the first one is the useful one). */
+    void reportDepthExceeded();
+    /** Apply the `--max-depth` CLI value; absent/invalid keeps the default. */
+    void readDepthLimit();
 
     /** Consume a `#[...]` attribute; currently only `#[i_know]` is defined. */
     void parseAttribute();
@@ -153,7 +208,7 @@ protected:
         if (tokenStream->empty())
             return eofToken_; // nothing to log against
 
-        if (!eofReported_)
+        if (!eofReported_ && !depthReported_)
         {
             eofReported_ = true;
             Logger::LogInfo logInfo;
@@ -190,8 +245,17 @@ protected:
     {
         if (finished() || currentToken().code != code)
         {
-            logInfo.exit = false; // recoverable — continue past the error
-            Logger::Log(Logger::LogLevel::ERROR, logInfo);
+            // Both consume() overloads report directly instead of going
+            // through logError(), so the post-depth-limit silence has to be
+            // repeated here: unwinding 4000 nested parens otherwise prints one
+            // "expected ')'" per frame (measured: 198 of them for a 512-deep
+            // file, each re-printing a 35 KB source line). The recovery itself
+            // is unchanged — only the message is dropped.
+            if (!depthReported_)
+            {
+                logInfo.exit = false; // recoverable — continue past the error
+                Logger::Log(Logger::LogLevel::ERROR, logInfo);
+            }
         }
 
         Token &result = currentToken();
@@ -203,10 +267,14 @@ protected:
     {
         if (finished() || currentToken().code != code)
         {
-            Logger::LogInfo logInfo;
-            initLogInfo(currentToken(), logInfo, msg, errorID);
-            logInfo.exit = false; // recoverable
-            Logger::Log(Logger::LogLevel::ERROR, logInfo);
+            // See the other overload: silent once the nesting limit was hit.
+            if (!depthReported_)
+            {
+                Logger::LogInfo logInfo;
+                initLogInfo(currentToken(), logInfo, msg, errorID);
+                logInfo.exit = false; // recoverable
+                Logger::Log(Logger::LogLevel::ERROR, logInfo);
+            }
         }
 
         Token &result = currentToken();
@@ -244,6 +312,17 @@ protected:
     /// run; the Parser gates on the error count at the end (see run()).
     inline void logError(Token &token, const std::string &msg, size_t errorId = 1)
     {
+        // Once the nesting limit (maxDepth_) is hit the rest of the file is
+        // unparseable by construction, and the recovery would emit one
+        // diagnostic per unwinding frame — each re-printing a source line that
+        // a pathological input can make tens of kilobytes long. Measured on a
+        // 4096-deep `0 - (` file: 2888 errors, 102 MB of output, 3.8 s (and an
+        // apparent hang at 20000). The first report is the useful one, and the
+        // error count is already non-zero, so the pipeline still rejects the
+        // file.
+        if (depthReported_)
+            return;
+
         Logger::LogInfo logInfo;
         initLogInfo(token, logInfo, msg, errorId);
         logInfo.exit = false;

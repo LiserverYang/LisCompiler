@@ -162,6 +162,11 @@ protected:
         diagPath = fs::temp_directory_path() / (base + "_diag.txt");
     }
 
+    /// Extra CLI-style arguments applied to the Context built by the next
+    /// compile() (e.g. {{"max_depth", "16"}}). Tests set it before calling a
+    /// helper; it is not reset automatically (assign an empty vector to clear).
+    std::vector<std::pair<std::string, std::string>> extraArgs;
+
     void TearDown() override
     {
         std::error_code ec;
@@ -210,6 +215,10 @@ protected:
         auto context = std::make_shared<Context>();
         context->args->setArg("o", "2");
         context->args->setArg("filePath", "test.lis");
+        // CLI-style overrides a test wants the compiler to see (e.g.
+        // extraArgs = {{"max_depth", "16"}} to exercise --max-depth).
+        for (const auto &[key, value] : extraArgs)
+            context->args->setArg(key, value);
         context->searchPaths.push_back(stdLibDir.string());
         // The real lstdlib is also the unsafe-core boundary: the stdlib modules
         // imported below are the only files allowed to use the heap primitives.

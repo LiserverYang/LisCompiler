@@ -13,6 +13,62 @@
 
 Token Parser::eofToken_;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Nesting budget (see Parser::maxDepth_)
+// ─────────────────────────────────────────────────────────────────────────────
+
+ParserDepthGuard::ParserDepthGuard(Parser *parser)
+    : parser_(parser), ok_(parser->enterDepth())
+{
+}
+
+ParserDepthGuard::~ParserDepthGuard()
+{
+    if (ok_) parser_->leaveDepth();
+}
+
+bool Parser::enterDepth()
+{
+    if (depth_ >= maxDepth_)
+    {
+        reportDepthExceeded();
+        return false;
+    }
+    ++depth_;
+    return true;
+}
+
+void Parser::reportDepthExceeded()
+{
+    // Once per parse: the first report points at the real construct, and a
+    // hundred identical messages would only bury it.
+    if (depthReported_) return;
+    // Log BEFORE setting the flag: logError() itself goes quiet once it is set
+    // (it suppresses the recovery noise that follows), so the one message that
+    // matters has to get out first.
+    logError(currentToken(),
+        "nesting is too deep (limit " + std::to_string(maxDepth_)
+            + "); simplify the expression, or raise the limit with --max-depth",
+        E_NestingTooDeep);
+    depthReported_ = true;
+}
+
+void Parser::readDepthLimit()
+{
+    if (!context || !context->args) return;
+    std::string raw = context->args->getArg("max_depth");
+    if (raw.empty()) return;
+    try
+    {
+        int value = std::stoi(raw);
+        if (value > 0) maxDepth_ = static_cast<size_t>(value);
+    }
+    catch (const std::exception &)
+    {
+        // A non-numeric value keeps the default instead of refusing to compile.
+    }
+}
+
 void Parser::synchronize()
 {
     // Skip tokens until a safe restart point: a `;` (consumed), a `}`, or a
@@ -60,6 +116,7 @@ void Parser::run()
 
 void Parser::parseAll()
 {
+    readDepthLimit();
     tokenStream = &(context->tokenStream);
     auto &program = context->program;
 
@@ -94,6 +151,14 @@ void Parser::parseAll()
         // consuming a token (avoids an infinite loop on malformed input).
         if (currentPos == beforePos)
             advance();
+
+        // A depth-limit error rejects the whole file: past the limit the guard
+        // hands back placeholders without descending, so the remaining tokens
+        // cannot be parsed into anything meaningful — and a pathological input
+        // (20k nested `if`s) would otherwise spend a minute in error recovery
+        // for a diagnostic that is already on screen.
+        if (depthReported_)
+            break;
 
         // A construct failed — skip to the next statement/declaration boundary
         // so the next construct parses cleanly.
@@ -660,6 +725,15 @@ std::unique_ptr<MemberVarDef> Parser::parseMemberVariableDefinition()
 
 std::unique_ptr<TypeNode> Parser::parseType()
 {
+    ParserDepthGuard depth(this);
+    if (!depth)
+    {
+        // An empty TypeNode: callers store the result unscreened, and the
+        // analyzer reports the empty type name cleanly (see the error path
+        // at the end of this function).
+        return std::make_unique<TypeNode>();
+    }
+
     PositionRecorder recorder(this, nullptr);
 
     auto type = std::make_unique<TypeNode>();
@@ -1027,6 +1101,13 @@ void Parser::applyIKnow(Expr *expr)
 
 std::unique_ptr<Stmt> Parser::parseStatement()
 {
+    ParserDepthGuard depth(this);
+    if (!depth)
+    {
+        // Same as parseExpression: stop descending, hand back an empty block.
+        return std::make_unique<CompoundStmt>();
+    }
+
     // Attributes (`#[i_know = "..."]`) attach to the FOLLOWING statement:
     // parse the attribute, recurse for the statement, then mark its casts.
     if (check(TokenCode::ATTRIBUTE_START))
@@ -1327,6 +1408,17 @@ std::unique_ptr<Pattern> Parser::parsePattern()
 // Parse expression
 std::unique_ptr<Expr> Parser::parseExpression()
 {
+    ParserDepthGuard depth(this);
+    if (!depth)
+    {
+        // Do NOT descend: the limit is already reported. A placeholder keeps
+        // every caller (and the binary-op loop) off a null deref, and the
+        // error count keeps this AST from reaching HIRBuilder.
+        auto placeholder = std::make_unique<IdentifierExpr>();
+        placeholder->name = "<error>";
+        return placeholder;
+    }
+
     PositionRecorder recorder(this, nullptr);
 
     auto expr = parseBinaryExpression(0);
@@ -1349,6 +1441,11 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
 
     left = parseMemberAccessChain(std::move(left));
 
+    // `a - b - c - ...` is built ITERATIVELY here, but the tree it leaves
+    // behind is left-deep: every later pass walks it with one stack frame per
+    // link, so a few hundred terms overflowed the stack where the parser
+    // itself never recursed. Count the links against the nesting budget.
+    size_t links = 0;
     while (true)
     {
         Token opToken = currentToken();
@@ -1356,6 +1453,13 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
 
         if (precedence <= minPrecedence)
             break;
+
+        if (depth_ + links + 1 > maxDepth_)
+        {
+            reportDepthExceeded();
+            break;
+        }
+        ++links;
 
         advance();
 
@@ -1821,10 +1925,20 @@ std::vector<std::unique_ptr<Expr>> Parser::parseArgumentList()
 
 std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
 {
+    // Same budget as the binary-op chain: `.field` / `.m()` / `[i]` / `?` build
+    // a left-deep tree one link at a time.
+    size_t links = 0;
     while (true)
     {
+        if (depth_ + links + 1 > maxDepth_)
+        {
+            reportDepthExceeded();
+            break;
+        }
+
         if (match(TokenCode::DOT))
         {
+            ++links;
             PositionRecorder recorder(this, nullptr);
             Token member = consume(TokenCode::IDENTIFIER, "expected member name after '.'", E_ExpectAnIdentifier);
 
@@ -1850,6 +1964,7 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
         }
         else if (match(TokenCode::LBRACKET))
         {
+            ++links;
             // Array / pointer indexing: `a[i]`, `s.data[i]`.
             PositionRecorder recorder(this, nullptr);
             auto index = std::make_unique<IndexAccess>();
@@ -1861,6 +1976,7 @@ std::unique_ptr<Expr> Parser::parseMemberAccessChain(std::unique_ptr<Expr> left)
         }
         else if (match(TokenCode::QUESTION))
         {
+            ++links;
             // `expr?` — error propagation. A POSTFIX operator inside the suffix
             // chain: it binds tighter than every binary operator (`a + b?` is
             // `a + (b?)`) and may be followed by `.field` / `[i]`, which the loop

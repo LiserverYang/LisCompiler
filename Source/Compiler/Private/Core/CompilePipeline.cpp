@@ -40,6 +40,10 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--print-llvmir"}, setAsTrue, "false", "Print the parsed LLVM IR."});
     argParser->registRule(ArgParseRule{{"-o"}, setAsValue, "2", "The optimise level(0-3), default is 2."});
     argParser->registRule(ArgParseRule{{"-I"}, setAsValue, "", "Add module search path(s), ';'-separated (lisbuild packs include_dirs here)."});
+    argParser->registRule(ArgParseRule{{"--max-depth"},
+        setAsValue,
+        "256",
+        "Maximum nesting depth of expressions/statements/types. Deep nesting is bounded by the compiler's own recursion, so past this limit it reports E2018 instead of exhausting the stack (default 256)."});
 
     // The standard library is NOT auto-preloaded anymore — user code imports
     // the modules it needs (`impt math;`). The stdlib directory is added to

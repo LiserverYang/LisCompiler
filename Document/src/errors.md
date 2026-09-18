@@ -7,7 +7,7 @@
 | 段 | 范围 | 阶段 |
 |---|---|---|
 | E1xxx | 1001–1004 | 词法 |
-| E2xxx | 2001–2017 | 语法 |
+| E2xxx | 2001–2018 | 语法 |
 | E3xxx | 3001–3016 | 语义（HIR） |
 | E4xxx | 4001–4007 | 借用检查 |
 | E5xxx | 5001–5005 | 枚举 / match |
@@ -42,6 +42,7 @@
 | 2015 | Expected expression |
 | 2016 | Invalid literal type（也用于数字字面量溢出） |
 | 2017 | Multiple-defined trait |
+| 2018 | nesting is too deep (limit N); simplify the expression, or raise the limit with --max-depth |
 
 > 2010 已废弃：原为「Undefined type」预留，解析器从未发出过（未知类型名不是语法错误）。
 

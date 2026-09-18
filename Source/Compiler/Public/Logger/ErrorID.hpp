@@ -36,6 +36,7 @@ ERRORID E_ExpectType = 2014;
 ERRORID E_ExpectedExpression = 2015;
 ERRORID E_InvalidLiteralType = 2016;
 ERRORID E_MutidefinedTrait = 2017;
+ERRORID E_NestingTooDeep = 2018; // expression/statement/type nesting over --max-depth
 
 // Semantic (HIR) errors
 

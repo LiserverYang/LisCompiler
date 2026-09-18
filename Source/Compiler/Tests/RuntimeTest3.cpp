@@ -815,6 +815,76 @@ TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
                       " fn main() -> i32 { let p = P { a: A { v: 1 } }; p.a; ret 0; }",
         "implements Drop");
 }
+// ── Nesting depth limit (--max-depth, E2018) ───────────────────────────────────
+//
+// The parser, the HIR builder, the analyzer, the MIR builder and the LLVM
+// lowering all walk the tree recursively, so how deep a program may nest used to
+// be bounded by nothing but the process stack: ~350 levels of `0 - (...)` or a
+// ~512-term `a - b - c - ...` chain killed the compiler with a stack overflow
+// (0xC00000FD) and no diagnostic at all. The parser now refuses to descend past
+// the limit and reports it, which bounds the AST every later pass can see.
+
+TEST_F(RuntimeTest, DeeplyNestedExpressionRejected)
+{
+    expectCompileFail("fn f() -> i32 { ret " + std::string(400, '(') + "1"
+                      + std::string(400, ')') + "; }",
+        "nesting is too deep");
+}
+
+TEST_F(RuntimeTest, DeeplyChainedExpressionRejected)
+{
+    // A left-associative chain is a left-deep TREE: 400 terms is 400 levels of
+    // recursion for every pass downstream, even though the parser builds it in a
+    // loop.
+    std::string src = "fn f() -> i32 { ret ";
+    for (int i = 0; i < 400; ++i) src += "0 - ";
+    src += "1; }";
+    expectCompileFail(src, "nesting is too deep");
+}
+
+TEST_F(RuntimeTest, DeeplyNestedStatementRejected)
+{
+    std::string src = "fn f() -> i32 { ";
+    for (int i = 0; i < 400; ++i) src += "if true { ";
+    for (int i = 0; i < 400; ++i) src += "}";
+    src += " ret 0; }";
+    expectCompileFail(src, "nesting is too deep");
+}
+
+TEST_F(RuntimeTest, DeeplyNestedTypeRejected)
+{
+    std::string src = "fn f(x: ";
+    for (int i = 0; i < 400; ++i) src += "Option<";
+    src += "i32";
+    for (int i = 0; i < 400; ++i) src += ">";
+    src += ") -> i32 { ret 0; }";
+    expectCompileFail(src, "nesting is too deep");
+}
+
+TEST_F(RuntimeTest, ModerateNestingStillCompiles)
+{
+    // The default has to leave room for real code: 64 nested parentheses and a
+    // 100-term chain are thousands of tokens and compile normally.
+    // (expectRun executes the entry point, so the snippet must define main.)
+    std::string nested = "fn main() -> i32 { ret " + std::string(64, '(') + "7" + std::string(64, ')') + "; }";
+    expectRun(nested, 7);
+
+    std::string chain = "fn main() -> i32 { ret 0";
+    for (int i = 0; i < 100; ++i) chain += " + 1";
+    chain += "; }";
+    expectRun(chain, 100);
+}
+
+TEST_F(RuntimeTest, NestingLimitIsConfigurable)
+{
+    // `--max-depth N` is honoured: 32 levels are fine under the default 256 and
+    // rejected once the limit is lowered to 16.
+    std::string deep = "fn main() -> i32 { ret " + std::string(32, '(') + "1" + std::string(32, ')') + "; }";
+    expectRun(deep, 1);
+    extraArgs = {{"max_depth", "16"}};
+    expectCompileFail(deep, "nesting is too deep");
+    extraArgs.clear();
+}
 TEST_F(RuntimeTest, MoveOutOfReferenceRejected)
 {
     // Rust's E0507 (language decision 2026-09-15): a field cannot be moved out
