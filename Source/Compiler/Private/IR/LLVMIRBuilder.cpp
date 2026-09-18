@@ -1208,15 +1208,31 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s, const
     stdinVal = builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), stdinGlob);
 #endif
 
-    // fgets(buf, 256, stdin)
-    builder_->CreateCall(fgets->getFunctionType(), fgets, {bufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 256), stdinVal});
+    // fgets(buf, 256, stdin) — the RETURN VALUE matters: NULL means the input
+    // is exhausted, and the buffer still holds the PREVIOUS line (it is never
+    // cleared). Dropping it made `while true { read_line() }` spin forever on
+    // the last line read, so EOF now has to be handled explicitly: at end of
+    // input read_line yields an empty string and the numeric readers yield 0.
+    llvm::Value *read = builder_->CreateCall(fgets->getFunctionType(), fgets, {bufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 256), stdinVal});
+    llvm::Value *eof = builder_->CreateICmpEQ(read, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_)));
+    auto select = [&](llvm::Value *whenEof, llvm::Value *otherwise)
+    {
+        return builder_->CreateSelect(eof, whenEof, otherwise);
+    };
 
     if (s.funcName == "read_line")
     {
         // Strip trailing \r\n: idx = strcspn(buf, "\r\n"); buf[idx] = 0.
+        // On EOF the index is forced to 0 so the stale line is cleared instead
+        // of returned. An EMPTY LINE is indistinguishable from EOF here — the
+        // same thing Rust's read_line reports (0 bytes read).
         llvm::Function *strcspn = getOrDeclareStrCspn();
         llvm::Value *reject = builder_->CreateGlobalStringPtr("\r\n", ".rstr");
-        llvm::Value *idx = builder_->CreateCall(strcspn->getFunctionType(), strcspn, {bufPtr, reject});
+        llvm::Value *found = builder_->CreateCall(strcspn->getFunctionType(), strcspn, {bufPtr, reject});
+        // strcspn returns size_t, so the EOF branch has to be the same width —
+        // an i32 zero here was an invalid `select` operand and failed the
+        // module verifier.
+        llvm::Value *idx = select(llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), 0), found);
         llvm::Value *end = builder_->CreateInBoundsGEP(llvm::Type::getInt8Ty(ctx_), bufPtr, idx);
         builder_->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), 0), end);
         if (s.dest.has_value())
@@ -1225,7 +1241,8 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s, const
     else if (s.funcName == "read_int")
     {
         llvm::Function *atoi = getOrDeclareAtoi();
-        llvm::Value *val = builder_->CreateCall(atoi->getFunctionType(), atoi, {bufPtr});
+        llvm::Value *parsed = builder_->CreateCall(atoi->getFunctionType(), atoi, {bufPtr});
+        llvm::Value *val = select(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0), parsed);
         if (s.dest.has_value())
             storePlace(fs, *s.dest, val);
     }
@@ -1233,7 +1250,8 @@ void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s, const
     {
         llvm::Function *strtod = getOrDeclareStrtod();
         llvm::Value *endptr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_));
-        llvm::Value *val = builder_->CreateCall(strtod->getFunctionType(), strtod, {bufPtr, endptr});
+        llvm::Value *parsed = builder_->CreateCall(strtod->getFunctionType(), strtod, {bufPtr, endptr});
+        llvm::Value *val = select(llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), 0.0), parsed);
         if (s.dest.has_value())
             storePlace(fs, *s.dest, val);
     }

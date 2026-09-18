@@ -228,7 +228,13 @@ public:
     const std::string &getOriginName() const;
     const std::vector<Field> &getFields() const;
     const std::vector<Method> &getMethods() const;
-    void addMethods(std::vector<Method> methods);
+    /** Add or REFRESH the type's methods BY NAME: a method that already exists is
+     *  replaced in place, a new name is appended. The impl pre-pass attaches
+     *  best-effort signatures before any body is analyzed, and the full pass then
+     *  upserts the authoritative ones — appending there would leave both copies
+     *  and the method lookup would keep finding the stale one. Always lands on
+     *  the generic origin, like every other method mutation. */
+    void upsertMethods(std::vector<Method> methods);
     bool equals(const std::shared_ptr<Type> &other) const override;
     std::string toString() const override;
 

@@ -480,6 +480,19 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::substituteType(
 //  Pre-registration pass (forward declarations for the global scope)
 // ============================================================
 
+bool HIRSemanticAnalyzer::bareNameConflicts(const Symbol *existing) const
+{
+    if (!existing) return false;
+    // Locals, params, functions, types: the bare name really is taken.
+    if (existing->kind != SymbolKind::GlobalVar) return true;
+    // A module-level `let` is visible under its bare name only when it belongs
+    // to the ROOT module (internalName leaves it unprefixed there). A stdlib
+    // module's own global is keyed `math$base`, so a param named `base` in
+    // math.lis does not collide with a user's `let base = 10;` in test.lis —
+    // which is the case the stdlib relies on.
+    return currentModule_.empty();
+}
+
 void HIRSemanticAnalyzer::preRegister(HIRNode *item)
 {
     // Phase A: register top-level *names* only. Type creation happens in
@@ -533,6 +546,62 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
         sym->type = nullptr;
         SymbolTable::getInstance().insertSymbol(f->name, std::move(sym));
     }
+    else if (auto *v = dynamic_cast<HIRVarDecl *>(item))
+    {
+        // Module-level `let` (a constant, in practice). Registered HERE, in the
+        // name pass, because pass 1d promotes selective imports by looking the
+        // target up in the symbol table: `impt m { K };` used to fail with
+        // "module 'm' has no member 'K'" simply because the global's symbol was
+        // only created later, in pass 2. visit(HIRVarDecl) then UPDATES this slot
+        // in place (it must not re-insert: Scope::insert silently keeps the old
+        // symbol, so a second insert would leave the provisional type forever).
+        if (!v->isGlobal) return;
+        if (SymbolTable::getInstance().lookupSymbol(v->name)) return;
+        auto sym = std::make_unique<Symbol>();
+        sym->kind = SymbolKind::GlobalVar;
+        sym->name = v->name;
+        sym->type = bestEffortGlobalType(v);
+        sym->isMutable = v->isMutable;
+        SymbolTable::getInstance().insertSymbol(v->name, std::move(sym));
+        preRegisteredGlobals_.insert(v);
+    }
+}
+
+// Best-effort type of a module-level `let`, for the name pass above. Two
+// sources, in order: the explicit annotation, or the LITERAL initializer's
+// kind (globals must be literal-initialized — visit(HIRVarDecl) enforces it).
+// Anything else stays untyped until pass 2; type errors here are suppressed,
+// exactly like the function-signature pre-registration.
+std::shared_ptr<Type> HIRSemanticAnalyzer::bestEffortGlobalType(HIRVarDecl *decl)
+{
+    bool saved = suppressTypeErrors_;
+    suppressTypeErrors_ = true;
+
+    std::shared_ptr<Type> ty;
+    if (decl->hasExplicitType)
+    {
+        ty = resolveType(decl->rawType, *decl);
+    }
+    else if (decl->init.has_value())
+    {
+        if (auto *lit = dynamic_cast<HIRLiteral *>(decl->init.value().get()))
+        {
+            switch (lit->kind)
+            {
+            case HIRLiteral::Kind::Int: ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32); break;
+            case HIRLiteral::Kind::Float: ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64); break;
+            case HIRLiteral::Kind::Bool: ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL); break;
+            case HIRLiteral::Kind::Char: ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::CHAR); break;
+            case HIRLiteral::Kind::String:
+                ty = context->typeContext->getReference(
+                    context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+                break;
+            }
+        }
+    }
+
+    suppressTypeErrors_ = saved;
+    return ty;
 }
 
 // ---------------------------------------------------------------------------
@@ -542,14 +611,126 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
 // here are suppressed — the full analysis pass reports the authoritative ones.
 // ---------------------------------------------------------------------------
 
-void HIRSemanticAnalyzer::preRegisterFunctionType(HIRFunction *f,
-    const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns)
+// ---------------------------------------------------------------------------
+// Impl-method pre-registration (pass 1c-3)
+// ---------------------------------------------------------------------------
+// Every method's SIGNATURE is resolved and attached to its type BEFORE any
+// method body is analyzed. visit(HIRImpl) used to attach the method set only
+// after visiting all of the bodies, so a body calling a sibling
+// (`self.helper()`) failed with "struct 'X' has no method 'helper'": the
+// receiver's type genuinely had no methods yet (visit(HIRCall)'s Method branch
+// looks the name up in `customTy->getMethods()`). Best-effort signatures are
+// enough for that lookup; pass 2 refreshes them through the same upsert.
+void HIRSemanticAnalyzer::preRegisterMethodType(HIRImpl *impl, HIRFunction *m,
+    const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns,
+    std::vector<CustomType::Method> &out)
 {
-    auto *sym = SymbolTable::getInstance().lookupSymbol(f->name);
-    if (!sym) return;
+    m->isTraitMethod = impl->traitName.has_value();
+    if (impl->traitName.has_value())
+        m->associatedTrait = impl->traitName.value();
+
+    // The method SYMBOL is keyed `Struct::name` (visit(HIRImpl) uses the same
+    // rule). The HIR function's own `name` is the bare method name, so the
+    // top-level pre-registration helper cannot be reused for it directly.
+    const std::string funcName = impl->structName + "::" + m->name;
+    if (!SymbolTable::getInstance().lookupSymbol(funcName))
+    {
+        auto sym = std::make_unique<Symbol>();
+        sym->kind = SymbolKind::Function;
+        sym->name = funcName;
+        sym->type = nullptr;
+        SymbolTable::getInstance().insertSymbol(funcName, std::move(sym));
+    }
+
+    auto inferred = inferredReturns.find(m->name);
+    std::vector<std::shared_ptr<Type>> paramTypes;
+    std::shared_ptr<Type> funcType = resolveFunctionSignature(m,
+        (inferred != inferredReturns.end()) ? inferred->second : nullptr,
+        &paramTypes);
+    if (auto *sym = SymbolTable::getInstance().lookupSymbol(funcName))
+        sym->type = funcType;
+
+    // The parameter list the CALL path reads (argument checking, MIR). It is
+    // derived from the resolved types, receiver first, so the two can never
+    // drift apart.
+    std::vector<CustomType::Field> paramFields;
+    size_t typeIndex = 0;
+    if (m->isMethod && m->hasSelf && typeIndex < paramTypes.size())
+        paramFields.emplace_back("self", paramTypes[typeIndex++]);
+    for (auto &[pname, rawTy] : m->rawParams)
+    {
+        if (typeIndex >= paramTypes.size()) break;
+        paramFields.emplace_back(pname, paramTypes[typeIndex++]);
+    }
+
+    const std::string traitName = impl->traitName.has_value() ? impl->traitName.value() : "";
+    out.push_back(CustomType::Method{
+        m->name, traitName, paramFields, m->returnType, m->isStatic, impl->traitName.has_value()});
+}
+
+void HIRSemanticAnalyzer::preRegisterImplMethods(HIRImpl *impl)
+{
+    auto *structSym = lookupModuleAware(impl->structName);
+    if (!structSym || structSym->kind != SymbolKind::Struct) return;
+    auto baseStruct = std::dynamic_pointer_cast<CustomType>(structSym->type);
+    if (!baseStruct) return;
+
+    // Install the impl's type scope the way visit(HIRImpl) does, and restore it
+    // afterwards: this pass must not leak state into the passes that follow.
+    auto savedStruct = currentStructType;
+    auto savedGParams = structGParams;
+    currentStructType = baseStruct;
+    structGParams.clear();
+    if (baseStruct->isGeneric())
+    {
+        for (auto &gp : baseStruct->getGenericParams())
+        {
+            auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
+            structGParams[gpTy->getParamName()] = gpTy;
+        }
+    }
+    for (auto &gp : impl->gParams)
+        structGParams[gp->getParamName()] = gp;
 
     suppressTypeErrors_ = true;
 
+    // Best-effort return types for methods that infer theirs from the body —
+    // the same scan pass 1c-1 uses for top-level functions. Keyed by the BARE
+    // method name: the map is local to this impl, so two impls' `get` cannot
+    // collide the way a program-wide `f->name` key (`m$get`) would.
+    std::unordered_map<std::string, std::shared_ptr<Type>> inferredReturns;
+    for (auto &m : impl->methods)
+    {
+        if (m->hasReturnType || !m->body) continue;
+        std::unordered_map<std::string, std::shared_ptr<Type>> paramTypes;
+        for (auto &[pname, rawTy] : m->rawParams)
+            paramTypes[pname] = resolveType(rawTy, *m);
+        if (auto ty = scanInferredReturn(m->body.get(), paramTypes, inferredReturns))
+            inferredReturns[m->name] = ty;
+    }
+
+    std::vector<CustomType::Method> methods;
+    for (auto &m : impl->methods)
+        preRegisterMethodType(impl, m.get(), inferredReturns, methods);
+    baseStruct->upsertMethods(std::move(methods));
+
+    suppressTypeErrors_ = false;
+    currentStructType = savedStruct;
+    structGParams = std::move(savedGParams);
+}
+
+// Signature resolution shared by the top-level function pre-pass (pass 1c-2)
+// and the impl-method pre-pass (pass 1c-3). Fills `f->type` / `f->returnType`
+// and hands the resolved parameter types back through `paramTypesOut`.
+//
+// It deliberately does NOT touch `f->params`: visit(HIRFunction) APPENDS to
+// that vector (it also appends the implicit `self`), so anything written here
+// would survive as a duplicate entry. A caller that needs the name/type pairs
+// builds them from `f->rawParams` plus `paramTypesOut`.
+std::shared_ptr<Type> HIRSemanticAnalyzer::resolveFunctionSignature(HIRFunction *f,
+    const std::shared_ptr<Type> &inferredRet,
+    std::vector<std::shared_ptr<Type>> *paramTypesOut)
+{
     // Bring the function's own generic params into scope so `it: T` resolves
     // to the generic param T rather than a silent VOID. resolveType only
     // consults functionInfo.gParams when isInFunction is set — mimic that here.
@@ -560,24 +741,29 @@ void HIRSemanticAnalyzer::preRegisterFunctionType(HIRFunction *f,
         functionInfo.gParams[gp->getParamName()] = gp;
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    // A METHOD's signature starts with the implicit receiver, exactly as
+    // visit(HIRFunction) builds it: the method-call path reads params[0] as
+    // `self` (`instantiatedFuncType->getParams()[0]`) and would index past the
+    // end of a receiver-less signature. It also must be the reference form of
+    // the struct for a `&self` / `&mut self` receiver.
+    if (f->isMethod && f->hasSelf && currentStructType)
+    {
+        std::shared_ptr<Type> selfTy = currentStructType;
+        if (f->selfIsRef)
+            selfTy = context->typeContext->getReference(currentStructType, f->selfIsMut);
+        f->selfType = selfTy;
+        paramTypes.push_back(selfTy);
+    }
     for (auto &[pname, rawTy] : f->rawParams)
         paramTypes.push_back(resolveType(rawTy, *f));
 
-    // If the return type is inferred from the body, use the best-effort value
-    // from the pass-1c-1 scan (or VOID) so a forward call still sees a
-    // callable symbol with a usable signature; visit(HIRFunction) corrects it.
     std::shared_ptr<Type> retTy;
     if (f->hasReturnType)
-    {
         retTy = resolveType(f->rawReturnType, *f);
-    }
+    else if (inferredRet)
+        retTy = inferredRet; // best-effort scan; visit(HIRFunction) corrects it
     else
-    {
-        auto it = inferredReturns.find(f->name);
-        retTy = (it != inferredReturns.end() && it->second)
-                    ? it->second
-                    : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-    }
+        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
     functionInfo.gParams = std::move(savedGParams);
     functionInfo.isInFunction = savedInFunction;
@@ -588,8 +774,24 @@ void HIRSemanticAnalyzer::preRegisterFunctionType(HIRFunction *f,
     else
         funcType = context->typeContext->getFunction(paramTypes, retTy);
 
-    sym->type = funcType;
+    f->returnType = retTy;
     f->type = funcType;
+    if (paramTypesOut)
+        *paramTypesOut = std::move(paramTypes);
+    return funcType;
+}
+
+void HIRSemanticAnalyzer::preRegisterFunctionType(HIRFunction *f,
+    const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns)
+{
+    auto *sym = SymbolTable::getInstance().lookupSymbol(f->name);
+    if (!sym) return;
+
+    suppressTypeErrors_ = true;
+
+    auto it = inferredReturns.find(f->name);
+    const std::shared_ptr<Type> inferred = (it != inferredReturns.end()) ? it->second : nullptr;
+    sym->type = resolveFunctionSignature(f, inferred);
 
     suppressTypeErrors_ = false;
 }
@@ -984,6 +1186,7 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
     if (!node) return;
 
     // Pass 1: register all top-level names so forward references work.
+    preRegisteredGlobals_.clear();
     for (size_t i = 0; i < node->items.size(); ++i)
     {
         setModuleForItem(i);
@@ -1168,6 +1371,16 @@ void HIRSemanticAnalyzer::visit(HIRProgram *node)
         auto &item = node->items[i];
         if (auto *f = dynamic_cast<HIRFunction *>(item.get()))
             preRegisterFunctionType(f, inferredReturns);
+    }
+
+    // Pass 1c-3: attach every impl's method signatures to its type, so a method
+    // body can call a sibling (`self.helper()`), including one declared in a
+    // LATER impl block (see preRegisterImplMethods).
+    for (size_t i = 0; i < node->items.size(); ++i)
+    {
+        setModuleForItem(i);
+        if (auto *impl = dynamic_cast<HIRImpl *>(node->items[i].get()))
+            preRegisterImplMethods(impl);
     }
 
     suppressTypeErrors_ = false;
@@ -1667,18 +1880,34 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
         // generic-aware for methods of generic structs (their genericParams
         // include the struct's gParams). Rebuilding via getFunction here would
         // strip that genericity and break monomorphization.
+        //
+        // The symbol normally EXISTS already (pass 1c-3 pre-registered it), and
+        // Scope::insert refuses duplicates, so the existing symbol must be
+        // refreshed IN PLACE — re-inserting would silently keep the best-effort
+        // signature the pre-pass wrote.
         auto funcType = method->type;
-
-        auto funcSym = std::make_unique<Symbol>();
-        funcSym->kind = SymbolKind::Function;
-        funcSym->name = funcName;
-        funcSym->type = funcType;
-        SymbolTable::getInstance().insertSymbol(funcName, std::move(funcSym));
-        method->funcSymbol = SymbolTable::getInstance().lookupSymbol(funcName);
+        if (auto *existing = SymbolTable::getInstance().lookupSymbol(funcName))
+        {
+            existing->kind = SymbolKind::Function;
+            existing->type = funcType;
+            method->funcSymbol = existing;
+        }
+        else
+        {
+            auto funcSym = std::make_unique<Symbol>();
+            funcSym->kind = SymbolKind::Function;
+            funcSym->name = funcName;
+            funcSym->type = funcType;
+            SymbolTable::getInstance().insertSymbol(funcName, std::move(funcSym));
+            method->funcSymbol = SymbolTable::getInstance().lookupSymbol(funcName);
+        }
     }
 
     // Methods always go on the origin (baseStruct), not the self instantiation.
-    baseStruct->addMethods(methods);
+    // UPSERT, not append: pass 1c-3 already attached best-effort signatures so
+    // that method bodies could resolve their siblings, and these authoritative
+    // ones replace them.
+    baseStruct->upsertMethods(methods);
 
     // Trait conformance checks (unchanged from before, but using baseStruct for self comparison)
     if (traitType)
@@ -1842,7 +2071,7 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
 
     for (auto &[pname, rawTy] : node->rawParams)
     {
-        if (SymbolTable::getInstance().lookupSymbol(pname))
+        if (bareNameConflicts(SymbolTable::getInstance().lookupSymbol(pname)))
             log(*node, "param '" + pname + "' shadows a previous definition.");
 
         auto resolvedTy = resolveType(rawTy, *node);
@@ -2747,8 +2976,20 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
     // Variable shadowing is deliberately disallowed (design principle: a name
     // refers to exactly one binding anywhere in scope). This also rejects a
     // loop variable shadowing an outer binding, which is intended.
-    if (SymbolTable::getInstance().lookupSymbol(node->name))
-        log(*node, "variable '" + node->name + "' already exists in this scope.");
+    //
+    // A module-level `let` was pre-registered by the name pass (see
+    // preRegister): finding THAT slot is not a redefinition, it is this very
+    // declaration, so the check skips it and the symbol is updated in place
+    // below (re-inserting would silently keep the provisional type, because
+    // Scope::insert refuses duplicates).
+    Symbol *preRegisteredGlobal = nullptr;
+    if (auto *existing = SymbolTable::getInstance().lookupSymbol(node->name))
+    {
+        if (preRegisteredGlobals_.count(node))
+            preRegisteredGlobal = existing; // this very declaration's slot
+        else if (bareNameConflicts(existing))
+            log(*node, "variable '" + node->name + "' already exists in this scope.");
+    }
 
     std::shared_ptr<Type> initType;
 
@@ -2855,15 +3096,27 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         initialized = true; // reported once; avoid cascading uninitialized-use errors
     }
 
-    auto sym = std::make_unique<Symbol>();
-    sym->kind = node->isGlobal ? SymbolKind::GlobalVar : SymbolKind::LocalVar;
-    sym->name = node->name;
-    sym->type = node->type;
-    sym->isMutable = node->isMutable;
-    sym->initialized = initialized;
-    SymbolTable::getInstance().insertSymbol(node->name, std::move(sym));
+    if (preRegisteredGlobal)
+    {
+        // Refresh the slot the name pass created: same object, authoritative type.
+        preRegisteredGlobal->kind = SymbolKind::GlobalVar;
+        preRegisteredGlobal->type = node->type;
+        preRegisteredGlobal->isMutable = node->isMutable;
+        preRegisteredGlobal->initialized = initialized;
+        node->varSymbol = preRegisteredGlobal;
+    }
+    else
+    {
+        auto sym = std::make_unique<Symbol>();
+        sym->kind = node->isGlobal ? SymbolKind::GlobalVar : SymbolKind::LocalVar;
+        sym->name = node->name;
+        sym->type = node->type;
+        sym->isMutable = node->isMutable;
+        sym->initialized = initialized;
+        SymbolTable::getInstance().insertSymbol(node->name, std::move(sym));
 
-    node->varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
+        node->varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
+    }
 
     // Stage 3: derive this binding's reference / ref-field origins (locals only).
     setupBindingOrigins(node);

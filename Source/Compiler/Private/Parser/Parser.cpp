@@ -304,18 +304,29 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
 
     loadModule(canonical);
 
-    // Promote selective-import names into THIS parser's name sets, so bare
-    // `Option::Some` / `String { .. }` references dispatch correctly. Enum
-    // promotion goes through the shared knownEnums (keyed by the importing
-    // module's internal name); type names join promotedTypes (separate from
+    // Promote selective-import names into THIS parser's name sets — but only
+    // the TYPE names. The parser needs them so bare `Option::Some` and
+    // `String { .. }` references dispatch correctly: enums go through the
+    // shared knownEnums, structs/traits join promotedTypes (separate from
     // knownTypes — the module's own definition must not trip mutidefined).
+    //
+    // VALUES (functions, module-level `let`) are deliberately NOT promoted
+    // here: they are not types, and adding them made
+    //     impt mylib { E_TOK };  ...  if e == E_TOK { ret 1; }
+    // treat the `{` as a STRUCT LITERAL body (`expected member name`), because
+    // the struct-literal decision below consults promotedTypes. The semantic
+    // analyzer promotes the value names into the symbol table instead (its
+    // pass 1d), which is where a bare value name has to resolve.
     if (binding.selective)
     {
         for (const auto &symName : binding.symbols)
         {
-            if (context->knownEnums.count(internalName(canonical, symName)))
-                context->knownEnums.insert(internalName(currentModule_, symName));
-            promotedTypes.insert(internalName(currentModule_, symName));
+            const std::string sourceName = internalName(canonical, symName);
+            const std::string localName = internalName(currentModule_, symName);
+            if (context->knownEnums.count(sourceName))
+                context->knownEnums.insert(localName);
+            if (knownTypes.count(sourceName))
+                promotedTypes.insert(localName);
         }
     }
 

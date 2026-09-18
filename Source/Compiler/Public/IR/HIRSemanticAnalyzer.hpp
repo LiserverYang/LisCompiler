@@ -50,6 +50,18 @@ private:
     /// Context::stmtAttributions). Reference-side lookups use it to resolve
     /// bare names to the module's internal names.
     std::string currentModule_;
+
+    /** Module-level `let` declarations whose symbol slot the name pass created
+     *  (preRegister). visit(HIRVarDecl) refreshes THOSE in place instead of
+     *  reporting a redefinition — a second global of the same name is still a
+     *  real error and is not in this set. */
+    std::unordered_set<const HIRVarDecl *> preRegisteredGlobals_;
+
+    /** Does a bare (unprefixed) local/param name conflict with the symbol it
+     *  resolves to? Only a module-level `let` of the ROOT module shares the bare
+     *  namespace (a non-root module's globals are keyed `mod$name`, so a bare
+     *  lookup cannot see them); anything else is a same-scope conflict. */
+    bool bareNameConflicts(const Symbol *existing) const;
     /// Source FILE of the top-level item currently being analyzed (same
     /// attribution). Diagnostics attach to this path — Context::filePath is
     /// the main file by the time sema runs, so module items would otherwise
@@ -393,6 +405,11 @@ private:
 
     // First pass: register top-level names so forward refs work
     void preRegister(HIRNode *item);
+    /** Best-effort type of a module-level `let` for the name pass: the explicit
+     *  annotation, or the literal initializer's kind. Type errors are
+     *  suppressed (pass 2 is authoritative). */
+    std::shared_ptr<Type> bestEffortGlobalType(HIRVarDecl *decl);
+
     /** Build the CustomType for a struct (used by preRegister and full analysis). */
     std::shared_ptr<Type> buildStructType(HIRStruct *node);
     /** Reject types that contain themselves BY VALUE (`struct A { pub a: A }`,
@@ -406,6 +423,25 @@ private:
     /** Build the CustomType for an enum (fat tagged union) — used by the
      *  pre-registration pass and the full analysis. */
     std::shared_ptr<Type> buildEnumType(HIREnum *node);
+    /** Resolve a function's/method's signature into a FunctionType (fills
+     *  `f->type` and `f->returnType`; hands back the resolved parameter types).
+     *  `inferredRet` supplies the return type when the body infers it. Shared by
+     *  the function pre-pass and the impl-method pre-pass. */
+    std::shared_ptr<Type> resolveFunctionSignature(HIRFunction *f,
+        const std::shared_ptr<Type> &inferredRet,
+        std::vector<std::shared_ptr<Type>> *paramTypesOut = nullptr);
+
+    /** Resolve ONE method's best-effort signature and append its
+     *  CustomType::Method entry (symbol keyed `Struct::name`). */
+    void preRegisterMethodType(HIRImpl *impl,
+        HIRFunction *method,
+        const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns,
+        std::vector<CustomType::Method> &out);
+
+    /** Pass 1c-3: attach every impl's method signatures to its type BEFORE any
+     *  method body is analyzed, so `self.helper()` resolves. */
+    void preRegisterImplMethods(HIRImpl *impl);
+
     /** Best-effort function-signature resolution for the pre-registration pass. */
     void preRegisterFunctionType(HIRFunction *f, const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns = {});
 

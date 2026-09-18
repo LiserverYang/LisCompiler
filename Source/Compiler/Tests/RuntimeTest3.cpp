@@ -816,6 +816,110 @@ TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
                       " fn main() -> i32 { let p = P { a: A { v: 1 } }; p.a; ret 0; }",
         "implements Drop");
 }
+// ── Four language pain points, fixed 2026-09-18 ────────────────────────────────
+//
+// (1) a method body may call a SIBLING method — the impl's signatures are now
+//     attached to the type before any body is analyzed (pass 1c-3);
+// (2) a selectively imported module-level `let` no longer makes the following
+//     `{` parse as a struct literal;
+// (3) `read_line`/`read_int`/`read_f64` report EOF instead of returning the
+//     previous line forever;
+// (4) module-level `let` names can be selectively imported at all.
+
+TEST_F(RuntimeTest, MethodCallsSiblingMethod)
+{
+    expectRun("struct S { pub n: i32 }"
+              " impl S {"
+              "   fn inc(self: &mut S) -> i32 { self.n = self.n + 1; ret self.n; }"
+              "   fn twice(self: &mut S) -> i32 { let a = self.inc(); let b = self.inc(); ret a + b; }"
+              " }"
+              " fn main() -> i32 { let mut s = S { n: 0 }; ret s.twice(); }",
+        3);
+}
+
+TEST_F(RuntimeTest, MethodCallsSiblingAcrossImplBlocks)
+{
+    // The callee is declared in a LATER impl block (and after its caller).
+    expectRun("struct S { pub n: i32 }"
+              " impl S { fn b(self: &S) -> i32 { ret self.a() + 1; } }"
+              " impl S { fn a(self: &S) -> i32 { ret 41; } }"
+              " fn main() -> i32 { let s = S { n: 0 }; ret s.b(); }",
+        42);
+}
+
+TEST_F(RuntimeTest, MethodCallsStaticSibling)
+{
+    expectRun("struct S { pub n: i32 }"
+              " impl S { fn make() -> S { ret S { n: 7 }; }"
+              "          fn go(self: &S) -> i32 { let t = S::make(); ret t.n; } }"
+              " fn main() -> i32 { let s = S { n: 0 }; ret s.go(); }",
+        7);
+}
+
+TEST_F(RuntimeTest, ValueSelfMethodCallsSibling)
+{
+    expectRun("struct S { pub n: i32 }"
+              " impl S { fn get(self: &S) -> i32 { ret self.n; }"
+              "          fn twice(self: &S) -> i32 { ret self.get() + self.get(); } }"
+              " fn main() -> i32 { let s = S { n: 3 }; ret s.twice(); }",
+        6);
+}
+
+TEST_F(RuntimeTest, ImportedConstantInIfCondition)
+{
+    // `if get() == K {` — the condition ends in a value name that came from a
+    // selective import. It used to be promoted into the parser's TYPE set, so
+    // the `{` was parsed as a struct-literal body (E2002 expected member name).
+    ASSERT_TRUE(compileMulti("impt m { K, get };\n"
+                             "fn main() -> i32 { if get() == K { ret 1; } ret 0; }",
+        {{"m", "let K = 7;\nfn get() -> i32 { ret K; }"}}));
+    EXPECT_EQ(linkAndRun(), 1);
+}
+
+TEST_F(RuntimeTest, SelectiveImportOfGlobalConstant)
+{
+    ASSERT_TRUE(compileMulti("impt m { K };\nfn main() -> i32 { ret K + 1; }",
+        {{"m", "let K = 7;"}}));
+    EXPECT_EQ(linkAndRun(), 8);
+}
+
+TEST_F(RuntimeTest, QualifiedGlobalAccess)
+{
+    // The module-qualified spelling kept working all along; guard it.
+    ASSERT_TRUE(compileMulti("impt m;\nfn main() -> i32 { ret m::K; }",
+        {{"m", "let K = 7;"}}));
+    EXPECT_EQ(linkAndRun(), 7);
+}
+
+TEST_F(RuntimeTest, SelectiveImportMissingMemberStillRejected)
+{
+    std::string diag;
+    bool ok = compileMulti("impt m { NOPE };\nfn main() -> i32 { ret 0; }",
+        {{"m", "let K = 7;"}}, &diag);
+    EXPECT_FALSE(ok) << "importing a name the module does not export must fail";
+}
+
+TEST_F(RuntimeTest, ReadLineLoopTerminatesAtEof)
+{
+    // At end of input read_line used to return the PREVIOUS line forever, so
+    // this loop never ended; now it yields an empty string.
+    expectOutputWithInput("fn main() -> i32 { while true { let line = read_line();"
+                          " let s = String::from_lit(line); if s.len() == 0 { break; }"
+                          " print_str(s.to_cstr()); println(); } ret 0; }",
+        "a\nb\n", "a\nb\n", 0);
+}
+
+TEST_F(RuntimeTest, ReadIntAtEofIsZero)
+{
+    expectOutputWithInput("fn main() -> i32 { print_int(read_int()); println(); ret 0; }",
+        "", "0\n", 0);
+}
+
+TEST_F(RuntimeTest, ReadFloatAtEofIsZero)
+{
+    expectOutputWithInput("fn main() -> i32 { print_float(read_f64()); println(); ret 0; }",
+        "", "0.000000\n", 0);
+}
 // ── Nesting depth limit (--max-depth, E2018) ───────────────────────────────────
 //
 // The parser, the HIR builder, the analyzer, the MIR builder and the LLVM

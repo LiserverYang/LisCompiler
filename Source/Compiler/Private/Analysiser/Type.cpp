@@ -4,6 +4,8 @@
  */
 
 #include "Analysiser/Type.hpp"
+
+#include <algorithm>
 #include "Core/ModuleUtils.hpp"
 
 #include <cassert>
@@ -230,16 +232,27 @@ const std::vector<CustomType::Method> &CustomType::getMethods() const
     return methods;
 }
 
-void CustomType::addMethods(std::vector<Method> methods)
+void CustomType::upsertMethods(std::vector<Method> methods)
 {
     // Methods always go on the origin.
     if (!genericArgs.empty() && genericOrigin)
     {
-        genericOrigin->addMethods(std::move(methods));
+        genericOrigin->upsertMethods(std::move(methods));
         return;
     }
+    // Replace by NAME, never blindly append: the same method is registered
+    // twice on purpose (best-effort signature from the impl pre-pass, then the
+    // authoritative one from the full pass).
     for (auto &m : methods)
-        this->methods.push_back(std::move(m));
+    {
+        auto existing = std::find_if(this->methods.begin(), this->methods.end(),
+            [&](const Method &candidate)
+            { return candidate.name == m.name; });
+        if (existing != this->methods.end())
+            *existing = std::move(m);
+        else
+            this->methods.push_back(std::move(m));
+    }
 }
 
 bool CustomType::equals(const std::shared_ptr<Type> &other) const
