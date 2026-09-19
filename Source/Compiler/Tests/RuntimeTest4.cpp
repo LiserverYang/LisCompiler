@@ -1277,7 +1277,7 @@ TEST_F(RuntimeTest, VecForLoopIteratesInOrder)
               "    let mut i = 0;\n"
               "    while i < 5 { v.push(i * 2); i = i + 1; }\n"
               "    let mut s = 0;\n"
-              "    for e in v { s = s + e; }\n"
+              "    for e in move v { s = s + e; }\n"
               "    ret s - 20; }",
         0);
 }
@@ -1403,7 +1403,7 @@ TEST_F(RuntimeTest, VecNonCopyForLoopKeepsOrder)
                  "    v.push(String::from_lit(\"a\"));\n"
                  "    v.push(String::from_lit(\"bb\"));\n"
                  "    v.push(String::from_lit(\"ccc\"));\n"
-                 "    for s in v { print_str(s.to_cstr()); print_int(s.len()); }\n"
+                 "    for s in move v { print_str(s.to_cstr()); print_int(s.len()); }\n"
                  "    println();\n"
                  "    ret 0; }",
         "a1bb2ccc3\n", 0);
@@ -1658,4 +1658,390 @@ TEST_F(RuntimeTest, MatchScrutineeReservationEndsBeforeTheArms)
               "    }\n"
               "    ret c - 12; }",
         0);
+}
+
+// ── unary value operators: - ! ~ + (2026-09-19) ──────────────────────────────
+//
+// '-' is defined on the numeric primitives, '!' on bool, '~' on the integers;
+// '+x' is parsed and erased. None of them is overloadable yet (a Neg/Not trait
+// pair lands separately), and all three bind tighter than any binary operator.
+
+// '-' negates an i32/i64/f64 place, value, field, element or call.
+TEST_F(RuntimeTest, UnaryNegationOnValues)
+{
+    expectRun("fn f(v: i32) -> i32 { ret v; }\n"
+              "fn main() -> i32 { let x = 5;\n"
+              "    if -x != 0 - 5 { ret 1; }\n"
+              "    if - -x != 5 { ret 2; }\n"
+              "    let a = [7, 8];\n"
+              "    if -a[0] != 0 - 7 { ret 3; }\n"
+              "    if -f(3) != 0 - 3 { ret 4; }\n"
+              "    let s = S { v: 4 };\n"
+              "    if -s.v != 0 - 4 { ret 5; }\n"
+              "    ret 0; }\n"
+              "struct S { pub v: i32 }\n",
+        0);
+}
+
+// float negation lowers to fneg (not 0.0 - f, which is the same value here but
+// a different instruction).
+TEST_F(RuntimeTest, UnaryNegationOnFloats)
+{
+    expectRun("fn main() -> i32 { let f = 1.5;\n"
+              "    if -f > 0.0 { ret 1; }\n"
+              "    if (0.0 - -f) != 1.5 { ret 2; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// '!' is logical not; it nests, and it is not the bit-complement of the
+// integers (that is '~').
+TEST_F(RuntimeTest, UnaryNotOnBool)
+{
+    expectRun("fn main() -> i32 { let b = true;\n"
+              "    if !b { ret 1; }\n"
+              "    if !false == false { ret 2; }\n"
+              "    if !!b == false { ret 3; }\n"
+              "    let b2 = !b;\n"
+              "    if b2 { ret 4; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// '~x' is the bitwise complement: ~x == -(x + 1).
+TEST_F(RuntimeTest, UnaryBitNotOnIntegers)
+{
+    expectRun("fn main() -> i32 { let x = 5;\n"
+              "    if ~x != 0 - 6 { ret 1; }\n"
+              "    if ~0 != 0 - 1 { ret 2; }\n"
+              "    if ~x + 6 != 0 { ret 3; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// Unary operators bind tighter than every binary operator, but a parenthesised
+// operand keeps its own grouping.
+TEST_F(RuntimeTest, UnaryPrecedence)
+{
+    expectRun("fn main() -> i32 { let a = 3; let b = true;\n"
+              "    if -a * 2 != 0 - 6 { ret 1; }\n"
+              "    if !b && b { ret 2; }\n"
+              "    if ~a + 4 != 0 { ret 3; }\n"
+              "    if -(a + 2) != 0 - 5 { ret 4; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// '-<literal>' folds into a negative literal, so a global initializer (which must
+// be a literal) keeps working: 'let g = -5;'.
+TEST_F(RuntimeTest, NegatedGlobalLiteral)
+{
+    expectRun("let g = -5;\n"
+              "fn main() -> i32 { if g != 0 - 5 { ret 1; } ret g + 5; }\n",
+        0);
+}
+
+// The three operators are defined on the primitives only: '-' on the numeric
+// types, '!' on bool, '~' on the integers. char and the aggregate types have no
+// unary operator (an overloadable trait pair is a separate change).
+TEST_F(RuntimeTest, UnaryOperandTypesRejected)
+{
+    expectCompileFail("fn main() -> i32 { let b = true; let x = -b; ret 0; }\n",
+        "operator '-' cannot be applied to type 'bool'");
+    expectCompileFail("fn main() -> i32 { let x = !5; ret 0; }\n",
+        "operator '!' cannot be applied to type 'int32'");
+    expectCompileFail("fn main() -> i32 { let f = 1.5; let x = ~f; ret 0; }\n",
+        "operator '~' cannot be applied to type 'float64'");
+    expectCompileFail("fn main() -> i32 { let c = 'a'; let x = -c; ret 0; }\n",
+        "operator '-' cannot be applied to type 'char'");
+}
+
+// ── compound assignment: x op= y (2026-09-19) ────────────────────────────────
+//
+// 'x op= y' means 'x = x op y' with the target place evaluated ONCE. The
+// operand rules are the binary operator's, restricted to what lowers to a
+// primitive binary op (no operator-trait overloading yet).
+
+// 'x op= y' is 'x = x op y' for the five arithmetic operators.
+TEST_F(RuntimeTest, CompoundAssignAllFiveOperators)
+{
+    expectRun("fn main() -> i32 { let mut x = 10;\n"
+              "    x += 5; if x != 15 { ret 1; }\n"
+              "    x -= 3; if x != 12 { ret 2; }\n"
+              "    x *= 2; if x != 24 { ret 3; }\n"
+              "    x /= 4; if x != 6 { ret 4; }\n"
+              "    x %= 4; if x != 2 { ret 5; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// The target can be any assignable place: a local, a field (through &mut self),
+// an array element, a Vec element (the Index/IndexMut trait), a dereferenced
+// reference and a module-level global.
+TEST_F(RuntimeTest, CompoundAssignPlaces)
+{
+    expectRun("impt vec { Vec };\n"
+              "let counter = 0;\n"
+              "struct P { pub x: i32 }\n"
+              "impl P { fn bump(self: &mut P) { self.x += 2; } }\n"
+              "fn main() -> i32 {\n"
+              "    let mut p = P { x: 1 }; p.bump();\n"
+              "    if p.x != 3 { ret 1; }\n"
+              "    let mut a = [1, 2, 3]; a[1] += 10;\n"
+              "    if a[1] != 12 { ret 2; }\n"
+              "    let mut v = Vec<i32>::new(); v.push(100); v[0] += 5;\n"
+              "    if v[0] != 105 { ret 3; }\n"
+              "    let mut z = 7; let r = &mut z; *r += 1;\n"
+              "    if z != 8 { ret 4; }\n"
+              "    counter += 4;\n"
+              "    if counter != 4 { ret 5; }\n"
+              "    let mut f = 1.5; f *= 2.0;\n"
+              "    if f != 3.0 { ret 6; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// The distinguishing property of a compound assignment: the target place is
+// evaluated ONCE, so an index with a side effect runs a single time.
+TEST_F(RuntimeTest, CompoundAssignEvaluatesItsIndexOnce)
+{
+    expectRun("impt vec { Vec };\n"
+              "let calls = 0;\n"
+              "fn idx() -> i32 { calls = calls + 1; ret 0; }\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
+              "    v[idx()] += 41;\n"
+              "    if calls != 1 { ret 1; }\n"
+              "    if v[0] != 42 { ret 2; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// ... and it computes exactly what the expanded form computes.
+TEST_F(RuntimeTest, CompoundAssignMatchesTheExplicitForm)
+{
+    expectRun("fn main() -> i32 { let mut a = 6; let mut b = 6;\n"
+              "    a *= 7; b = b * 7;\n"
+              "    if a != b { ret 1; }\n"
+              "    let mut arr = [2, 4]; let mut arr2 = [2, 4];\n"
+              "    arr[1] += 3; arr2[1] = arr2[1] + 3;\n"
+              "    if arr[1] != arr2[1] { ret 2; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// The operand rules are the binary operator's, plus the assignment's: the target
+// must be mutable, the operator must exist for the type, and both operands must
+// have that same type.
+TEST_F(RuntimeTest, CompoundAssignRejectedShapes)
+{
+    expectCompileFail("fn main() -> i32 { let x = 1; x += 1; ret 0; }\n",
+        "cannot assign to immutable variable");
+    expectCompileFail("fn main() -> i32 { let mut b = true; b += true; ret 0; }\n",
+        "operator '+=' cannot be applied to type 'bool'");
+    expectCompileFail("fn main() -> i32 { let mut x = 1; x += 1.5; ret 0; }\n",
+        "operands of '+=' must have the same type");
+}
+
+// ── for: borrow by default, consume with move (2026-09-19) ───────────────────
+//
+// 'for x in <place>' lends the collection - the loop walks it through iter()
+// and each step hands out &T - while 'for x in move <place>' consumes it and
+// hands out T. An rvalue (range(1, 5), Countdown::new(3)) can only be
+// consumed. The lending form holds the borrow for the loop's whole duration.
+
+// 'for e in v' LENDS a place: the loop walks v through iter() and hands out &T,
+// so v is untouched and usable (even growable) once the loop is over.
+TEST_F(RuntimeTest, ForBorrowsAPlaceAndKeepsItUsable)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(10); v.push(20); v.push(30);\n"
+              "    let mut s = 0;\n"
+              "    for e in v { s = s + *e; }\n"
+              "    if s != 60 { ret 1; }\n"
+              "    if v.len() != 3 { ret 2; }\n"
+              "    v.push(40);\n"
+              "    if v.len() != 4 { ret 3; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// The lending form is what makes a Vec of Strings walkable without taking the
+// elements out: each step hands out &String.
+TEST_F(RuntimeTest, ForBorrowsNonCopyElements)
+{
+    expectOutput("impt vec { Vec };\n"
+                 "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                 "    v.push(String::from_lit(\"ab\")); v.push(String::from_lit(\"cde\"));\n"
+                 "    for s in v { print_str(s.to_cstr()); print_int(s.len()); }\n"
+                 "    println();\n"
+                 "    if v.len() != 2 { ret 1; }\n"
+                 "    ret 0; }\n",
+        "ab2cde3\n", 0);
+}
+
+// The collection stays borrowed for the whole loop: pushing in the body would
+// reallocate the buffer under the iterator, so it is rejected (E4001).
+TEST_F(RuntimeTest, ForBorrowBodyCannotMutateTheSource)
+{
+    expectCompileFail("impt vec { Vec };\n"
+        "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
+        "    for e in v { v.push(2); }\n"
+        "    ret 0; }\n",
+        "because it is already borrowed");
+}
+
+// 'for x in move v' consumes the collection and hands out T by value - and the
+// collection is gone afterwards.
+TEST_F(RuntimeTest, ForMoveConsumesThePlace)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(1); v.push(2); v.push(3);\n"
+              "    let mut s = 0;\n"
+              "    for x in move v { s = s + x; }\n"
+              "    ret s - 6; }\n",
+        0);
+    expectCompileFail("impt vec { Vec };\n"
+        "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
+        "    for x in move v { }\n"
+        "    ret v.len(); }\n",
+        "use of moved value");
+}
+
+// range(1, 5) is an rvalue: it cannot be lent (the temporary dies with the
+// binding), so a non-move loop over it consumes it - unchanged behaviour.
+TEST_F(RuntimeTest, ForOverTemporaryStillConsumes)
+{
+    expectRun("fn main() -> i32 { let mut s = 0;\n"
+              "    for i in range(1, 5) { s = s + i; }\n"
+              "    ret s - 10; }\n",
+        0);
+}
+
+// A field is a place too: 'for e in b.items' borrows the field.
+TEST_F(RuntimeTest, ForOverFieldBorrowsTheField)
+{
+    expectRun("impt vec { Vec };\n"
+              "struct Bag { pub items: Vec<i32> }\n"
+              "fn main() -> i32 { let mut b = Bag { items: Vec<i32>::new() };\n"
+              "    b.items.push(4); b.items.push(5);\n"
+              "    let mut s = 0;\n"
+              "    for e in b.items { s = s + *e; }\n"
+              "    if s != 9 { ret 1; }\n"
+              "    if b.items.len() != 2 { ret 2; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// Nested lending loops keep both collections borrowed, independently.
+TEST_F(RuntimeTest, ForBorrowNestedLoops)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut a = Vec<i32>::new(); a.push(1); a.push(2);\n"
+              "    let mut b = Vec<i32>::new(); b.push(10); b.push(20);\n"
+              "    let mut s = 0;\n"
+              "    for x in a { for y in b { s = s + *x * *y; } }\n"
+              "    if a.len() != 2 || b.len() != 2 { ret 1; }\n"
+              "    ret s - 90; }\n",
+        0);
+}
+
+// A named value whose type is a pure ITERATOR (not a collection with an iter()
+// method) must be consumed explicitly - the documented escape hatch.
+TEST_F(RuntimeTest, ForNamedPureIteratorNeedsMove)
+{
+    expectCompileFail("fn main() -> i32 { let r = range(1, 3); let mut s = 0;\n"
+        "    for i in r { s = s + i; }\n"
+        "    ret s; }\n",
+        "has no method 'iter'");
+}
+
+// ── let ... else (2026-09-19) ────────────────────────────────────────────────
+//
+// 'let x = f() else fallback;' binds the payload of an Option/Result and runs
+// the fallback expression on the None/Err path. The fallback must have the
+// payload's type (a diverging one is compatible through never).
+
+// 'let x = maybe() else fallback;' binds the Some payload, or falls back on None.
+TEST_F(RuntimeTest, LetElseOptionBothPaths)
+{
+    expectRun("fn maybe(b: bool) -> Option<i32> { if b { ret Option::Some(5); } ret Option::None; }\n"
+              "fn main() -> i32 {\n"
+              "    let a = maybe(true) else 0;\n"
+              "    if a != 5 { ret 1; }\n"
+              "    let b = maybe(false) else 0;\n"
+              "    if b != 0 { ret 2; }\n"
+              "    let mut c = maybe(false) else 41;\n"
+              "    c += 1;\n"
+              "    if c != 42 { ret 3; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// The same statement unwraps a Result (Ok payload, Err falls back).
+TEST_F(RuntimeTest, LetElseResultBothPaths)
+{
+    expectRun("fn res(b: bool) -> Result<i32, i32> { if b { ret Result::Ok(9); } ret Result::Err(3); }\n"
+              "fn main() -> i32 {\n"
+              "    let a = res(true) else 0;\n"
+              "    if a != 9 { ret 1; }\n"
+              "    let b = res(false) else 0 - 1;\n"
+              "    if b != 0 - 1 { ret 2; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// The fallback is an expression evaluated on the miss path only.
+TEST_F(RuntimeTest, LetElseEvaluatesItsFallbackOnlyOnTheMissPath)
+{
+    expectRun("let side = 0;\n"
+              "fn fallback() -> i32 { side = side + 1; ret 7; }\n"
+              "fn maybe(b: bool) -> Option<i32> { if b { ret Option::Some(5); } ret Option::None; }\n"
+              "fn main() -> i32 {\n"
+              "    let hit = maybe(true) else fallback();\n"
+              "    if hit != 5 { ret 1; }\n"
+              "    if side != 0 { ret 2; }\n"
+              "    let miss = maybe(false) else fallback();\n"
+              "    if miss != 7 { ret 3; }\n"
+              "    if side != 1 { ret 4; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+// A diverging fallback (panic, ret, break/continue) satisfies the type check
+// through never, and ends the program here.
+TEST_F(RuntimeTest, LetElseDivergingFallbackPanics)
+{
+    expectPanic("fn maybe(b: bool) -> Option<i32> { if b { ret Option::Some(5); } ret Option::None; }\n"
+        "fn main() -> i32 { let x = maybe(false) else panic(\"no value\"); ret x; }\n",
+        "panicked: no value");
+}
+
+// The bound value is the payload BY VALUE: a non-Copy payload (String) moves
+// into the binding instead of being copied out of the Option.
+TEST_F(RuntimeTest, LetElseMovesANonCopyPayload)
+{
+    expectOutput("fn maybe(b: bool) -> Option<String> {\n"
+                 "    if b { ret Option::Some(String::from_lit(\"hi\")); }\n"
+                 "    ret Option::None; }\n"
+                 "fn main() -> i32 {\n"
+                 "    let s = maybe(true) else String::from_lit(\"none\");\n"
+                 "    let t = maybe(false) else String::from_lit(\"none\");\n"
+                 "    print_str(s.to_cstr()); print_str(t.to_cstr()); println();\n"
+                 "    ret 0; }\n",
+        "hinone\n", 0);
+}
+
+// Only Option/Result unwrap this way (as with '?'), the fallback must have the
+// payload's type, and a global initializer must stay a literal.
+TEST_F(RuntimeTest, LetElseRejectedShapes)
+{
+    expectCompileFail("fn main() -> i32 { let x = 5 else 0; ret 0; }\n",
+        "'let ... else' requires an 'Option' or 'Result' initializer");
+    expectCompileFail("fn main() -> i32 { let x = Option::Some(1) else \"s\"; ret 0; }\n",
+        "the fallback of 'let ... else' must have type");
+    expectCompileFail("let g = Option::Some(1) else 0;\n"
+        "fn main() -> i32 { ret 0; }\n",
+        "cannot use 'else'");
 }

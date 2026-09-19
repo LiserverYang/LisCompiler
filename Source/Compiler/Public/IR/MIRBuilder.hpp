@@ -252,6 +252,11 @@ private:
     MIRPlace buildLiteral(HIRLiteral *lit);
     MIRPlace buildNameRef(HIRNameRef *ref);
     MIRPlace buildBinaryOp(HIRBinaryOp *bin);
+    MIRPlace buildUnaryOp(HIRUnaryOp *un);
+    /// `x op= y`: the target place is evaluated once (see the .cpp).
+    void buildCompoundAssign(HIRAssign *assign);
+    /// `let x = <Option/Result> else <expr>;` — the local slot already exists.
+    void buildLetElse(HIRVarDecl *decl, size_t localIdx);
     MIRPlace buildCast(HIRCast *cast);
     MIRPlace buildCall(HIRCall *call);
     MIRPlace buildMemberAccess(HIRMemberAccess *ma);
@@ -267,7 +272,8 @@ private:
     MIRPlace emitIndexMethodCall(HIRIndexAccess *ia,
         const std::string &methodName,
         const std::shared_ptr<FunctionType> &methodType,
-        std::optional<MIROperand> value = std::nullopt);
+        std::optional<MIROperand> value = std::nullopt,
+        std::optional<MIROperand> indexOverride = std::nullopt);
     MIRPlace buildArrayLiteral(HIRArrayLiteral *al);
     MIRPlace buildStructInit(HIRStructInit *si);
     MIRPlace buildVariantInit(HIRVariantInit *vi);

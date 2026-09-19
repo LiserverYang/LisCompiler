@@ -535,8 +535,18 @@ void HIRSemanticAnalyzer::matchGenericType(
         auto pName = ctParam->getOriginName();
         auto aName = ctArg->getOriginName();
         if (pName != aName) return;
-        const auto &pa = ctParam->getGenericArgs();
-        const auto &aa = ctArg->getGenericArgs();
+        // A side written WITHOUT generic arguments in the source (a field declared
+        // `src: &Vec<T>`, i.e. the generic DEFINITION) keeps its parameters in
+        // genericParams and has EMPTY genericArgs, so matching only the args
+        // silently inferred nothing: a generic struct could not be built out of
+        // another generic type's parameter (`VecIter { src: self, pos: 0 }` in
+        // vec.lis reported "cannot infer generic parameter 'T'"). Fall back to the
+        // parameter list on either side; the caller re-checks the result against
+        // the declared type, so a wrong guess surfaces as a type error.
+        const auto &pa = ctParam->getGenericArgs().empty() ? ctParam->getGenericParams()
+                                                           : ctParam->getGenericArgs();
+        const auto &aa = ctArg->getGenericArgs().empty() ? ctArg->getGenericParams()
+                                                         : ctArg->getGenericArgs();
         for (size_t i = 0; i < pa.size() && i < aa.size(); ++i)
             matchGenericType(pa[i], aa[i], genericMap);
     }
@@ -3300,6 +3310,53 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         initType = node->init.value()->type;
         initFailed = !initType;
 
+        // ── `let x = <Option/Result> else <expr>;` (2026-09-19) ──────────────
+        // The binding takes the PAYLOAD type; the else expression supplies the
+        // value for the None/Err path, or DIVERGES (`else panic("...")` — never
+        // is compatible with anything). Only Option and Result are recognised,
+        // exactly like the `?` operator.
+        if (node->elseExpr.has_value())
+        {
+            if (node->isGlobal)
+            {
+                log(*node, "'let ... else' is not allowed at global scope (a global initializer must be a literal).");
+            }
+            else if (initType)
+            {
+                auto ct = std::dynamic_pointer_cast<CustomType>(initType);
+                std::string origin = ct ? ct->getOriginName() : std::string();
+                const char *payloadVariant = origin == "option$Option"  ? "Some"
+                                             : origin == "result$Result" ? "Ok"
+                                                                         : nullptr;
+                if (!payloadVariant)
+                {
+                    log(*node, "'let ... else' requires an 'Option' or 'Result' initializer, got '" + initType->toString() + "'.");
+                }
+                else
+                {
+                    std::shared_ptr<Type> payloadTy;
+                    for (const auto &v : ct->getVariants())
+                        if (v.name == payloadVariant && !v.payloadTypes.empty())
+                            payloadTy = v.payloadTypes[0];
+
+                    if (!payloadTy)
+                    {
+                        log(*node, "'let ... else' requires '" + std::string(payloadVariant) + "(T)' in the initializer's type.");
+                    }
+                    else
+                    {
+                        analyzeExpr(node->elseExpr.value().get());
+                        auto elseTy = node->elseExpr.value()->type;
+                        if (elseTy && !isNever(elseTy) && !payloadTy->equals(elseTy))
+                            log(*node->elseExpr.value(), "the fallback of 'let ... else' must have type '" + payloadTy->toString() + "', got '" + elseTy->toString() + "'.");
+
+                        // The binding is the PAYLOAD, not the enum.
+                        initType = payloadTy;
+                    }
+                }
+            }
+        }
+
         // Globals live in static storage: only a literal initializer can be
         // embedded in the object file. Anything else (a call, an array built at
         // runtime, a reference) would silently lower to zeroed memory — reject
@@ -3432,10 +3489,53 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     // The write TARGET is not a read: `let x: i32; x = 1;` must not be reported as
     // a use of an uninitialized value (the assignment is what initializes it).
     bool savedInAssignTarget = inAssignTarget_;
+    bool savedInCompoundTarget = inCompoundAssignTarget_;
     inAssignTarget_ = true;
+    inCompoundAssignTarget_ = node->isCompound;
     analyzeExpr(node->target.get());
     inAssignTarget_ = savedInAssignTarget;
+    inCompoundAssignTarget_ = savedInCompoundTarget;
     analyzeExpr(node->value.get());
+
+    // `x op= y` (2026-09-19) follows exactly the operand rules of `x op y`,
+    // minus the operator-trait method call: the MIR lowers it as a read of the
+    // target place, the primitive binary op, and a write back — so only operands
+    // that lower to a PRIMITIVE binary op are accepted here (integers, floats,
+    // and a generic parameter carrying the Numeric/Integer marker or the
+    // operator trait bound, which monomorphization resolves to one of those).
+    if (node->isCompound)
+    {
+        const std::string op = std::string("'") + node->compoundOpToString() + "'";
+        const auto &lhsTy = node->target->type;
+        const auto &rhsTy = node->value->type;
+
+        if (lhsTy && rhsTy && !lhsTy->equals(rhsTy))
+            log(*node, "operands of " + op + " must have the same type.");
+
+        if (lhsTy)
+        {
+            const char *opTrait = operatorTraitName(node->compoundOp);
+            if (auto p = std::dynamic_pointer_cast<PrimitiveType>(lhsTy))
+            {
+                if (!p->isInteger() && !p->isFloat())
+                    log(*node, "operator " + op + " cannot be applied to type '" + lhsTy->toString() + "'.");
+            }
+            else if (auto gp = std::dynamic_pointer_cast<GenericParamType>(lhsTy))
+            {
+                if (!gp->implementsTrait("Numeric") && !(opTrait && gp->implementsTrait(opTrait)))
+                    log(*node, "operator " + op + " requires the generic parameter to have a 'Numeric' constraint.");
+            }
+            else if (auto ct = std::dynamic_pointer_cast<CustomType>(lhsTy))
+            {
+                if (opTrait && ct->implementsTrait(opTrait))
+                    log(*node, "compound assignment is not supported on a type that overloads the operator yet: write \"x = x " + std::string(1, node->compoundOpToString()[0]) + " y\" instead.");
+                else
+                    log(*node, "operator " + op + " cannot be applied to type '" + lhsTy->toString() + "'.");
+            }
+            else
+                log(*node, "operator " + op + " cannot be applied to type '" + lhsTy->toString() + "'.");
+        }
+    }
 
     // Definite assignment on the TARGET side: assigning the whole binding
     // initializes it, but writing a FIELD/ELEMENT requires it to be initialized
@@ -6223,6 +6323,14 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
         // assignment type check still applies.
         if (resolveIndexMethod(node, ct, inAssignTarget_))
         {
+            // A COMPOUND assignment target reads the element before writing it
+            // (`v[i] += x` is Index::at then IndexMut::set), so the read side
+            // needs its own resolution too — an assignment target alone fills the
+            // set* fields only, and the MIR read call would have no signature.
+            // Both resolve to the element type, so node->type is unaffected.
+            if (inAssignTarget_ && inCompoundAssignTarget_)
+                resolveIndexMethod(node, ct, /*forWrite=*/false);
+
             // The receiver behaves like a READ of the container, not like a
             // borrow of it: the access CHECKS against the borrows already live
             // (so `let r = &mut v; let x = v[0];` is still rejected, and
@@ -6371,6 +6479,55 @@ void HIRSemanticAnalyzer::visit(HIRDeref *node)
     else
         log(*node, "cannot dereference a value of type '" + node->operand->type->toString()
                        + "': '*p' requires a reference ('&T' or '&mut T').");
+}
+// ---------------------------------------------------------------------------
+// Prefix VALUE operators: -x, !x, ~x (2026-09-19).
+//
+// All three are defined on PRIMITIVES only for now (user-type overloading needs
+// a Neg/Not trait plus the operator-method plumbing, which lands separately):
+//   * -  : the numeric types (i8..i64, f32/f64) -> the operand type.
+//   * !  : bool -> bool.
+//   * ~  : the integer types (i8..i64) -> the operand type.
+// char participates in none of them (it only compares), and structs/enums are
+// rejected here rather than reaching codegen.
+void HIRSemanticAnalyzer::visit(HIRUnaryOp *node)
+{
+    analyzeExpr(node->operand.get());
+    if (!node->operand->type) return; // the real error was already reported
+
+    const auto &operandTy = node->operand->type;
+    const char *op = node->opKind == HIRUnaryOp::OpKind::Neg      ? "-"
+                     : node->opKind == HIRUnaryOp::OpKind::Not    ? "!"
+                                                                  : "~";
+
+    bool ok = false;
+    switch (node->opKind)
+    {
+    case HIRUnaryOp::OpKind::Neg:
+        ok = operandTy->getKind() == Type::Kind::Primitive
+             && (std::static_pointer_cast<PrimitiveType>(operandTy)->isInteger()
+                 || std::static_pointer_cast<PrimitiveType>(operandTy)->isFloat());
+        break;
+    case HIRUnaryOp::OpKind::Not:
+        ok = operandTy->getKind() == Type::Kind::Primitive
+             && std::static_pointer_cast<PrimitiveType>(operandTy)->getPrimKind() == PrimitiveType::PrimKind::BOOL;
+        break;
+    case HIRUnaryOp::OpKind::BitNot:
+        ok = operandTy->getKind() == Type::Kind::Primitive
+             && std::static_pointer_cast<PrimitiveType>(operandTy)->isInteger();
+        break;
+    }
+
+    if (!ok)
+    {
+        log(*node, std::string("operator '") + op + "' cannot be applied to type '" + operandTy->toString() + "'.");
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
+    node->type = node->opKind == HIRUnaryOp::OpKind::Not
+                     ? context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL)
+                     : operandTy;
 }
 
 // ---------------------------------------------------------------------------

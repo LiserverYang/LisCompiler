@@ -538,6 +538,26 @@ Token Lexer::lexOperatorOrDelimiter()
         {
             token.code = TokenCode::ATTRIBUTE_START;
         }
+        else if (twoChars == "+=")
+        {
+            token.code = TokenCode::PLUS_ASSIGN;
+        }
+        else if (twoChars == "-=")
+        {
+            token.code = TokenCode::MINUS_ASSIGN;
+        }
+        else if (twoChars == "*=")
+        {
+            token.code = TokenCode::STAR_ASSIGN;
+        }
+        else if (twoChars == "/=")
+        {
+            token.code = TokenCode::SLASH_ASSIGN;
+        }
+        else if (twoChars == "%=")
+        {
+            token.code = TokenCode::MOD_ASSIGN;
+        }
         else
             goto single_char; // not multi-character operator
 
@@ -570,6 +590,7 @@ single_char:
     case '.': token.code = TokenCode::DOT; break;
     case '&': token.code = TokenCode::REFERENCE; break;
     case '!': token.code = TokenCode::NOT; break;
+    case '~': token.code = TokenCode::TILDE; break;
     // `?` is a POSTFIX operator (error propagation, `expr?`): the Parser attaches it
     // in the member-access suffix chain, so it needs no binary precedence entry.
     case '?': token.code = TokenCode::QUESTION; break;

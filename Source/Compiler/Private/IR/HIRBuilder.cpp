@@ -554,6 +554,13 @@ void HIRBuilder::visit(DeclStmt *node)
         nodeStack.pop();
     }
 
+    if (node->elseValue.has_value())
+    {
+        node->elseValue.value()->accept(this);
+        result->elseExpr = std::unique_ptr<HIRExpr>((HIRExpr *)nodeStack.top().release());
+        nodeStack.pop();
+    }
+
     nodeStack.push(std::move(result));
 }
 
@@ -563,6 +570,23 @@ void HIRBuilder::visit(AssignStmt *node)
     auto result = std::make_unique<HIRAssign>();
     result->position = node->position;
     result->length = node->length;
+
+    if (!node->compoundOp.empty())
+    {
+        result->isCompound = true;
+        if (node->compoundOp == "+=")
+            result->compoundOp = HIRBinaryOp::OpKind::Add;
+        else if (node->compoundOp == "-=")
+            result->compoundOp = HIRBinaryOp::OpKind::Sub;
+        else if (node->compoundOp == "*=")
+            result->compoundOp = HIRBinaryOp::OpKind::Mul;
+        else if (node->compoundOp == "/=")
+            result->compoundOp = HIRBinaryOp::OpKind::Div;
+        else if (node->compoundOp == "%=")
+            result->compoundOp = HIRBinaryOp::OpKind::Mod;
+        else
+            throw std::runtime_error("HIRBuilder: unknown compound assignment '" + node->compoundOp + "'");
+    }
 
     node->target->accept(this);
     result->target.reset(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
@@ -621,7 +645,25 @@ void HIRBuilder::visit(ForStmt *node)
     // the MIRBuilder's flat varMap_ (which is not scope-aware on block exit).
     std::string itName = "__it_" + std::to_string(forLoopCtr_);
     std::string optName = "__opt_" + std::to_string(forLoopCtr_);
+    // Only the borrowing form needs a source reference (see below).
+    std::string srcName = "__src_" + std::to_string(forLoopCtr_);
     forLoopCtr_++;
+
+    // Which form? (2026-09-19)
+    //   * "for x in move e"        -> consume e (the historical desugaring).
+    //   * "for x in e" with e a PLACE (a name, a field, an index, a deref)
+    //                              -> borrow e for the loop and yield &T.
+    //   * "for x in e" with e an RVALUE (range(1, 5), Countdown::new(3), a call
+    //     result)                  -> consume it: a temporary dies with the let
+    //     that would hold the reference, so it cannot be borrowed at all.
+    auto isPlaceExpr = [](Expr *e) -> bool
+    {
+        return dynamic_cast<IdentifierExpr *>(e) != nullptr
+               || dynamic_cast<MemberAccess *>(e) != nullptr
+               || dynamic_cast<IndexAccess *>(e) != nullptr
+               || dynamic_cast<DerefExpr *>(e) != nullptr;
+    };
+    const bool byBorrow = !node->isMove && isPlaceExpr(node->iterable.get());
 
     auto nameRef = [&](const std::string &name)
     {
@@ -669,7 +711,37 @@ void HIRBuilder::visit(ForStmt *node)
     else
         bodyStmts.push_back(std::move(bodyStmt));
 
-    // let mut __it = <iterable>;
+    // let [__src = &<place>;] let mut __it = <iterable | __src.iter()>;
+    std::unique_ptr<HIRVarDecl> srcDecl;
+    if (byBorrow)
+    {
+        // The promoted reference is what makes the borrow TRACKED: "let __src = &v"
+        // promotes it (visit(HIRVarDecl)), so writing or moving v inside the body
+        // is E4001 instead of silent corruption, and the borrow ends with the
+        // block — the collection is usable again after the loop.
+        auto ref = std::make_unique<HIRRef>();
+        ref->position = position;
+        ref->length = length;
+        ref->isMutable = false;
+        ref->expr = std::move(iterExpr);
+
+        srcDecl = std::make_unique<HIRVarDecl>();
+        srcDecl->position = position;
+        srcDecl->length = length;
+        srcDecl->name = srcName;
+        srcDecl->isMutable = false;
+        srcDecl->isGlobal = false;
+        srcDecl->init = std::move(ref);
+
+        auto iterCall = std::make_unique<HIRCall>();
+        iterCall->position = position;
+        iterCall->length = length;
+        iterCall->callKind = HIRCall::CallKind::Method;
+        iterCall->object = nameRef(srcName);
+        iterCall->methodName = "iter";
+        iterExpr = std::move(iterCall);
+    }
+
     auto itDecl = std::make_unique<HIRVarDecl>();
     itDecl->position = position;
     itDecl->length = length;
@@ -750,12 +822,42 @@ void HIRBuilder::visit(ForStmt *node)
 
     loop->body = std::move(loopBody);
 
-    // { let mut __it; while ... }
+    // { let __src; let mut __it; while ... }
     auto outer = std::make_unique<HIRBlock>();
     outer->position = position;
     outer->length = length;
+    if (srcDecl)
+        outer->stmts.push_back(std::move(srcDecl));
     outer->stmts.push_back(std::move(itDecl));
     outer->stmts.push_back(std::move(loop));
+
+    if (byBorrow)
+    {
+        // Pin the source borrow across the loop. NLL ends a borrow at its
+        // holder LAST USE, and the iterator is built from __src before the loop —
+        // without a later use the borrow would be over by the time the body runs,
+        // and "for x in v { v.push(1); }" would silently corrupt the loop (a push
+        // can reallocate the buffer under the iterator). "&*__src" is a
+        // type-agnostic use of the reference: it keeps the collection borrowed
+        // for the WHOLE loop, so a write or move of it in the body is E4001.
+        auto pin = std::make_unique<HIRExprStmt>();
+        pin->position = position;
+        pin->length = length;
+
+        auto reborrow = std::make_unique<HIRRef>();
+        reborrow->position = position;
+        reborrow->length = length;
+        reborrow->isMutable = false;
+
+        auto deref = std::make_unique<HIRDeref>();
+        deref->position = position;
+        deref->length = length;
+        deref->operand = nameRef(srcName);
+
+        reborrow->expr = std::move(deref);
+        pin->expr = std::move(reborrow);
+        outer->stmts.push_back(std::move(pin));
+    }
 
     nodeStack.push(std::move(outer));
 }
@@ -1067,6 +1169,29 @@ void HIRBuilder::visit(DerefExpr *node)
     auto result = std::make_unique<HIRDeref>();
     result->position = node->position;
     result->length = node->length;
+
+    node->operand->accept(this);
+    result->operand = std::unique_ptr<HIRExpr>(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
+void HIRBuilder::visit(UnaryOp *node)
+{
+    auto result = std::make_unique<HIRUnaryOp>();
+    result->position = node->position;
+    result->length = node->length;
+
+    if (node->op == "-")
+        result->opKind = HIRUnaryOp::OpKind::Neg;
+    else if (node->op == "!")
+        result->opKind = HIRUnaryOp::OpKind::Not;
+    else if (node->op == "~")
+        result->opKind = HIRUnaryOp::OpKind::BitNot;
+    else
+        throw std::runtime_error("HIRBuilder: unknown unary operator '" + node->op + "'");
 
     node->operand->accept(this);
     result->operand = std::unique_ptr<HIRExpr>(dynamic_cast<HIRExpr *>(nodeStack.top().release()));

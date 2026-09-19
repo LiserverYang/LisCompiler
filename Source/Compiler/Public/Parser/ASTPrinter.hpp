@@ -66,6 +66,7 @@ public:
     void visit(TraitDef *node) override;
     void visit(BorrowExpr *node) override;
     void visit(DerefExpr *node) override;
+    void visit(UnaryOp *node) override;
     void visit(TryExpr *node) override;
     void visit(GenericParam *node) override;
 };

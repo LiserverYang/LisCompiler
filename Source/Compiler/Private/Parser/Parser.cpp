@@ -712,6 +712,17 @@ std::unique_ptr<GlobalVarDef> Parser::parseGlobalVariableDefinition()
 
     consume(TokenCode::ASSIGN, "expected '=' in variable definition", E_ExpectAnASSIGN);
     var->initValue = parseExpression();
+
+    // A global `let ... else` is rejected with a diagnostic that says why (a
+    // global initializer must be a literal, so there is no runtime path to take
+    // the fallback on). Parsing it here keeps the message useful instead of a
+    // bare "expected ';'".
+    if (match(TokenCode::ELSE))
+    {
+        parseExpression();
+        logError(currentToken(), "a global variable definition cannot use 'else' (its initializer must be a literal).", E_UndefinedIdentifier);
+    }
+
     consume(TokenCode::SEMI, "expected ';' after variable definition", E_ExpectASEMI);
 
     return var;
@@ -1060,6 +1071,11 @@ void Parser::applyIKnow(Expr *expr)
         applyIKnow(bin->right.get());
         return;
     }
+    if (auto un = dynamic_cast<UnaryOp *>(expr))
+    {
+        applyIKnow(un->operand.get());
+        return;
+    }
     if (auto paren = dynamic_cast<ParenExpr *>(expr))
     {
         applyIKnow(paren->expression.get());
@@ -1188,14 +1204,25 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     // 赋值语句或表达式语句
     auto expr = parseExpression();
 
-    if (match(TokenCode::ASSIGN))
+    // `=` or one of the compound spellings (2026-09-19). The operator tokens are
+    // statement-level only: getPrecedence() gives them 0, so the expression above
+    // stopped at the target.
+    TokenCode assignCode = currentToken().code;
+    const bool compound = assignCode == TokenCode::PLUS_ASSIGN || assignCode == TokenCode::MINUS_ASSIGN
+                          || assignCode == TokenCode::STAR_ASSIGN || assignCode == TokenCode::SLASH_ASSIGN
+                          || assignCode == TokenCode::MOD_ASSIGN;
+    if (assignCode == TokenCode::ASSIGN || compound)
     {
+        Token opToken = currentToken();
+        advance();
+
         auto assign = std::make_unique<AssignStmt>();
         // Anchor the statement at its target expression so diagnostics (e.g.
         // "cannot assign to immutable variable") point at the right location.
         assign->position = expr->position;
         assign->length = expr->length;
         assign->target = std::move(expr);
+        if (compound) assign->compoundOp = opToken.value;
         assign->value = parseExpression();
         consume(TokenCode::SEMI, "expected ';' after assignment", E_ExpectASEMI);
         return assign;
@@ -1294,6 +1321,12 @@ std::unique_ptr<DeclStmt> Parser::parseDeclarationStatement()
     if (match(TokenCode::ASSIGN))
     {
         decl->initValue = parseExpression();
+
+        // `else <expr>` — the fallback binding (2026-09-19). A `let` initializer
+        // can never be an if-statement (if is a statement, not an expression), so
+        // the keyword is unambiguous here.
+        if (match(TokenCode::ELSE))
+            decl->elseValue = parseExpression();
     }
 
     consume(TokenCode::SEMI, "expected ';' after let statement", E_ExpectASEMI);
@@ -1311,6 +1344,10 @@ std::unique_ptr<ForStmt> Parser::parseForLoop()
 
     forStmt->loopVar = consume(TokenCode::IDENTIFIER, "expected an identifier as the loop variable", E_ExpectAnIdentifier).value;
     consume(TokenCode::IN, "expected keyword 'in'", E_ExpectedKeyword);
+
+    // `for x in move v` consumes the iterable; the default form BORROWS a place
+    // iterable (2026-09-19, see HIRBuilder::visit(ForStmt)).
+    forStmt->isMove = match(TokenCode::MOVE);
 
     // A bare-identifier iterable followed by `{` is the loop body, not a struct
     // literal — but a known-struct-type literal is still allowed as the iterable.
@@ -1567,6 +1604,54 @@ std::unique_ptr<Expr> Parser::parseUnary()
         // `*p[0]` is `*(p[0])` — the operand is itself a full unary expression.
         deref->operand = parseUnary();
         return deref;
+    }
+
+    // Value prefixes (2026-09-19): `-x`, `!x`, `~x`, and the no-op `+x`.
+    // They share the dereference's precedence slot: tighter than every binary
+    // operator, right-associative, one nesting level each. (`- -x` and `-*p` are
+    // both fine; `a - -b` is a subtraction by `-b`.)
+    if (check(TokenCode::MINUS) || check(TokenCode::PLUS) || check(TokenCode::NOT) || check(TokenCode::TILDE))
+    {
+        Token opToken = currentToken();
+        advance();
+
+        ParserDepthGuard depth(this);
+        if (!depth)
+        {
+            auto placeholder = std::make_unique<IdentifierExpr>();
+            placeholder->name = "<error>";
+            return placeholder;
+        }
+
+        auto operand = parseUnary();
+
+        // `+x` is the value of x: no node, no evaluation difference.
+        if (opToken.code == TokenCode::PLUS)
+            return operand;
+
+        // `-<literal>` folds into a negative literal, so a global initializer
+        // (`let g = -5;`, which must be a literal) and any other constant
+        // context keep working. The literal's overflow flag rides along.
+        if (opToken.code == TokenCode::MINUS)
+        {
+            if (auto *lit = dynamic_cast<LiteralExpr *>(operand.get()))
+            {
+                if (lit->kind == LiteralExpr::LiteralType::Int || lit->kind == LiteralExpr::LiteralType::Float)
+                {
+                    // The literal is carried as TEXT; "-" + text keeps the
+                    // overflow handling in HIRBuilder (which parses it) intact.
+                    lit->value = "-" + lit->value;
+                    return operand;
+                }
+            }
+        }
+
+        auto unary = std::make_unique<UnaryOp>();
+        unary->position = opToken.position;
+        unary->length = opToken.value.length();
+        unary->op = opToken.value;
+        unary->operand = std::move(operand);
+        return unary;
     }
 
     auto expr = parsePrimary();

@@ -355,6 +355,13 @@ public:
     std::string name;
     std::optional<std::unique_ptr<TypeNode>> type;
     std::optional<std::unique_ptr<Expr>> initValue;
+
+    /// `let x = <Option/Result expr> else <expr>;` (2026-09-19): the FALLBACK
+    /// value (or a diverging call) used when the initializer is None/Err. Only an
+    /// expression — a block would need block-expressions, which this language
+    /// does not have.
+    std::optional<std::unique_ptr<Expr>> elseValue;
+
     Symbol *symbol;
 
     void accept(ASTVisitor *visitor) override
@@ -368,6 +375,12 @@ class AssignStmt : public Stmt
 public:
     std::unique_ptr<Expr> target;
     std::unique_ptr<Expr> value;
+
+    /// The COMPOUND spelling's operator text ("+=", "-=", ...), empty for a
+    /// plain `=` (2026-09-19). `x op= y` means `x = x op y` with the target
+    /// place evaluated ONCE (the MIR lowers it that way); the syntactic form is
+    /// kept so the HIR knows which operator to apply.
+    std::string compoundOp;
 
     void accept(ASTVisitor *visitor) override
     {
@@ -388,6 +401,11 @@ public:
 
 class ForStmt : public Stmt
 {
+public:
+    /// `for x in move v` — CONSUME the iterable (2026-09-19). Without it the loop
+    /// borrows a place iterable instead (see HIRBuilder::visit(ForStmt)).
+    bool isMove = false;
+
 public:
     std::string loopVar;
     std::unique_ptr<Expr> iterable;
@@ -701,6 +719,25 @@ public:
 class DerefExpr : public Expr
 {
 public:
+    std::unique_ptr<Expr> operand;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+/// A prefix VALUE operator: `-x`, `!x`, `~x` (2026-09-19).
+///
+/// `+` is deliberately NOT one of these: the parser erases it, so `+x` is just
+/// `x`. Prefix operators bind tighter than any binary operator and nest
+/// right-associatively (`- -x`, `-*p`), exactly like the dereference above; each
+/// prefix counts one level against `--max-depth`.
+class UnaryOp : public Expr
+{
+public:
+    /// The operator's source spelling: "-", "!", "~".
+    std::string op;
     std::unique_ptr<Expr> operand;
 
     void accept(ASTVisitor *visitor) override

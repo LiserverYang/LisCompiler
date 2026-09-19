@@ -416,6 +416,28 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+/// A prefix VALUE operator: `-x`, `!x`, `~x` (2026-09-19). `+x` never reaches
+/// the HIR (the parser erases it). The operand is a value — all three operators
+/// are defined on Copy types only, so no move bookkeeping is involved — and the
+/// result has the operand's type except for `!`, which yields bool.
+class HIRUnaryOp : public HIRExpr
+{
+public:
+    enum class OpKind
+    {
+        Neg,   // -
+        Not,   // !
+        BitNot // ~
+    };
+    OpKind opKind;
+    std::unique_ptr<HIRExpr> operand;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
 class HIRBlock : public HIRStmt
 {
 public:
@@ -436,6 +458,12 @@ public:
     bool hasExplicitType = false;
     std::shared_ptr<Type> type; // filled by HIRSemanticAnalyzer
     std::optional<std::unique_ptr<HIRExpr>> init;
+
+    /// `let x = <Option/Result> else <expr>;` — the fallback branch, evaluated
+    /// only when the initializer is None/Err (2026-09-19). The expression's type
+    /// must be the payload type (or never, for a diverging call).
+    std::optional<std::unique_ptr<HIRExpr>> elseExpr;
+
     bool isMutable = false;
     bool isGlobal = false;
     Symbol *varSymbol = nullptr;
@@ -451,6 +479,25 @@ class HIRAssign : public HIRStmt
 public:
     std::unique_ptr<HIRExpr> target;
     std::unique_ptr<HIRExpr> value;
+
+    /// `x op= y` (2026-09-19): the target is read with THIS operator and written
+    /// back — the MIR lowers the place once, so it is exactly `x = x op y`
+    /// without evaluating the target twice. `isCompound == false` is a plain
+    /// `=` and ignores `compoundOp`.
+    bool isCompound = false;
+    HIRBinaryOp::OpKind compoundOp = HIRBinaryOp::OpKind::Add;
+    /// The source spelling for diagnostics: "+=", "-=", "*=", "/=", "%=".
+    const char *compoundOpToString() const
+    {
+        switch (compoundOp)
+        {
+        case HIRBinaryOp::OpKind::Add: return "+=";
+        case HIRBinaryOp::OpKind::Sub: return "-=";
+        case HIRBinaryOp::OpKind::Mul: return "*=";
+        case HIRBinaryOp::OpKind::Div: return "/=";
+        default: return "%=";
+        }
+    }
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);

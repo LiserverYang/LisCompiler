@@ -209,6 +209,15 @@ public:
         os << " deref";
     }
 
+    void visit(HIRUnaryOp *node)
+    {
+        printCommon(node);
+        const char *op = node->opKind == HIRUnaryOp::OpKind::Neg      ? "-"
+                         : node->opKind == HIRUnaryOp::OpKind::Not    ? "!"
+                                                                     : "~";
+        os << " unary_op '" << op << "'";
+    }
+
     void visit(HIRArrayLiteral *node)
     {
         printCommon(node);
@@ -268,7 +277,9 @@ public:
     void visit(HIRAssign *node)
     {
         printCommon(node);
-        os << " [AssignStmt]";
+        os << (node->isCompound ? " [CompoundAssignStmt " : " [AssignStmt]");
+        if (node->isCompound)
+            os << node->compoundOpToString() << "]";
     }
 
     void visit(HIRIf *node)
@@ -420,6 +431,8 @@ public:
             visit(e);
         else if (auto e = dynamic_cast<HIRDeref *>(node))
             visit(e);
+        else if (auto e = dynamic_cast<HIRUnaryOp *>(node))
+            visit(e);
         else if (auto e = dynamic_cast<HIRArrayLiteral *>(node))
             visit(e);
         else if (auto e = dynamic_cast<HIRStructInit *>(node))
@@ -515,6 +528,10 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
             children.push_back(elem.get());
     }
     else if (auto e = dynamic_cast<HIRDeref *>(node))
+    {
+        if (e->operand) children.push_back(e->operand.get());
+    }
+    else if (auto e = dynamic_cast<HIRUnaryOp *>(node))
     {
         if (e->operand) children.push_back(e->operand.get());
     }

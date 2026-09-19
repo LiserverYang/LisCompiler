@@ -82,6 +82,12 @@ enum class TokenCode
     GT_EQ,  // ">="
     ASSIGN,   // "="
     NOT,      // !
+    TILDE,    // "~"
+    PLUS_ASSIGN,  // "+="
+    MINUS_ASSIGN, // "-="
+    STAR_ASSIGN,  // "*="
+    SLASH_ASSIGN, // "/="
+    MOD_ASSIGN,   // "%="
     BOR,      // |
     OR,       // ||
     AND,      // &&

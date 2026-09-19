@@ -121,6 +121,13 @@ private:
     /// uninitialized value (`let x: i32; x = 1;`).
     bool inAssignTarget_ = false;
 
+    /// True while the assignment target being analyzed belongs to a COMPOUND
+    /// assignment (`v[i] += x`). The read side of the element then needs its own
+    /// resolution: an assignment target normally resolves IndexMut::set only,
+    /// but the compound form READS the element first (Index::at) and writes it
+    /// back, so visit(HIRIndexAccess) resolves both. */
+    bool inCompoundAssignTarget_ = false;
+
     /// Set currentModule_ from Context::stmtAttributions for the item at `index`.
     void setModuleForItem(size_t index);
 
@@ -633,6 +640,7 @@ public:
     virtual void visit(HIRMemberAccess *node) override;
     virtual void visit(HIRIndexAccess *node) override;
     virtual void visit(HIRDeref *node) override;
+    virtual void visit(HIRUnaryOp *node) override;
     virtual void visit(HIRArrayLiteral *node) override;
     virtual void visit(HIRStructInit *node) override;
     virtual void visit(HIRVariantInit *node) override;

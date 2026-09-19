@@ -11,9 +11,6 @@
 #include <cassert>
 #include <stdexcept>
 
-/**
- * 这是我以前放在 LLVM IR 阶段的 mangle 函数，你可能会用到
- */
 std::string mangleName(const MIRFunction &fn)
 {
     // Simple mangling: for methods → "StructName::methodName",
@@ -1012,6 +1009,13 @@ void MIRBuilder::buildVarDecl(HIRVarDecl *decl)
 
     if (decl->init.has_value())
     {
+        // A `let ... else` binding has its own two-path lowering.
+        if (decl->elseExpr.has_value())
+        {
+            buildLetElse(decl, idx);
+            return;
+        }
+
         MIRPlace dest = localPlace(idx);
         MIRRValue rhs = MIRRValueUse{.operand = exprToOperand(decl->init->get())};
         emitAssign(dest, std::move(rhs));
@@ -1019,10 +1023,101 @@ void MIRBuilder::buildVarDecl(HIRVarDecl *decl)
     // No initialiser → zero-init is codegen's responsibility.
 }
 
+// ── let x = <Option/Result> else <expr>; ─────────────────────────────────────
+
+/// The binding local slot already exists; this fills it from either the PAYLOAD
+/// variant of the initializer or the else expression. Mirrors buildTry: the
+/// scrutinee is evaluated into a temp it can be moved out of, the tag picks the
+/// path, and the binding is marked consumed up front so a path that does not
+/// write it cannot drop an uninitialised value.
+void MIRBuilder::buildLetElse(HIRVarDecl *decl, size_t localIdx)
+{
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+
+    MIRPlace scrutinee = makeTempPlace(decl->init.value()->type);
+    emitAssign(scrutinee, MIRRValueUse{exprToOperand(decl->init.value().get())});
+    movedLocals_.insert(scrutinee.index);
+    partiallyMovedFields_.erase(scrutinee.index);
+
+    MIRPlace binding = localPlace(localIdx);
+    movedLocals_.insert(localIdx);
+
+    auto ct = std::dynamic_pointer_cast<CustomType>(decl->init.value()->type);
+    if (!ct) return; // sema already reported
+
+    const std::string payloadVariant = ct->getOriginName() == "option$Option" ? "Some" : "Ok";
+    int64_t payloadIndex = -1;
+    std::string payloadSlot;
+    std::shared_ptr<Type> payloadTy;
+    for (size_t i = 0; i < ct->getVariants().size(); ++i)
+    {
+        const auto &v = ct->getVariants()[i];
+        if (v.name == payloadVariant && !v.payloadTypes.empty())
+        {
+            payloadIndex = (int64_t)i;
+            payloadSlot = v.name + "_0";
+            payloadTy = v.payloadTypes[0];
+        }
+    }
+    if (payloadIndex < 0) return; // sema already reported
+
+    BasicBlockId payloadId = newBlock("let_else_payload");
+    BasicBlockId fallbackId = newBlock("let_else_fallback");
+    BasicBlockId joinId = newBlock("let_else_join");
+
+    // Discriminant test: if __t.__tag == payloadIndex.
+    MIRPlace tagPlace = scrutinee;
+    tagPlace.projections.push_back(Projection{ProjectionKind::Field, "__tag", 0});
+    tagPlace.type = i32Ty;
+    MIRConst tagConst;
+    tagConst.kind = MIRConst::Kind::Int;
+    tagConst.value = payloadIndex;
+    tagConst.type = i32Ty;
+    MIRPlace cond = makeTempPlace(boolTy);
+    emitAssign(cond, MIRRValueBinaryOp{
+                         .op = MIRRValueBinaryOp::Op::Eq,
+                         .left = MIROperand(MIRCopy{tagPlace}),
+                         .right = MIROperand(tagConst),
+                         .type = boolTy,
+                     });
+    sealBlock(curBB_, MIRTermBranch{
+                          .cond = MIROperand(MIRCopy{cond}),
+                          .thenBlock = payloadId,
+                          .elseBlock = fallbackId,
+                      });
+
+    // ── payload: bind it ────────────────────────────────────────────────────
+    switchTo(payloadId);
+    {
+        MIRPlace payload = scrutinee;
+        payload.projections.push_back(Projection{ProjectionKind::Field, payloadSlot, 0});
+        payload.type = payloadTy;
+        emitAssign(binding, MIRRValueUse{placeToOperand(std::move(payload))});
+    }
+    sealBlock(curBB_, MIRTermGoto{.target = joinId});
+
+    // ── None/Err: the fallback value (or a diverging call) ──────────────────
+    switchTo(fallbackId);
+    emitAssign(binding, MIRRValueUse{exprToOperand(decl->elseExpr.value().get())});
+    if (!std::holds_alternative<MIRTermDiverge>(currentBlock().terminator))
+        sealBlock(curBB_, MIRTermGoto{.target = joinId});
+
+    switchTo(joinId);
+}
 // ── target = value; ──────────────────────────────────────────────────────────
 
 void MIRBuilder::buildAssign(HIRAssign *assign)
 {
+    // `x op= y` (2026-09-19) is its own lowering: the target place is evaluated
+    // ONCE, read, combined with the RHS through the primitive binary op, and
+    // written back — never `x = x op y` with the target evaluated twice.
+    if (assign->isCompound)
+    {
+        buildCompoundAssign(assign);
+        return;
+    }
+
     // Lower the RHS first (important: avoids wrong temp ordering on self-assign)
     MIROperand rhs = exprToOperand(assign->value.get());
 
@@ -1071,6 +1166,50 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
 
     // emitAssign re-arms ownership on a whole-root-local write.
     emitAssign(lhs, MIRRValueUse{.operand = std::move(rhs)});
+}
+
+// ── x op= y; ────────────────────────────────────────────────────────────────
+
+void MIRBuilder::buildCompoundAssign(HIRAssign *assign)
+{
+    auto accOp = [&]() { return convertBinOp(assign->compoundOp); };
+
+    // A USER container (`v[i] += x`): the element is only reachable through the
+    // Index/IndexMut trait methods, so this is a read call, the operator, and a
+    // write call. The INDEX expression is evaluated once and handed to both.
+    if (auto *idx = dynamic_cast<HIRIndexAccess *>(assign->target.get()))
+    {
+        if (!idx->setMethodName.empty())
+        {
+            MIROperand indexOp = exprToOperand(idx->index.get());
+            MIRPlace cur = emitIndexMethodCall(idx, idx->indexMethodName, idx->indexMethodType,
+                std::nullopt, indexOp);
+
+            MIRPlace acc = makeTempPlace(assign->value->type);
+            emitAssign(acc, MIRRValueBinaryOp{
+                                .op = accOp(),
+                                .left = placeToOperand(cur),
+                                .right = exprToOperand(assign->value.get()),
+                                .type = assign->value->type,
+                            });
+
+            emitIndexMethodCall(idx, idx->setMethodName, idx->setMethodType,
+                placeToOperand(acc), indexOp);
+            return;
+        }
+    }
+
+    // A plain place: read it (Copy — sema accepts primitives only), combine,
+    // write the same place back.
+    MIRPlace lhs = buildExpr(assign->target.get());
+    MIRPlace acc = makeTempPlace(assign->value->type);
+    emitAssign(acc, MIRRValueBinaryOp{
+                        .op = accOp(),
+                        .left = MIRCopy{.place = lhs},
+                        .right = exprToOperand(assign->value.get()),
+                        .type = assign->value->type,
+                    });
+    emitAssign(lhs, MIRRValueUse{.operand = placeToOperand(acc)});
 }
 
 // ── if cond { then } [else { else }] ─────────────────────────────────────────
@@ -1647,6 +1786,9 @@ MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
     if (auto *deref = dynamic_cast<HIRDeref *>(expr))
         return buildDeref(deref);
 
+    if (auto *un = dynamic_cast<HIRUnaryOp *>(expr))
+        return buildUnaryOp(un);
+
     if (auto *tryExpr = dynamic_cast<HIRTry *>(expr))
         return buildTry(tryExpr);
 
@@ -1793,6 +1935,31 @@ MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
                         .left = std::move(lhs),
                         .right = std::move(rhs),
                         .type = bin->type,
+                    });
+    return tmp;
+}
+
+// ── unary value operators ─────────────────────────────────────────────────────
+
+MIRPlace MIRBuilder::buildUnaryOp(HIRUnaryOp *un)
+{
+    // The operand is a Copy primitive in every case sema accepts, so a plain
+    // read; LLVM already lowers all three (fneg / neg / not).
+    MIROperand operand = exprToOperand(un->operand.get());
+
+    MIRRValueUnaryOp::Op op = MIRRValueUnaryOp::Op::Neg;
+    switch (un->opKind)
+    {
+    case HIRUnaryOp::OpKind::Neg: op = MIRRValueUnaryOp::Op::Neg; break;
+    case HIRUnaryOp::OpKind::Not: op = MIRRValueUnaryOp::Op::Not; break;
+    case HIRUnaryOp::OpKind::BitNot: op = MIRRValueUnaryOp::Op::BitNot; break;
+    }
+
+    MIRPlace tmp = makeTempPlace(un->type);
+    emitAssign(tmp, MIRRValueUnaryOp{
+                        .op = op,
+                        .operand = std::move(operand),
+                        .type = un->type,
                     });
     return tmp;
 }
@@ -2127,7 +2294,8 @@ MIRPlace MIRBuilder::buildDeref(HIRDeref *d)
 MIRPlace MIRBuilder::emitIndexMethodCall(HIRIndexAccess *ia,
     const std::string &methodName,
     const std::shared_ptr<FunctionType> &methodType,
-    std::optional<MIROperand> value)
+    std::optional<MIROperand> value,
+    std::optional<MIROperand> indexOverride)
 {
     auto selfRefTy = methodType && !methodType->getParams().empty()
                          ? std::dynamic_pointer_cast<ReferenceType>(methodType->getParams()[0])
@@ -2151,7 +2319,11 @@ MIRPlace MIRBuilder::emitIndexMethodCall(HIRIndexAccess *ia,
         return placeToOperand(refTmp);
     }();
 
-    MIROperand idx = exprToOperand(ia->index.get());
+    // The index is normally lowered here; a caller that needs the SAME index for
+    // two calls (a compound element assignment reads through Index::at and writes
+    // through IndexMut::set) passes it in instead, so the expression runs once.
+    MIROperand idx = indexOverride.has_value() ? *indexOverride
+                                               : exprToOperand(ia->index.get());
 
     // The callee name operand, exactly as buildBinaryOp builds it for an
     // overloaded operator (lowerCall resolves funcName against the module).

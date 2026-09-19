@@ -269,7 +269,38 @@ bool CustomType::equals(const std::shared_ptr<Type> &other) const
 {
     if (other->getKind() != Kind::Custom) return false;
     auto ct = std::static_pointer_cast<CustomType>(other);
-    if (name != ct->name) return false;
+    if (name != ct->name)
+    {
+        // A generic DEFINITION and the same type instantiated with its OWN
+        // parameters are the same type. Inside `impl Vec`, `self` carries the
+        // definition (`vec$Vec`) while a field spelled `&Vec<T>` is the
+        // instantiation (`vec$Vec$T`, mangled); comparing by name alone rejected
+        // handing one over where the other is expected (a struct field, a return
+        // value, an argument). Only a parameter-for-parameter match counts, so
+        // `Vec` and `Vec<i32>` stay different types.
+        const CustomType *def = nullptr;
+        const CustomType *inst = nullptr;
+        if (genericArgs.empty() && !genericParams.empty())
+        {
+            def = this;
+            inst = ct.get();
+        }
+        else if (ct->genericArgs.empty() && !ct->genericParams.empty())
+        {
+            def = ct.get();
+            inst = this;
+        }
+        if (!def || !inst) return false;
+        if (def->name != inst->getOriginName()) return false;
+        if (def->genericParams.size() != inst->genericArgs.size()) return false;
+        for (size_t i = 0; i < def->genericParams.size(); ++i)
+        {
+            auto gp = std::dynamic_pointer_cast<GenericParamType>(def->genericParams[i]);
+            auto arg = std::dynamic_pointer_cast<GenericParamType>(inst->genericArgs[i]);
+            if (!gp || !arg || gp->getParamName() != arg->getParamName()) return false;
+        }
+        return true;
+    }
     if (genericArgs.size() != ct->genericArgs.size()) return false;
     for (size_t i = 0; i < genericArgs.size(); ++i)
         if (!genericArgs[i]->equals(ct->genericArgs[i])) return false;

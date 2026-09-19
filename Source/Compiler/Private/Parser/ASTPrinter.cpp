@@ -458,6 +458,12 @@ void ASTPrinter::visit(DerefExpr *node)
     os << " deref";
 }
 
+void ASTPrinter::visit(UnaryOp *node)
+{
+    printCommon(node);
+    os << " unary '" << node->op << "'";
+}
+
 void ASTPrinter::visit(BorrowExpr *node)
 {
     printCommon(node);
@@ -706,6 +712,11 @@ std::vector<ASTNode *> getChildren(ASTNode *node)
             children.push_back(bin->left.get());
         if (bin->right)
             children.push_back(bin->right.get());
+    }
+    else if (auto un = dynamic_cast<UnaryOp *>(node))
+    {
+        if (un->operand)
+            children.push_back(un->operand.get());
     }
     else if (auto cast = dynamic_cast<CastExpr *>(node))
     {

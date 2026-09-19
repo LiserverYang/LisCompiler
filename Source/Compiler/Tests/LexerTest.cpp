@@ -724,11 +724,36 @@ TEST_F(LexerTest, ColonDoubleColonMix)
 
 TEST_F(LexerTest, OperatorsNoSpaces)
 {
-    runLexer("+=-*");
+    // "+=" is ONE token since compound assignment landed (2026-09-19); a lone
+    // "+" followed by "=" now needs a space between them.
+    runLexer("+ = -*");
     expectToken(0, TokenCode::PLUS, "+", 1, 1);
-    expectToken(1, TokenCode::ASSIGN, "=", 1, 2);
-    expectToken(2, TokenCode::MINUS, "-", 1, 3);
-    expectToken(3, TokenCode::STAR, "*", 1, 4);
+    expectToken(1, TokenCode::ASSIGN, "=", 1, 3);
+    expectToken(2, TokenCode::MINUS, "-", 1, 5);
+    expectToken(3, TokenCode::STAR, "*", 1, 6);
+}
+
+TEST_F(LexerTest, CompoundAssignOperators)
+{
+    runLexer("+= -= *= /= %=");
+    expectToken(0, TokenCode::PLUS_ASSIGN, "+=", 1, 1);
+    expectToken(1, TokenCode::MINUS_ASSIGN, "-=", 1, 4);
+    expectToken(2, TokenCode::STAR_ASSIGN, "*=", 1, 7);
+    expectToken(3, TokenCode::SLASH_ASSIGN, "/=", 1, 10);
+    expectToken(4, TokenCode::MOD_ASSIGN, "%=", 1, 13);
+}
+
+TEST_F(LexerTest, UnaryOperatorTokens)
+{
+    runLexer("!x ~y -z +w");
+    expectToken(0, TokenCode::NOT, "!", 1, 1);
+    expectToken(1, TokenCode::IDENTIFIER, "x", 1, 2);
+    expectToken(2, TokenCode::TILDE, "~", 1, 4);
+    expectToken(3, TokenCode::IDENTIFIER, "y", 1, 5);
+    expectToken(4, TokenCode::MINUS, "-", 1, 7);
+    expectToken(5, TokenCode::IDENTIFIER, "z", 1, 8);
+    expectToken(6, TokenCode::PLUS, "+", 1, 10);
+    expectToken(7, TokenCode::IDENTIFIER, "w", 1, 11);
 }
 
 TEST_F(LexerTest, BracketsBalanced)
@@ -831,10 +856,12 @@ TEST_F(LexerTest, UnknownCharsStillLexAround)
     EXPECT_EQ(context->tokenStream[2].value, "b");
 }
 
-TEST_F(LexerTest, TildeIsUnknownChar)
+// `~` is the bitwise-complement OPERATOR now (2026-09-19); `^` is still unknown.
+TEST_F(LexerTest, TildeIsBitComplementToken)
 {
     runLexer("~");
-    EXPECT_GT(Logger::GetErrorCount(), 0);
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+    expectToken(0, TokenCode::TILDE, "~", 1, 1);
 }
 
 TEST_F(LexerTest, CaretIsUnknownChar)
