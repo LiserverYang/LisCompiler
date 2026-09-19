@@ -892,7 +892,7 @@ void HIRBuilder::visit(VariantInitExpr *node)
         call->staticTypeName = typeRef;
         call->methodName = node->variantName;
         for (auto &ga : node->enumType->genericArgs)
-            call->genericParams.push_back(toRaw(ga.get()));
+            call->staticGenericArgs.push_back(toRaw(ga.get()));
         for (auto &arg : node->arguments)
         {
             arg->accept(this);
@@ -953,6 +953,10 @@ void HIRBuilder::visit(StaticMemberCall *node)
     result->callKind = HIRCall::CallKind::Static;
     result->staticTypeName = typeRef;
     result->methodName = node->methodName;
+
+    // `Type<Args>::method` — the class type's arguments (see HIRCall).
+    for (auto &ga : node->classType->genericArgs)
+        result->staticGenericArgs.push_back(toRaw(ga.get()));
 
     for (auto &arg : node->genericParams)
     {

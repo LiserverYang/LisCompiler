@@ -258,6 +258,16 @@ private:
     MIRPlace buildIndexAccess(HIRIndexAccess *ia);
     /// `*p` — a place: the operand's place with a Deref projection appended.
     MIRPlace buildDeref(HIRDeref *d);
+
+    /** `v[i]` / `v[i] = x` on a USER TYPE: a call to the index operator trait
+     *  method (`Index::at` / `IndexMut::set`). The receiver is passed like any
+     *  method receiver — a container that is already a reference is handed over
+     *  as is, otherwise its address is taken. Returns the call's destination
+     *  place (void for the setter). */
+    MIRPlace emitIndexMethodCall(HIRIndexAccess *ia,
+        const std::string &methodName,
+        const std::shared_ptr<FunctionType> &methodType,
+        std::optional<MIROperand> value = std::nullopt);
     MIRPlace buildArrayLiteral(HIRArrayLiteral *al);
     MIRPlace buildStructInit(HIRStructInit *si);
     MIRPlace buildVariantInit(HIRVariantInit *vi);

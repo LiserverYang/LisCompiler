@@ -467,6 +467,16 @@ private:
     /// Method name for a binary op (`+`→"add"), or nullptr for logical ops.
     static const char *operatorMethodName(HIRBinaryOp::OpKind op);
 
+    /** Resolve `obj[i]` on a user type through the index operator traits
+     *  (`trait Index<T> { fn at(self: &Self, i: i32) -> T; }` and
+     *  `trait IndexMut<T> { fn set(self: &mut Self, i: i32, v: T); }`).
+     *  `forWrite` picks IndexMut (the node is an assignment target) over Index.
+     *  Mirrors resolveOperatorMethod: the method symbol lives under the type's
+     *  ORIGIN name, and a generic instantiation gets its struct arguments
+     *  substituted into the signature before the operand check. Returns false
+     *  when the type does not implement the trait. */
+    bool resolveIndexMethod(HIRIndexAccess *node, const std::shared_ptr<CustomType> &ct, bool forWrite);
+
     /** Bind one binary-operator operand to the trait method's parameter type.
      *
      * A parameter may be the operand's type directly, or a REFERENCE to it: the

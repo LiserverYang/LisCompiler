@@ -1026,6 +1026,20 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
     // Lower the RHS first (important: avoids wrong temp ordering on self-assign)
     MIROperand rhs = exprToOperand(assign->value.get());
 
+    // `v[i] = x` on a USER TYPE is a call to `IndexMut::set(obj, i, x)`, not a
+    // store: the container hands out its elements through a method, so there is
+    // no place to write. The RHS was evaluated first, exactly as for the array
+    // and field forms above.
+    if (auto *idx = dynamic_cast<HIRIndexAccess *>(assign->target.get()))
+    {
+        if (!idx->setMethodName.empty())
+        {
+            emitIndexMethodCall(idx, idx->setMethodName, idx->setMethodType,
+                std::move(rhs));
+            return;
+        }
+    }
+
     // Lower the LHS to a place.
     // The LHS must be a valid l-value: name-ref, member access, or deref.
     MIRPlace lhs = buildExpr(assign->target.get());
@@ -1933,10 +1947,26 @@ MIRPlace MIRBuilder::buildTry(HIRTry *node)
 MIRPlace MIRBuilder::buildCall(HIRCall *call)
 {
     // 1. Lower each argument expression into an operand.
+    //
+    // `__sizeof(x)` is a TYPE query: codegen only reads the loaded value type,
+    // so its argument must not be consumed. Lower it as a COPY even when the
+    // type is not Copy (MIRCopy = load without a move) — otherwise the local
+    // would be recorded as moved and never dropped.
+    const bool sizeofBuiltin = [&]
+    {
+        if (auto *nr = dynamic_cast<HIRNameRef *>(call->callee.get()))
+            return nr->name == "__sizeof";
+        return false;
+    }();
     std::vector<MIROperand> args;
     args.reserve(call->args.size());
     for (auto &arg : call->args)
-        args.push_back(exprToOperand(arg.get()));
+    {
+        if (sizeofBuiltin)
+            args.push_back(MIRCopy{.place = buildExpr(arg.get())});
+        else
+            args.push_back(exprToOperand(arg.get()));
+    }
 
     // 2. Lower the callee expression to a place / name.
     std::string funcName;
@@ -2079,8 +2109,68 @@ MIRPlace MIRBuilder::buildDeref(HIRDeref *d)
 // the heap buffer `p: *mut i8`) a Deref projection is APPENDED to load the
 // base pointer, then an Index projection GEPs from it (with a bounds check
 // for real arrays only). lowerPlaceAsPtr already lowers Index via GEP.
+MIRPlace MIRBuilder::emitIndexMethodCall(HIRIndexAccess *ia,
+    const std::string &methodName,
+    const std::shared_ptr<FunctionType> &methodType,
+    std::optional<MIROperand> value)
+{
+    auto selfRefTy = methodType && !methodType->getParams().empty()
+                         ? std::dynamic_pointer_cast<ReferenceType>(methodType->getParams()[0])
+                         : nullptr;
+
+    // The receiver: `&Self` / `&mut Self`, so an object that IS a reference is
+    // passed by value (the pointer to the container) and anything else has its
+    // address taken — exactly the rule the method-call path applies.
+    MIROperand recv = [&]() -> MIROperand
+    {
+        auto objRef = ia->object->type ? std::dynamic_pointer_cast<ReferenceType>(ia->object->type)
+                                       : nullptr;
+        if (objRef && selfRefTy && (objRef->isMutableRef() || !selfRefTy->isMutableRef()))
+            return exprToOperand(ia->object.get());
+
+        MIRPlace objPlace = buildExpr(ia->object.get());
+        MIRPlace refTmp = makeTempPlace(selfRefTy ? std::static_pointer_cast<Type>(selfRefTy)
+                                                  : ia->object->type);
+        emitAssign(refTmp, MIRRValueRef{.place = std::move(objPlace),
+                          .isMut = selfRefTy ? selfRefTy->isMutableRef() : false});
+        return placeToOperand(refTmp);
+    }();
+
+    MIROperand idx = exprToOperand(ia->index.get());
+
+    // The callee name operand, exactly as buildBinaryOp builds it for an
+    // overloaded operator (lowerCall resolves funcName against the module).
+    MIRPlace calleePlace = makeTempPlace(methodType);
+    MIRConst nameConst{
+        .kind = MIRConst::Kind::String, .value = methodName, .type = methodType};
+    emitAssign(calleePlace, MIRRValueUse{.operand = std::move(nameConst)});
+
+    std::vector<MIROperand> args;
+    args.push_back(std::move(recv));
+    args.push_back(std::move(idx));
+    if (value.has_value())
+        args.push_back(std::move(*value));
+
+    MIRPlace dest = makeTempPlace(methodType->getReturnType());
+    emit(MIRStmtCall{
+        .dest = dest,
+        .callee = placeToOperand(calleePlace),
+        .funcName = methodName,
+        .args = std::move(args),
+        // The struct's generic args MUST ride along: a call with a non-empty
+        // genericParams is what monomorphization renames to `at_Mono_i32`.
+        .genericParams = value.has_value() ? ia->setStructArgs : ia->indexStructArgs});
+    return dest;
+}
+
 MIRPlace MIRBuilder::buildIndexAccess(HIRIndexAccess *ia)
 {
+    // A user type (`v[i]`) is indexed by CALLING the operator trait method — it
+    // is a value-returning access, not a place. Arrays and raw pointers never
+    // set these fields and keep the projection path below.
+    if (!ia->indexMethodName.empty())
+        return emitIndexMethodCall(ia, ia->indexMethodName, ia->indexMethodType);
+
     MIRPlace base = buildExpr(ia->object.get());
 
     // Deref a reference-typed base (append — the reference is the VALUE of the

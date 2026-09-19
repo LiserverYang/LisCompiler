@@ -1945,6 +1945,17 @@ std::unique_ptr<Expr> Parser::parseFunctionCall(Token name)
         type->typeName = name.value;
         type->position = name.position;
         type->length = name.value.length();
+        // The `<...>` BEFORE the `::` belongs to the CLASS type, not to the
+        // method: `Vec<i32>::new()` is a static call on `Vec<i32>`. Dropping it
+        // (the old behaviour) left every static call on a generic struct
+        // un-instantiable — the analyzer saw a bare `Vec` and failed with
+        // "failed to infer generic static method params". A method's OWN
+        // turbofish, if any, is parsed below into `staticCall->genericParams`.
+        if (!genericParams.empty())
+        {
+            type->genericArgs = std::move(genericParams);
+            genericParams.clear();
+        }
         staticCall->classType = std::move(type);
 
         staticCall->methodName = consume(TokenCode::IDENTIFIER, "expected method name", E_ExpectAnIdentifier).value;

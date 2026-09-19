@@ -26,6 +26,20 @@ trait Numeric
 {
 }
 
+// Marker trait: a type that may be COPIED (every primitive; structs, enums,
+// String and Vec are not). Primitives implement it automatically, exactly like
+// Numeric.
+//
+// It is not decoration: `T: Copy` is what makes a T-typed value readable
+// through a reference inside a generic body. Without the bound the compiler
+// classifies `ret self.v` (with `self: &Box`) as a MOVE out of a borrow and
+// rejects it with E3017, so a container could not hand out its elements at all.
+// Use it as the bound of any generic type that copies its elements:
+//     struct Vec<T: Copy> { ... }
+trait Copy
+{
+}
+
 // Marker trait: an integer type (i8/i16/i32/i64). Primitives implement it
 // automatically; floats and structs do not. Use for bitwise/shift generics.
 trait Integer

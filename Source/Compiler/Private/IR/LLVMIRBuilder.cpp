@@ -1499,6 +1499,18 @@ void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const 
         if (s.dest.has_value())
             storePlace(fs, *s.dest, len32);
     }
+    else if (s.funcName == "__sizeof")
+    {
+        // A TYPE query, not a call: no runtime access is emitted, the argument
+        // was lowered only so its LLVM type is known. (MIRBuilder lowers that
+        // argument as a COPY, so a non-Copy element would not be consumed.)
+        uint64_t bytes = 0;
+        if (!args.empty() && args[0])
+            bytes = context->module->getDataLayout().getTypeAllocSize(args[0]->getType());
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest,
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), bytes));
+    }
 }
 
 // ── Builtin C-string helpers: str_len / str_cmp ──────────────────────────────

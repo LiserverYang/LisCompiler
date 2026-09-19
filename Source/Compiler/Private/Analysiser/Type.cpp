@@ -25,6 +25,16 @@ Type::Type(Kind kind) : kind(kind) {}
 
 bool Type::isCopyable() const
 {
+    // A GENERIC PARAMETER is Copy only when its bounds say so (`T: Copy`).
+    // Without this branch a generic body could not read a T-typed field at all:
+    // every such read was classified as a MOVE, so `ret self.v` inside
+    // `fn get(self: &Box) -> T` was rejected with E3017 ("cannot move out of
+    // self.v: it is behind the reference") — which made container methods like
+    // Vec::pop unrepresentable. updateContraints() mirrors the bounds into
+    // implTrait, so implementsTrait() sees them.
+    if (kind == Kind::GenericParam)
+        return implementsTrait("Copy");
+
     // `&mut T` is deliberately NOT Copy: two live copies of an exclusive
     // reference would both claim unique access to the referent. It is still
     // non-owning (see isPointerLike), so it never needs drop glue — that is what

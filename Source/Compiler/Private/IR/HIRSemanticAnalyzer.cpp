@@ -508,6 +508,24 @@ void HIRSemanticAnalyzer::matchGenericType(
             matchGenericType(refParam->getBaseType(), refArg->getBaseType(), genericMap);
         return;
     }
+    // A `*mut T` / `*T` FIELD carries the parameter just like a reference does:
+    // a container buffer (`struct Vec<T: Copy> { data: *mut T, ... }`) could not
+    // be constructed from its own methods without this — `Vec { data: <*mut T>,
+    // ... }` reported "cannot infer generic parameter T". (`Foo<i32> { ... }` is
+    // NOT a way out: the parser rejects explicit generic arguments on a struct
+    // literal, because `Name<T> {` is ambiguous with `a < b {`.)
+    if (auto ptrParam = std::dynamic_pointer_cast<PointerType>(paramTy))
+    {
+        if (auto ptrArg = std::dynamic_pointer_cast<PointerType>(argTy))
+            matchGenericType(ptrParam->getBaseType(), ptrArg->getBaseType(), genericMap);
+        return;
+    }
+    if (auto arrParam = std::dynamic_pointer_cast<ArrayType>(paramTy))
+    {
+        if (auto arrArg = std::dynamic_pointer_cast<ArrayType>(argTy))
+            matchGenericType(arrParam->getElementType(), arrArg->getElementType(), genericMap);
+        return;
+    }
     if (auto ctParam = std::dynamic_pointer_cast<CustomType>(paramTy))
     {
         auto ctArg = std::dynamic_pointer_cast<CustomType>(argTy);
@@ -1793,7 +1811,11 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
     //   Add Sub Mul Div Rem : ints + floats (returns Self)
     //   PartialEq PartialOrd : ints + floats + char + bool (returns bool)
     //   BitAnd ... Shr : ints only
-    if (displayName(node->name) == "Numeric" || displayName(node->name) == "Integer" || isOperatorTrait(displayName(node->name)))
+    //   Copy : every primitive (a generic container needs `T: Copy` to be able
+    //          to read an element through a reference at all — see
+    //          Type::isCopyable).
+    if (displayName(node->name) == "Numeric" || displayName(node->name) == "Integer"
+        || displayName(node->name) == "Copy" || isOperatorTrait(displayName(node->name)))
     {
         auto traitTy = std::static_pointer_cast<TraitType>(sym->type);
         auto seed = [&](PrimitiveType::PrimKind k)
@@ -1808,9 +1830,10 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
         bool isCmp = (n == "PartialEq" || n == "PartialOrd");
         bool isArith = (n == "Add" || n == "Sub" || n == "Mul" || n == "Div" || n == "Rem");
         bool isBitwise = (n == "BitAnd" || n == "BitOr" || n == "BitXor" || n == "Shl" || n == "Shr");
+        bool isCopyMarker = (n == "Copy");
 
         // ints get every family (Numeric/Integer markers + all operator traits).
-        if (isNumeric || isInteger || isCmp || isArith || isBitwise)
+        if (isNumeric || isInteger || isCmp || isArith || isBitwise || isCopyMarker)
         {
             seed(PrimitiveType::PrimKind::I8);
             seed(PrimitiveType::PrimKind::I16);
@@ -1818,14 +1841,14 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
             seed(PrimitiveType::PrimKind::I64);
         }
         // floats get Numeric + arithmetic + comparison, NOT Integer / bitwise.
-        if (isNumeric || isCmp || isArith)
+        if (isNumeric || isCmp || isArith || isCopyMarker)
         {
             seed(PrimitiveType::PrimKind::F32);
             seed(PrimitiveType::PrimKind::F64);
         }
-        if (isNumeric || isCmp)
+        if (isNumeric || isCmp || isCopyMarker)
             seed(PrimitiveType::PrimKind::CHAR); // char compares via i32
-        if (isCmp)
+        if (isCmp || isCopyMarker)
             seed(PrimitiveType::PrimKind::BOOL); // == / < work on bool
     }
 
@@ -4967,27 +4990,70 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
         return true;
     }
 
+    // `__sizeof(x)` is a TYPE query, not a call: it yields the size of the
+    // argument type in bytes as a compile-time constant (no runtime access).
+    // A generic container needs it because a byte count is what malloc/memcpy
+    // take, while `T` is only known to the standard library as a parameter.
+    if (name == "__sizeof")
+    {
+        if (node->args.size() != 1)
+            log(*node, "builtin '__sizeof' expects 1 argument, got " + std::to_string(node->args.size()) + ".");
+        if (!node->args.empty())
+            analyzeExpr(node->args[0].get()); // any type; NOT moved (see MIRBuilder)
+
+        node->type = i32Ty;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = i32Ty;
+        return true;
+    }
+
+    // The pointer parameters below are deliberately TYPE-AGNOSTIC: at the LLVM
+    // level they are all opaque `ptr`, and libc neither knows nor cares about
+    // the pointee. A container therefore frees/copies a `*mut T` buffer with the
+    // same primitives String uses for its `*mut i8` one. (Only the standard
+    // library can call them at all, see the gate above.)
+    auto isAnyPtr = [](const std::shared_ptr<Type> &ty)
+    {
+        return ty && (ty->getKind() == Type::Kind::Pointer || ty->getKind() == Type::Kind::Reference);
+    };
+
     std::shared_ptr<Type> retTy = nullptr;
     std::vector<std::shared_ptr<Type>> argTys;
+    bool ptrArgsAreAnyPtr = false;
     if (name == "__alloc")
     {
-        retTy = mutI8Ptr; // *mut i8 — the caller gets a writable heap buffer
-        argTys = {i32Ty}; // size
+        // `__alloc<T>(n)` hands back a `*mut T` buffer of n BYTES (same
+        // meaning as always — the generic argument only chooses the POINTER
+        // TYPE, so a container can store the buffer typed instead of casting
+        // it; the caller scales n by __sizeof when it allocates n elements).
+        // Without an explicit argument the result is the historical
+        // `*mut i8` — String relies on that spelling.
+        retTy = mutI8Ptr;
+        if (!node->genericParams.empty())
+        {
+            auto pointee = resolveType(node->genericParams[0], *node);
+            if (!pointee) pointee = i8Ty;
+            retTy = context->typeContext->getPointer(pointee, /*isMutable=*/true);
+        }
+        argTys = {i32Ty}; // size, in BYTES (scale by __sizeof for elements)
     }
     else if (name == "__free")
     {
         retTy = voidTy;
-        argTys = {shI8Ptr}; // *i8 — free only needs the address
+        argTys = {shI8Ptr}; // free only needs the address
+        ptrArgsAreAnyPtr = true;
     }
     else if (name == "__memcpy")
     {
         retTy = mutI8Ptr;                    // returns dst (unused in .lis)
-        argTys = {mutI8Ptr, shI8Ptr, i32Ty}; // dst (*mut i8), src (*i8), n
+        argTys = {mutI8Ptr, shI8Ptr, i32Ty}; // dst, src, n (bytes)
+        ptrArgsAreAnyPtr = true;
     }
     else if (name == "__strlen")
     {
         retTy = i32Ty;      // length (truncated from size_t)
         argTys = {shI8Ptr}; // *i8
+        ptrArgsAreAnyPtr = true;
     }
     else
         return false; // not a heap builtin
@@ -4999,8 +5065,14 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
     for (size_t i = 0; i < node->args.size() && i < argTys.size(); ++i)
     {
         analyzeExpr(node->args[i].get());
-        if (node->args[i]->type && !typesCompatible(argTys[i], node->args[i]->type))
-            log(*node->args[i], "builtin '" + name + "' expects argument of type '" + argTys[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
+        const auto &argTy = node->args[i]->type;
+        // A pointer parameter accepts ANY pointee (see ptrArgsAreAnyPtr); every
+        // other parameter keeps the strict check.
+        const bool ok = argTy && (ptrArgsAreAnyPtr && argTys[i]->getKind() == Type::Kind::Pointer
+                                      ? isAnyPtr(argTy)
+                                      : typesCompatible(argTys[i], argTy));
+        if (argTy && !ok)
+            log(*node->args[i], "builtin '" + name + "' expects argument of type '" + argTys[i]->toString() + "', got '" + argTy->toString() + "'.");
     }
 
     node->type = retTy;
@@ -5502,6 +5574,18 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         // for monomorphization to substitute them (Item B-b).
         std::vector<std::shared_ptr<Type>> structArgs = customTy->getGenericArgs();
 
+        // The receiver is the generic DEFINITION itself (`self.grow(...)` inside
+        // `impl Vec`): its arguments are the definition's own parameters (the `T`
+        // in scope), so the method's struct-level generics are ALREADY known.
+        // Without this, inference had to find `T` among the VALUE parameters
+        // (`grow` takes only an i32) and always failed with "failed to infer
+        // generic method params" — which made every generic-struct method with
+        // arguments uncallable from inside the type.
+        std::vector<std::shared_ptr<Type>> definitionArgs;
+        if (structArgs.empty() && customTy->isGeneric())
+            for (const auto &gp : customTy->getGenericParams())
+                definitionArgs.push_back(gp);
+
         std::shared_ptr<FunctionType> instantiatedFuncType;
         if (newTy->isGeneric())
         {
@@ -5525,6 +5609,12 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                     log(*node, "generic param count mismatch");
                     return;
                 }
+            }
+            else if (!definitionArgs.empty() && definitionArgs.size() == genericParams.size())
+            {
+                // The definition's parameters ARE the arguments (see above); no
+                // inference is possible or needed.
+                genericArgs = definitionArgs;
             }
             else
             {
@@ -5656,7 +5746,36 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             return;
         }
 
-        auto customTy = std::dynamic_pointer_cast<CustomType>(custom.value());
+        // `Vec<i32>::new()`: the class type carries use-site generic arguments,
+        // so resolve name + args as ONE type (resolveType runs the declared-bound
+        // check) and work with the INSTANTIATION from here on. An instantiation
+        // keeps the origin's method list (getMethods) and origin name, while
+        // getGenericArgs() yields the struct's concrete arguments — exactly what
+        // the signature substitution and monomorphization below need. Without
+        // this a static call on a generic struct stayed a bare definition and
+        // every call died with "failed to infer generic static method params".
+        std::shared_ptr<Type> classTy = custom.value();
+        if (!node->staticGenericArgs.empty())
+        {
+            HIRRawType rawClassTy;
+            rawClassTy.isPresent = true;
+            rawClassTy.isPrimitive = false;
+            rawClassTy.name = node->staticTypeName;
+            rawClassTy.genericArgs = node->staticGenericArgs;
+            classTy = resolveType(rawClassTy, *node);
+        }
+
+        auto customTy = std::dynamic_pointer_cast<CustomType>(classTy);
+        if (!customTy)
+        {
+            // resolveType's own instantiation failures come back as VOID and were
+            // already reported; only "not a struct at all" is new here.
+            if (!classTy || classTy->getKind() != Type::Kind::Primitive)
+                log(*node, "type '" + node->staticTypeName + "' is not a struct.");
+            node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+            return;
+        }
+
         const auto &methods = customTy->getMethods();
         auto it = std::find_if(methods.begin(), methods.end(), [&](const CustomType::Method &m)
             { return m.name == node->methodName; });
@@ -5676,8 +5795,10 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         }
 
         // The method symbol is keyed by the type's INTERNAL name (e.g.
-        // `string$String::from_lit`), not the source spelling.
-        std::string funcName = customTy->getName() + "::" + node->methodName;
+        // `string$String::from_lit`), not the source spelling. The ORIGIN name:
+        // an instantiation is mangled (`Vec$i32`), and methods live on the
+        // definition (same rule as the Method branch).
+        std::string funcName = customTy->getOriginName() + "::" + node->methodName;
         Symbol *symbol = SymbolTable::getInstance().lookupSymbol(funcName);
         if (!symbol)
         {
@@ -5687,12 +5808,36 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         }
         auto funcType = std::static_pointer_cast<FunctionType>(symbol->type);
 
+        // A static method of a generic struct is written against the struct's
+        // parameters (`fn new() -> Vec<T>`), so substitute params → the
+        // instantiation's args before anything reads the signature. Mirrors the
+        // Method branch; the substituted type is non-generic, which is why the
+        // call's generic args are the STRUCT's below.
+        std::unordered_map<std::string, std::shared_ptr<Type>> structSubst;
+        if (!customTy->getGenericArgs().empty() && customTy->genericOrigin)
+        {
+            const auto &gps = customTy->genericOrigin->getGenericParams();
+            const auto &gas = customTy->getGenericArgs();
+            for (size_t i = 0; i < gps.size() && i < gas.size(); ++i)
+            {
+                auto gp = std::static_pointer_cast<GenericParamType>(gps[i]);
+                structSubst[gp->getParamName()] = gas[i];
+            }
+            funcType = std::static_pointer_cast<FunctionType>(substituteType(funcType, structSubst));
+        }
+
         // ===================== 泛型参数推断与填充 =====================
         // Mirror the Method branch: always carry the struct's concrete generic
-        // args (empty for a bare-name static call on a generic definition),
-        // appending the method's own args when the method is generic. Without
-        // this, a static call on a generic struct never reaches monomorphization.
+        // args, appending the method's own args when the method is generic.
+        // Without this, a static call on a generic struct never reaches
+        // monomorphization. Concrete class args, in the struct's generic-param
+        // order — the
+        // monomorphization carrier for a static method of a generic struct
+        // (`Vec<i32>::new()` → [i32]). Empty for a bare-name call on the
+        // definition, where the struct's args still have to be inferred from the
+        // value arguments (`box::new(10)` → [i32]) exactly as before.
         std::vector<std::shared_ptr<Type>> structArgs = customTy->getGenericArgs();
+
         std::shared_ptr<FunctionType> instantiatedFuncType;
         if (funcType->isGeneric())
         {
@@ -5808,6 +5953,96 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
 }
 
 // ---------------------------------------------------------------------------
+// `obj[i]` on a user type: the index operator traits. Kept next to
+// resolveOperatorMethod and built the same way (symbol under the ORIGIN name +
+// struct-argument substitution), so indexing and the binary operators share one
+// mental model.
+bool HIRSemanticAnalyzer::resolveIndexMethod(HIRIndexAccess *node,
+    const std::shared_ptr<CustomType> &ct,
+    bool forWrite)
+{
+    const char *traitName = forWrite ? "IndexMut" : "Index";
+    const char *methodName = forWrite ? "set" : "at";
+
+    if (!ct->implementsTrait(traitName)) return false;
+
+    std::string baseName = ct->getOriginName();
+    std::string symName = baseName + "::" + methodName;
+    Symbol *symbol = SymbolTable::getInstance().lookupSymbol(symName);
+    if (!symbol)
+    {
+        log(*node, "type '" + baseName + "' implements '" + traitName + "' but no method '"
+                       + methodName + "' is registered on it.");
+        return true; // reported; do not also emit the "not indexable" error
+    }
+
+    auto newTy = std::static_pointer_cast<FunctionType>(symbol->type);
+
+    // A generic instantiation (`Vec$i32`) needs its gParams substituted into the
+    // method signature before the operand check below (mirrors
+    // resolveOperatorMethod).
+    std::unordered_map<std::string, std::shared_ptr<Type>> structSubst;
+    if (!ct->getGenericArgs().empty() && ct->genericOrigin)
+    {
+        const auto &gps = ct->genericOrigin->getGenericParams();
+        const auto &gas = ct->getGenericArgs();
+        for (size_t i = 0; i < gps.size() && i < gas.size(); ++i)
+            structSubst[std::static_pointer_cast<GenericParamType>(gps[i])->getParamName()] = gas[i];
+        newTy = std::static_pointer_cast<FunctionType>(substituteType(newTy, structSubst));
+    }
+
+    const size_t expected = forWrite ? 3 : 2;
+    if (newTy->getParams().size() != expected)
+    {
+        log(*node, std::string("index method '") + methodName + "' must take "
+                       + (forWrite ? "3 parameters (self, i, v)" : "2 parameters (self, i)")
+                       + ", got " + std::to_string(newTy->getParams().size()) + ".");
+        return true;
+    }
+
+    auto selfRef = std::dynamic_pointer_cast<ReferenceType>(newTy->getParams()[0]);
+    if (!selfRef)
+    {
+        log(*node, std::string("index method '") + methodName + "' must take a reference receiver.");
+        return true;
+    }
+    if (forWrite && !selfRef->isMutableRef())
+    {
+        log(*node, "index method 'set' must take '&mut Self' (writing through the index mutates the container).");
+        return true;
+    }
+    if (!selfRef->getBaseType()->equals(ct))
+    {
+        log(*node, std::string("index method '") + methodName + "' receiver type does not match '" + baseName + "'.");
+        return true;
+    }
+
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    if (node->index->type && !node->index->type->equals(i32Ty))
+        log(*node->index, "array index must be of type 'i32', got '" + node->index->type->toString() + "'.");
+
+    // `v[i]` denotes a PLACE of the element type in both directions: the write
+    // form yields `set`'s third parameter (`T`), not `set`'s void return —
+    // otherwise `v[0] = 50` reported "assignment type mismatch" (void vs i32).
+    node->type = forWrite ? newTy->getParams()[2] : newTy->getReturnType();
+
+    if (forWrite)
+    {
+        node->setMethodName = symName;
+        node->setMethodType = newTy;
+        node->setStructArgs = ct->getGenericArgs();
+    }
+    else
+    {
+        node->indexMethod = symbol;
+        node->indexMethodName = symName;
+        node->indexMethodType = newTy;
+        node->indexStructArgs = ct->getGenericArgs();
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
 {
     analyzeExpr(node->object.get());
@@ -5832,6 +6067,50 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
         viaReference = true;
     }
 
+    // A USER TYPE is indexed through the index operator traits — the only
+    // user-extensible spelling of `v[i]`. Arrays and raw pointers never come
+    // here: they keep the built-in projection path below, unchanged.
+    if (auto ct = std::dynamic_pointer_cast<CustomType>(objTy))
+    {
+        // While analyzing an ASSIGNMENT TARGET, `v[i] = x` resolves IndexMut::set
+        // instead of Index::at (visit(HIRAssign) sets inAssignTarget_ around the
+        // target). The node type is the element type either way, so the existing
+        // assignment type check still applies.
+        if (resolveIndexMethod(node, ct, inAssignTarget_))
+        {
+            // The receiver behaves like a READ of the container, not like a
+            // borrow of it: the access CHECKS against the borrows already live
+            // (so `let r = &mut v; let x = v[0];` is still rejected, and
+            // `v.push(v[0])` passes through the receiver's two-phase
+            // reservation) but CREATES none — exactly what reading a Copy
+            // element does for an array (visit(HIRMemberAccess) does the same for
+            // a Copy field). A created borrow would outlive the read to the end
+            // of the statement and collide with the statement's own write:
+            // `v[2] = v[0] + 1;` was rejected as "cannot assign to 'v[2]'
+            // because it is borrowed" (E4003) by the read on its right-hand side.
+            //
+            // An assignment target (`v[0] = x` → IndexMut::set, `&mut self`)
+            // does not even check here: visit(HIRAssign) runs the write check on
+            // this very place, which is the same protection.
+            if (!inAssignTarget_)
+            {
+                std::string rroot;
+                std::vector<std::string> rpath;
+                if (resolvePlace(node->object.get(), rroot, rpath))
+                    checkBorrowUse(rroot, rpath, BorrowUseKind::Read, *node);
+            }
+        }
+        else
+        {
+            // Keeps the "is not indexable" phrasing the reference-to-struct
+            // rejection has always used (and the test asserts): an instantiation
+            // reaches this same branch, and the actionable part is the trait.
+            log(*node, "type '" + objTy->toString()
+                           + "' is not indexable; implement the 'Index<T>' trait to make it indexable.");
+        }
+        return;
+    }
+
     std::shared_ptr<Type> elemTy;
     if (auto arrTy = std::dynamic_pointer_cast<ArrayType>(objTy))
         elemTy = arrTy->getElementType(); // bounds-checked in codegen
@@ -5846,13 +6125,22 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
             log(*node, "indexing the raw pointer '" + ptrTy->toString() + "' is only allowed inside the standard library: it is unchecked C pointer arithmetic.", E_PointerOpOutsideStdlib);
             return;
         }
-        // Only primitives (a byte/small buffer) or arrays are legal pointees; a
-        // pointer to a struct would hit an llvm_unreachable in codegen and would
-        // otherwise let `p[0].f = x` write through a shared pointer.
-        if (ptrTy->getBaseType()->getKind() != Type::Kind::Primitive
-            && ptrTy->getBaseType()->getKind() != Type::Kind::Array)
+        // Only primitives (a byte/small buffer), arrays or a GENERIC PARAMETER
+        // are legal pointees; a pointer to a struct would hit an
+        // llvm_unreachable in codegen and would otherwise let `p[0].f = x`
+        // write through a shared pointer.
+        //
+        // The generic-param case is what a container buffer needs
+        // (`data: *mut T` inside the standard library): the pointee is opaque
+        // until monomorphization substitutes it, at which point the GEP/load
+        // below are ordinary. It stays confined to the standard library anyway
+        // (the E3014 gate above).
+        const auto pointeeKind = ptrTy->getBaseType()->getKind();
+        if (pointeeKind != Type::Kind::Primitive
+            && pointeeKind != Type::Kind::Array
+            && pointeeKind != Type::Kind::GenericParam)
         {
-            log(*node, "cannot index '" + ptrTy->toString() + "' (only pointers to primitives or arrays).");
+            log(*node, "cannot index '" + ptrTy->toString() + "' (only pointers to primitives, arrays or a generic parameter).");
             return;
         }
         elemTy = ptrTy->getBaseType();

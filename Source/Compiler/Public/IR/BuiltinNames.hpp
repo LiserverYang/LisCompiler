@@ -63,6 +63,7 @@ inline BuiltinCategory classifyBuiltin(const std::string &name)
         "__free",
         "__memcpy",
         "__strlen",
+        "__sizeof", // size of a type in bytes, as a compile-time constant
     };
     // Raw-pointer → reference conversion. The reverse of the implicit
     // `&T → *T` coercion, and deliberately NOT implicit: turning an unverified

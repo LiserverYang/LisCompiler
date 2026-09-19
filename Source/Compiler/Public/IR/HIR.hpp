@@ -245,6 +245,12 @@ public:
     // Static call: type name + method name (object is null, callee is null)
     std::string staticTypeName;
 
+    /// `Type<Args>::method(...)` — the CLASS type's use-site generic arguments
+    /// (`Vec<i32>::new()` → `[i32]`). Kept apart from `genericParams` (the
+    /// METHOD's own turbofish) because the two are consumed differently: these
+    /// instantiate the struct, those instantiate the method.
+    std::vector<HIRRawType> staticGenericArgs;
+
     std::vector<HIRRawType> genericParams;
     std::vector<std::shared_ptr<Type>> typedGenericParams;
 
@@ -279,11 +285,28 @@ public:
 // ---------------------------------------------------------------------------
 /// `a[i]` — array/pointer element access. Type (the element type) is filled by
 /// sema; MIR lowers it to a `ProjectionKind::Index`.
+///
+/// A USER TYPE is indexed through the `Index<T>` / `IndexMut<T>` operator traits
+/// instead (the only built-in spelling stays the projection for arrays and raw
+/// pointers). Sema then fills the method fields below and MIR emits a CALL — an
+/// index access through a trait is a value-returning method call, NOT a place.
 class HIRIndexAccess : public HIRExpr
 {
 public:
     std::unique_ptr<HIRExpr> object;
     std::unique_ptr<HIRExpr> index;
+
+    // ── operator-trait indexing (`v[i]`) ──────────────────────────────────────
+    Symbol *indexMethod = nullptr;                        // `Index::at`
+    std::string indexMethodName;                          // "vec$Vec::at" (mono-ready)
+    std::shared_ptr<FunctionType> indexMethodType;        // instantiated signature
+    std::string setMethodName;                            // `IndexMut::set`, filled when
+    std::shared_ptr<FunctionType> setMethodType;          // the node is an ASSIGN TARGET
+    /// The receiver's struct generic args ([i32] for Vec$i32). They MUST travel
+    /// with the call: MIRMonomorphization renames a call whose genericParams is
+    /// non-empty to `x_Mono_<args>`, which is the only name codegen emits.
+    std::vector<std::shared_ptr<Type>> indexStructArgs;
+    std::vector<std::shared_ptr<Type>> setStructArgs;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
