@@ -1262,14 +1262,24 @@ TEST_F(BorrowCheckerTest, ArrayRefReadElementThroughIndex)
 
 // ── C2: if/else and moves ──────────────────────────────────────────────────────
 
-TEST_F(BorrowCheckerTest, MoveInOneBranchUseOtherRejected)
+TEST_F(BorrowCheckerTest, MoveInOneBranchDoesNotPoisonTheOther)
 {
-    // A move in the then-branch makes the else-branch's use of x unsound
-    // (flow-sensitive move tracking rejects it even though the branches are
-    // exclusive at runtime).
-    expectError("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
-                " if b { let y = x; ret 0; } else { let t = x.v; ret t; } }",
-        "moved");
+    // DECISION (2026-09-19): moves are tracked as CFG DATAFLOW, so a move in one
+    // branch does not poison the other — the branches are exclusive at runtime
+    // (Rust accepts this too). The HIR checker walks the tree in source order
+    // with ONE global moved-state per binding, so the then-branch's move leaked
+    // into the else-branch and this was rejected as "use of moved value": that
+    // rejection was an artifact of the approximation, not a language rule.
+    //
+    // Both implementations run against this suite while the checker is being
+    // ported to MIR, so the expectation follows the active one; when the HIR
+    // implementation is deleted this becomes an unconditional expectOk.
+    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
+                      " if b { let y = x; ret 0; } else { let t = x.v; ret t; } }";
+    if (MIRBorrowCheck::enabled())
+        expectOk(src);
+    else
+        expectError(src, "moved");
 }
 
 TEST_F(BorrowCheckerTest, MoveInBranchThenUseAfterRejected)
