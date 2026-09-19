@@ -831,33 +831,18 @@ void HIRBuilder::visit(ForStmt *node)
     outer->stmts.push_back(std::move(itDecl));
     outer->stmts.push_back(std::move(loop));
 
-    if (byBorrow)
-    {
-        // Pin the source borrow across the loop. NLL ends a borrow at its
-        // holder LAST USE, and the iterator is built from __src before the loop —
-        // without a later use the borrow would be over by the time the body runs,
-        // and "for x in v { v.push(1); }" would silently corrupt the loop (a push
-        // can reallocate the buffer under the iterator). "&*__src" is a
-        // type-agnostic use of the reference: it keeps the collection borrowed
-        // for the WHOLE loop, so a write or move of it in the body is E4001.
-        auto pin = std::make_unique<HIRExprStmt>();
-        pin->position = position;
-        pin->length = length;
-
-        auto reborrow = std::make_unique<HIRRef>();
-        reborrow->position = position;
-        reborrow->length = length;
-        reborrow->isMutable = false;
-
-        auto deref = std::make_unique<HIRDeref>();
-        deref->position = position;
-        deref->length = length;
-        deref->operand = nameRef(srcName);
-
-        reborrow->expr = std::move(deref);
-        pin->expr = std::move(reborrow);
-        outer->stmts.push_back(std::move(pin));
-    }
+    // NOTE (2026-09-19): a `let __hold = &*__src;` PIN used to follow the loop to
+    // keep the source borrow alive across the body — the tree-based checker ended
+    // a borrow at its holder's last use, and the iterator is built from __src
+    // BEFORE the loop, so `for x in v { v.push(1); }` would have slipped through
+    // and corrupted the loop (a push can reallocate the buffer under the
+    // iterator). The MIR checker instead CARRIES the borrow into the iterator
+    // value: `__it = call iter(__src)` returns a VecIter whose `src` field points
+    // at the same Vec, and carriesReferenceTo() moves the borrow's holder onto
+    // __it — so the borrow is live exactly as long as the iterator is. The pin
+    // became redundant and was removed; the soundness case is covered by
+    // RuntimeTest.ForBorrowBodyCannotMutateTheSource and the legal one by
+    // ForBorrowsAPlaceAndKeepsItUsable (which pushes AFTER the loop).
 
     nodeStack.push(std::move(outer));
 }

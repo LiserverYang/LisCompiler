@@ -607,12 +607,11 @@ public:
     HIRSemanticAnalyzer(std::shared_ptr<Context> cnt)
     {
         context = cnt;
-        // MIRBorrowCheck owns the borrow/move/init/dangling checks by default
-        // since the port reached parity; LIS_BORROW_CHECK=hir falls back to the
-        // implementations in this file (keep the two rules in sync with
-        // MIRBorrowCheck::enabled).
-        const char *checker = std::getenv("LIS_BORROW_CHECK");
-        mirBorrowCheck_ = !(checker != nullptr && std::string(checker) == "hir");
+        // MIRBorrowCheck owns the borrow/move/init/dangling checks (see
+        // MIRBorrowCheck::enabled, now a constant). The flag stays as the marker
+        // of which code below is DEAD — the implementations it guards are kept
+        // only until they are deleted, together with the flag itself.
+        mirBorrowCheck_ = true;
         SymbolTable::getInstance().initGlobalScope();
     }
 

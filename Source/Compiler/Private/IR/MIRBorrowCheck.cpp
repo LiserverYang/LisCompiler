@@ -422,6 +422,19 @@ private:
     /// The whole local a statement copies/moves its value FROM (SIZE_MAX when the
     /// statement is not a plain reference copy).
     size_t copySourceOf(const MIRStatement &stmt) const;
+    /// Every whole local the statement READS (operands and place roots).
+    void sourceLocalsOf(const MIRStatement &stmt, std::vector<size_t> &out) const;
+    /// Does a value of this type carry a reference TO `pointee` (directly, or in
+    /// a struct field, recursively)? This is the precise question for a CARRIER
+    /// assignment: `__it = call iter(__src)` returns a VecIter whose
+    /// `src: &Vec<T>` has the same pointee as the borrowed place, so the borrow
+    /// follows into the iterator (and the loop over it keeps the source
+    /// borrowed). A destination that merely holds SOME reference does not carry
+    /// THIS borrow — matching on the pointee is what keeps it from being
+    /// over-eager (an earlier 'carries any reference' version regressed 5 cases).
+    bool carriesReferenceTo(const std::shared_ptr<Type> &ty, const std::shared_ptr<Type> &pointee, int depth = 0) const;
+    /// ... and does it carry a reference at all? A cheap pre-filter for the above.
+    bool carriesReference(const std::shared_ptr<Type> &ty, int depth = 0) const;
     size_t wholeLocalDefinedBy(const MIRStatement &stmt) const;
     std::string borrowName(const MIRPlace &place) const;
 };
@@ -1069,6 +1082,47 @@ size_t FunctionChecker::addBorrow(const MIRPlace &place, size_t holder, size_t p
     return borrows_.size() - 1;
 }
 
+void FunctionChecker::sourceLocalsOf(const MIRStatement &stmt, std::vector<size_t> &out) const
+{
+    const size_t localCount = body_.locals.size();
+    std::vector<char> reads(localCount, 0), writes(localCount, 0);
+    collectStmtAccess(stmt, reads, writes);
+    for (size_t i = 0; i < localCount; ++i)
+        if (reads[i])
+            out.push_back(i);
+}
+
+bool FunctionChecker::carriesReference(const std::shared_ptr<Type> &ty, int depth) const
+{
+    if (!ty || depth > 4)
+        return false;
+    if (isReferenceType(ty))
+        return true;
+    auto ct = std::dynamic_pointer_cast<CustomType>(ty);
+    if (!ct)
+        return false;
+    for (const auto &f : ct->getFields())
+        if (carriesReference(f.type, depth + 1))
+            return true;
+    return false;
+}
+
+bool FunctionChecker::carriesReferenceTo(const std::shared_ptr<Type> &ty,
+    const std::shared_ptr<Type> &pointee, int depth) const
+{
+    if (!ty || !pointee || depth > 4)
+        return false;
+    if (auto ref = std::dynamic_pointer_cast<ReferenceType>(ty))
+        return ref->getBaseType() && ref->getBaseType()->equals(pointee);
+    auto ct = std::dynamic_pointer_cast<CustomType>(ty);
+    if (!ct)
+        return false;
+    for (const auto &f : ct->getFields())
+        if (carriesReferenceTo(f.type, pointee, depth + 1))
+            return true;
+    return false;
+}
+
 MIRPlace FunctionChecker::placeOfLocal(size_t index) const
 {
     MIRPlace place;
@@ -1408,7 +1462,16 @@ void FunctionChecker::collectStmtAccess(const MIRStatement &stmt, std::vector<ch
         return;
     }
     if (auto *drop = std::get_if<MIRStmtDrop>(&stmt))
-        readPlace(drop->place);
+    {
+        // A drop RELEASES the value; it does not USE a reference the value
+        // happens to hold. Counting it as a read would extend every borrow that
+        // was carried into a container until the container's scope ends: the
+        // scope-end `drop(h)` in `let h = Holder { buf: &mut a }; h.buf[0] = 5;
+        // print_int(a[0]);` kept the `&mut a` borrow alive past its last use and
+        // the read of a was rejected (WriteThroughMutFieldIndex). Liveness is only
+        // consulted for borrow kills, so leaving the drop out is safe.
+        (void)drop;
+    }
 }
 
 void FunctionChecker::collectTermAccess(const MIRTerminator &term, std::vector<char> &reads, std::vector<char> &writes) const
@@ -1730,6 +1793,35 @@ void FunctionChecker::settleBorrows(size_t blockIndex, size_t stmtIndex, const M
             if (entry.second == copySource)
                 entry.second = redefined;
 
+    // 2b. A CARRIER assignment moves the borrow into the value that now holds a
+    //     reference TO THE SAME PLACE: `__it = call iter(__src)` returns a
+    //     VecIter whose `src: &Vec<T>` field points at the Vec __src borrowed, so
+    //     the borrow must live as long as the iterator does. This is what lets
+    //     the `for` desugar drop its `__hold` pin: without it the borrow would end
+    //     at the call and the loop body could mutate the collection the iterator
+    //     points into. Matching on the POINTEE (not just "the destination holds
+    //     some reference") is what keeps this precise — the coarse version
+    //     regressed five cases.
+    if (redefined != SIZE_MAX && redefined != copySource)
+    {
+        const std::shared_ptr<Type> destType =
+            redefined < body_.locals.size() ? body_.locals[redefined].type : nullptr;
+        if (destType && carriesReference(destType))
+        {
+            std::vector<size_t> sources;
+            sourceLocalsOf(stmt, sources);
+            for (auto &entry : active)
+            {
+                if (entry.second == redefined)
+                    continue;
+                if (std::find(sources.begin(), sources.end(), entry.second) == sources.end())
+                    continue;
+                if (carriesReferenceTo(destType, borrows_[entry.first].place.type))
+                    entry.second = redefined;
+            }
+        }
+    }
+
     // 3. A borrow whose current holder is dead afterwards is over.
     for (auto it = active.begin(); it != active.end();)
     {
@@ -1997,14 +2089,15 @@ void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
 
 bool MIRBorrowCheck::enabled()
 {
-    // The MIR implementation is the DEFAULT (2026-09-19): the port reached
-    // parity — all 246 source-level borrow cases and the whole 1289-case suite
-    // run green with it, in both modes. LIS_BORROW_CHECK=hir restores the HIR
-    // implementations in HIRSemanticAnalyzer while they are still present (an
-    // escape hatch for bisecting a regression); they are deleted once the MIR
-    // checker has soaked.
-    const char *checker = std::getenv("LIS_BORROW_CHECK");
-    return !(checker != nullptr && std::string(checker) == "hir");
+    // Always true (2026-09-19): this pass OWNS the borrow / move /
+    // definite-assignment / dangling-return checks. The HIR implementations in
+    // HIRSemanticAnalyzer are unreachable now (its mirBorrowCheck_ flag is a
+    // constant) and are kept only until they are deleted — the former
+    // LIS_BORROW_CHECK=hir escape hatch was removed with the `for`-loop pin: the
+    // tree-based checker is not sound without that pin (it ends a borrow at its
+    // holder's last use, so `for e in v { v.push(1); }` slips through), which is
+    // exactly what the CFG-based live ranges fix.
+    return true;
 }
 
 void MIRBorrowCheck::run()
