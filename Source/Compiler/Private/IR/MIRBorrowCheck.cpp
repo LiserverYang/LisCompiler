@@ -2009,6 +2009,20 @@ bool MIRBorrowCheck::enabled()
 
 void MIRBorrowCheck::run()
 {
+    check();
+
+    // Diagnostics are reported non-fatally so that all of them surface in one
+    // run; if any were logged the program is INVALID, so stop here instead of
+    // letting the backend emit code for it. Without this gate a rejected program
+    // still produced an object file (the borrow checker's own errors used to be
+    // ignored: `for e in v { v.push(2); }` compiled and then crashed at run
+    // time). HIRSemanticAnalyzer::run gates the same way.
+    if (Logger::GetErrorCount() > 0)
+        exit(1);
+}
+
+void MIRBorrowCheck::check()
+{
     if (!context || !context->mirProgram)
         return;
 

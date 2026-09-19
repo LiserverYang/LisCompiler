@@ -257,7 +257,7 @@ protected:
         // skipped its own implementations of the same rules).
         {
             MIRBorrowCheck borrowCheck(context);
-            borrowCheck.run();
+            borrowCheck.check();
             if (Logger::GetErrorCount() > 0) return false;
         }
         MIRMonomorphization mono(context);
@@ -356,7 +356,7 @@ protected:
         // skipped its own implementations of the same rules).
         {
             MIRBorrowCheck borrowCheck(context);
-            borrowCheck.run();
+            borrowCheck.check();
             if (Logger::GetErrorCount() > 0) return false;
         }
         MIRMonomorphization mono(context);

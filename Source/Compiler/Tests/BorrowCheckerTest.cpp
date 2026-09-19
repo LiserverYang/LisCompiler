@@ -141,7 +141,7 @@ protected:
             if (Logger::GetErrorCount() == 0)
             {
                 MIRBorrowCheck borrowCheck(context);
-                borrowCheck.run();
+                borrowCheck.check();
             }
         }
         restoreStdout();

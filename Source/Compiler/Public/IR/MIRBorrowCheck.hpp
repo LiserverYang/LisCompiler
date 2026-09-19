@@ -49,6 +49,13 @@ public:
 
     void run() override;
 
-    /// True when LIS_BORROW_CHECK=mir selected the MIR implementation.
+    /**
+     * Run the checks and REPORT — without the end-of-pass gate. The test
+     * harnesses call this: they own the error count and must survive a rejected
+     * program (run() exits, exactly like HIRSemanticAnalyzer::run).
+     */
+    void check();
+
+    /// True unless LIS_BORROW_CHECK=hir selected the HIR implementation.
     static bool enabled();
 };
