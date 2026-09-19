@@ -412,6 +412,17 @@ private:
     static const char *operatorTraitName(HIRBinaryOp::OpKind op);
     /// Method name for a binary op (`+`→"add"), or nullptr for logical ops.
     static const char *operatorMethodName(HIRBinaryOp::OpKind op);
+
+    /** Bind one binary-operator operand to the trait method's parameter type.
+     *
+     * A parameter may be the operand's type directly, or a REFERENCE to it: the
+     * comparison traits take `&Self` so that `a == b` never consumes either side
+     * (a non-Copy operand such as String could not implement a by-value `eq` at
+     * all — the operator would move both operands). When the parameter is a
+     * reference, the operand is wrapped in a HIRRef that borrows the place, and
+     * the caller must then NOT treat it as a move source. Returns false when the
+     * operand does not fit the parameter. */
+    bool bindOperatorOperand(std::unique_ptr<HIRExpr> &operand, const std::shared_ptr<Type> &paramTy);
     /// True if `name` is one of the builtin operator traits that primitives
     /// auto-implement (Add/Sub/Mul/Div/Rem/PartialEq/PartialOrd/BitAnd/.../Shr).
     static bool isOperatorTrait(const std::string &name);

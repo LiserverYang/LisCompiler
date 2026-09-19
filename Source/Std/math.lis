@@ -60,19 +60,28 @@ trait Rem
 }
 
 // Equality: `==` (`eq`) and `!=` (`ne`), returning bool.
+//
+// The receiver AND the operand are REFERENCES. Comparing must not consume what
+// it compares: with a by-value `self` a non-Copy type could not implement this
+// at all, because `a == b` would MOVE both operands (that is why the stdlib
+// String had no equality). Implementing it is therefore
+// `fn eq(self: &Self, other: &Self) -> bool`, and `a == b` hands the operator
+// borrows of both sides. The arithmetic traits stay by-value
+// (`Add::add(self, rhs)`), matching Rust: `+` produces a new value and may well
+// consume its operands.
 trait PartialEq
 {
-    fn eq(self, other: Self) -> bool;
-    fn ne(self, other: Self) -> bool;
+    fn eq(self: &Self, other: &Self) -> bool;
+    fn ne(self: &Self, other: &Self) -> bool;
 }
 
-// Ordering: `< > <= >=`, returning bool.
+// Ordering: `< > <= >=`, returning bool. Reference receivers, like PartialEq.
 trait PartialOrd
 {
-    fn lt(self, other: Self) -> bool;
-    fn gt(self, other: Self) -> bool;
-    fn le(self, other: Self) -> bool;
-    fn ge(self, other: Self) -> bool;
+    fn lt(self: &Self, other: &Self) -> bool;
+    fn gt(self: &Self, other: &Self) -> bool;
+    fn le(self: &Self, other: &Self) -> bool;
+    fn ge(self: &Self, other: &Self) -> bool;
 }
 
 // Bitwise: `& | ^`. Primitives (ints) auto-implement these.

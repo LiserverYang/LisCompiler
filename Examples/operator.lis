@@ -24,13 +24,15 @@ impl Add for Vec2
     }
 }
 
+// The comparison traits take `&Self` receivers (comparing must not consume its
+// operands), so the implementation borrows both sides.
 impl PartialEq for Vec2
 {
-    fn eq(self, other: Self) -> bool
+    fn eq(self: &Self, other: &Self) -> bool
     {
         ret (self.x == other.x) && (self.y == other.y);
     }
-    fn ne(self, other: Self) -> bool
+    fn ne(self: &Self, other: &Self) -> bool
     {
         ret (self.x != other.x) || (self.y != other.y);
     }

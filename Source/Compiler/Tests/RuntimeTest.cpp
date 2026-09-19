@@ -516,10 +516,10 @@ TEST_F(RuntimeTest, OpOverloadRemainder)
 
 TEST_F(RuntimeTest, OpOverloadLessThan)
 {
-    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
-              " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
-              " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
-              " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
+    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self: &Self, o: &Self) -> bool {"
+              " ret self.x < o.x; } fn gt(self: &Self, o: &Self) -> bool { ret self.x > o.x; }"
+              " fn le(self: &Self, o: &Self) -> bool { ret self.x <= o.x; }"
+              " fn ge(self: &Self, o: &Self) -> bool { ret self.x >= o.x; } }"
               " fn main() -> i32 { let a = V { x: 1 }; let b = V { x: 2 };"
               " if a < b { ret 1; } ret 0; }",
         1);

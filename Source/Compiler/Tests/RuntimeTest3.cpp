@@ -107,13 +107,13 @@ TEST_F(RuntimeTest, OperatorOverloadComparison)
 {
     // `impl PartialOrd for Vec2` + `v1 < v2` → `v1.lt(v2)` returns bool.
     expectRun("struct Vec2 { pub x: i32, pub y: i32 }"
-              " impl PartialOrd for Vec2 { fn lt(self, other: Self) -> bool {"
+              " impl PartialOrd for Vec2 { fn lt(self: &Self, other: &Self) -> bool {"
               "   ret (self.x + self.y) < (other.x + other.y); }"
-              "   fn gt(self, other: Self) -> bool {"
+              "   fn gt(self: &Self, other: &Self) -> bool {"
               "   ret (self.x + self.y) > (other.x + other.y); }"
-              "   fn le(self, other: Self) -> bool {"
+              "   fn le(self: &Self, other: &Self) -> bool {"
               "   ret (self.x + self.y) <= (other.x + other.y); }"
-              "   fn ge(self, other: Self) -> bool {"
+              "   fn ge(self: &Self, other: &Self) -> bool {"
               "   ret (self.x + self.y) >= (other.x + other.y); } }"
               " fn main() -> i32 { let a = Vec2{x:1,y:1}; let b = Vec2{x:5,y:5};"
               " if a < b { ret 1; } ret 0; }",
@@ -1160,10 +1160,10 @@ TEST_F(RuntimeTest, StringIndexEachPosition)
 
 TEST_F(RuntimeTest, OpOverloadGreaterThan)
 {
-    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
-              " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
-              " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
-              " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
+    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self: &Self, o: &Self) -> bool {"
+              " ret self.x < o.x; } fn gt(self: &Self, o: &Self) -> bool { ret self.x > o.x; }"
+              " fn le(self: &Self, o: &Self) -> bool { ret self.x <= o.x; }"
+              " fn ge(self: &Self, o: &Self) -> bool { ret self.x >= o.x; } }"
               " fn main() -> i32 { let a = V { x: 5 }; let b = V { x: 2 };"
               " if a > b { ret 1; } ret 0; }",
         1);
@@ -1903,4 +1903,62 @@ TEST_F(RuntimeTest, StringRelationalOperatorsStillRejected)
     // is the explicit spelling).
     expectCompileFail("fn main() -> i32 { if \"a\" < \"b\" { ret 1; } ret 0; }",
         "cannot be applied to type");
+}
+
+// ── String comparison through the operator traits ─────────────────────────────
+// PartialEq / PartialOrd take `&Self` receivers, so a non-Copy type can now
+// implement them: `a == b` borrows both sides instead of moving them. With the
+// old by-value receiver the operator CONSUMED its operands (releasing both
+// buffers), which is why String had no equality at all.
+
+TEST_F(RuntimeTest, StringEqualityDoesNotConsumeItsOperands)
+{
+    // Both strings are read AGAIN after the comparison, which is only legal if
+    // `==` borrowed them; a move would be rejected here.
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"hi\"); let b = String::from_lit(\"hi\");"
+              " if a == b { ret a.len() + b.len(); } ret 0; }",
+        4);
+}
+
+TEST_F(RuntimeTest, StringInequalityComparesContent)
+{
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"hi\"); let b = String::from_lit(\"ho\");"
+              " if a != b { ret 1; } ret 0; }",
+        1);
+}
+
+TEST_F(RuntimeTest, StringOrderingComparesContent)
+{
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"abc\"); let b = String::from_lit(\"abd\");"
+              " if a < b { ret 1; } ret 0; }",
+        1);
+    expectRun("fn main() -> i32 { let a = String::from_lit(\"abd\"); let b = String::from_lit(\"abd\");"
+              " if a <= b && a >= b { ret 1; } ret 0; }",
+        1);
+}
+
+TEST_F(RuntimeTest, GenericComparisonFallsBackToAValueCompare)
+{
+    // `T: PartialEq` instantiated at a PRIMITIVE: sema resolves `<T>::eq`, and
+    // monomorphization falls back to a direct binary op because i32 has no `eq`
+    // method. The operand is a POINTER there (the trait method took `&Self`), so
+    // the fallback has to load through it — comparing the addresses would answer
+    // false for two equal variables.
+    expectRun("fn same<T: PartialEq>(a: T, b: T) -> bool { ret a == b; }"
+              " fn main() -> i32 { let x = 3; let y = 3; let z = 4;"
+              " let eq = same(x, y); let ne = same(x, z);"
+              " if eq { if ne { ret 2; } ret 1; } ret 0; }",
+        1);
+}
+
+TEST_F(RuntimeTest, GenericComparisonRetargetsToTheStructMethod)
+{
+    expectRun("struct V { pub x: i32 }"
+              " impl PartialEq for V { fn eq(self: &Self, o: &Self) -> bool { ret self.x == o.x; }"
+              " fn ne(self: &Self, o: &Self) -> bool { ret self.x != o.x; } }"
+              " fn same<T: PartialEq>(a: T, b: T) -> bool { ret a == b; }"
+              " fn main() -> i32 { let eq = same(V { x: 5 }, V { x: 5 });"
+              " let ne = same(V { x: 5 }, V { x: 6 });"
+              " if eq { if ne { ret 2; } ret 1; } ret 0; }",
+        1);
 }

@@ -256,6 +256,34 @@ void MIRMonomorphization::rewriteRValue(MIRRValue &rvalue, std::unordered_map<st
         rvalue);
 }
 
+namespace
+{
+/**
+ * Turn a `&T` operand into `*T`: append a Deref projection to the place it
+ * copies/moves out of and strip the reference from that place's type.
+ *
+ * Needed when monomorphization falls back from an operator METHOD to a direct
+ * binary op for a primitive: the trait method took `&Self` (the comparison
+ * traits do, so that comparing never consumes its operands), so the call
+ * argument is a pointer. Comparing pointers instead of values is a silent
+ * wrong-code bug, not a crash, which is why it gets its own helper.
+ */
+void derefPointerOperand(MIROperand &op)
+{
+    MIRPlace *place = nullptr;
+    if (auto *c = std::get_if<MIRCopy>(&op))
+        place = &c->place;
+    else if (auto *m = std::get_if<MIRMove>(&op))
+        place = &m->place;
+
+    if (!place || !place->type || place->type->getKind() != Type::Kind::Reference)
+        return;
+
+    place->projections.push_back(Projection{.kind = ProjectionKind::Deref});
+    place->type = std::static_pointer_cast<ReferenceType>(place->type)->getBaseType();
+}
+} // namespace
+
 void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable)
 {
     // A generic-param operator call (`<T>::add`) whose concrete type is a
@@ -306,6 +334,14 @@ void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_ma
                     {
                         if (arg.dest.has_value() && arg.args.size() == 2)
                         {
+                            // The operator method may have taken a REFERENCE
+                            // parameter (`PartialEq::eq(self: &Self, other:
+                            // &Self)`), in which case the argument is a pointer
+                            // to the value: load through it before falling back
+                            // to a binary op, or this would silently compare the
+                            // two ADDRESSES.
+                            derefPointerOperand(arg.args[0]);
+                            derefPointerOperand(arg.args[1]);
                             MIRRValueBinaryOp binOp{
                                 .op = *arg.genericOpFallback,
                                 .left = std::move(arg.args[0]),

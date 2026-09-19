@@ -23,10 +23,11 @@
 // has no error handling, so an allocation failure aborts inside the runtime
 // (memset/deref of a null buffer). Do not rely on graceful recovery.
 
-// Drop (for `impl Drop for String`) and Option (for `index`) come from their
-// modules — no auto-preload, explicit imports.
+// Drop (for `impl Drop for String`), Option (for `index`) and the comparison
+// traits come from their modules — no auto-preload, explicit imports.
 impt drop { Drop };
 impt option { Option };
+impt math { PartialEq, PartialOrd };
 
 struct String
 {
@@ -147,5 +148,45 @@ impl Drop for String
     fn drop(self)
     {
         __free(self.data);
+    }
+}
+
+// Comparison: CONTENT, through the C-string builtin `str_cmp`. The receivers are
+// references (the traits declare `&Self`), so `a == b` borrows both strings
+// instead of moving them — with a by-value receiver the operator would have
+// consumed the operands and released both buffers.
+impl PartialEq for String
+{
+    fn eq(self: &Self, other: &Self) -> bool
+    {
+        ret str_cmp(self.to_cstr(), other.to_cstr()) == 0;
+    }
+
+    fn ne(self: &Self, other: &Self) -> bool
+    {
+        ret str_cmp(self.to_cstr(), other.to_cstr()) != 0;
+    }
+}
+
+impl PartialOrd for String
+{
+    fn lt(self: &Self, other: &Self) -> bool
+    {
+        ret str_cmp(self.to_cstr(), other.to_cstr()) < 0;
+    }
+
+    fn gt(self: &Self, other: &Self) -> bool
+    {
+        ret str_cmp(self.to_cstr(), other.to_cstr()) > 0;
+    }
+
+    fn le(self: &Self, other: &Self) -> bool
+    {
+        ret str_cmp(self.to_cstr(), other.to_cstr()) <= 0;
+    }
+
+    fn ge(self: &Self, other: &Self) -> bool
+    {
+        ret str_cmp(self.to_cstr(), other.to_cstr()) >= 0;
     }
 }

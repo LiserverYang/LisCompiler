@@ -242,8 +242,19 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
                     log(errorNode, "the type 'Self' can only be used inside a trait or impl.");
                 return context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
             }
+            // The REFERENCE form is applied exactly once. `createSelf` already
+            // encodes it for a trait method (it is passed isRef/isMut), so that
+            // branch returns the SelfType as-is; an impl resolves Self to the
+            // concrete struct and needs the wrap here. Falling through used to
+            // add a SECOND reference at the end of this function, so `&Self`
+            // resolved to `&&Self` — a call site could never match it (and the
+            // trait-impl conformance check rejected the (correct) `&S` the
+            // implementation wrote).
+            if (isInTraitMethod)
+                return base;
             if (raw.isRef)
-                base = context->typeContext->getReference(base, raw.isMutRef);
+                return context->typeContext->getReference(base, raw.isMutRef);
+            return base;
         }
         else
         {
@@ -4095,8 +4106,8 @@ bool HIRSemanticAnalyzer::resolveOperatorMethod(HIRBinaryOp *node,
         log(*node, std::string("operator method '") + opMethod + "' must take 2 parameters (self, other), got " + std::to_string(newTy->getParams().size()) + ".");
         return false;
     }
-    if (!node->left->type->equals(newTy->getParams()[0])
-        || !node->right->type->equals(newTy->getParams()[1]))
+    if (!bindOperatorOperand(node->left, newTy->getParams()[0])
+        || !bindOperatorOperand(node->right, newTy->getParams()[1]))
     {
         log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '" + opTrait + "' method signature.");
         return false;
@@ -4170,7 +4181,7 @@ bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
         log(*node, "operator method '" + std::string(opMethod) + "' must take 2 parameters (self, other), got " + std::to_string(paramTypes.size()) + ".");
         return false;
     }
-    if (!node->left->type->equals(paramTypes[0]) || !node->right->type->equals(paramTypes[1]))
+    if (!bindOperatorOperand(node->left, paramTypes[0]) || !bindOperatorOperand(node->right, paramTypes[1]))
     {
         log(*node, "operator '" + std::string(node->opToString()) + "' operand types do not match the '" + opTrait + "' method signature.");
         return false;
@@ -4181,6 +4192,35 @@ bool HIRSemanticAnalyzer::resolveGenericOperatorMethod(HIRBinaryOp *node,
     node->operatorStructArgs = {}; // monomorphization fills from the concrete struct
     node->type = retTy;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::bindOperatorOperand(std::unique_ptr<HIRExpr> &operand,
+    const std::shared_ptr<Type> &paramTy)
+{
+    // A failed operand analysis has no type; its own error was already logged,
+    // and reporting a signature mismatch on top of it would only mislead.
+    if (!operand->type) return true;
+    if (operand->type->equals(paramTy)) return true;
+
+    // A reference parameter borrows the operand (the comparison traits do this
+    // so that comparing never consumes). Operators only READ, so the borrow is
+    // always shared; a `&mut Self` parameter is not something a binary operator
+    // can be given.
+    auto refParam = std::dynamic_pointer_cast<ReferenceType>(paramTy);
+    if (refParam && !refParam->isMutableRef() && refParam->getBaseType()->equals(operand->type))
+    {
+        auto refExpr = std::make_unique<HIRRef>();
+        refExpr->position = operand->position;
+        refExpr->length = operand->length;
+        refExpr->isMutable = false;
+        refExpr->type = paramTy;
+        refExpr->expr = std::move(operand);
+        operand = std::move(refExpr);
+        return true;
+    }
+
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -4340,9 +4380,13 @@ void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
     }
     if (operatorResolved)
     {
-        // By-value `self`/`other` consume both operands (mirrors call args).
-        handleMoveSource(node->left.get(), *node);
-        handleMoveSource(node->right.get(), *node);
+        // By-value `self`/`other` consume both operands (mirrors call args). An
+        // operand the resolver wrapped in a HIRRef is only BORROWED by the call
+        // (that is what makes `a == b` on a non-Copy type possible at all).
+        if (!dynamic_cast<HIRRef *>(node->left.get()))
+            handleMoveSource(node->left.get(), *node);
+        if (!dynamic_cast<HIRRef *>(node->right.get()))
+            handleMoveSource(node->right.get(), *node);
         return;
     }
 

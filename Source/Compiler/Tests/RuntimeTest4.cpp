@@ -436,8 +436,8 @@ TEST_F(RuntimeTest, EnumValueArmNoBlock)
 
 TEST_F(RuntimeTest, EnumWithPartialEqImpl)
 {
-    expectRun("enum E { A, B } impl PartialEq for E { fn eq(self, o: Self) -> bool {"
-              " ret true; } fn ne(self, o: Self) -> bool { ret false; } }"
+    expectRun("enum E { A, B } impl PartialEq for E { fn eq(self: &Self, o: &Self) -> bool {"
+              " ret true; } fn ne(self: &Self, o: &Self) -> bool { ret false; } }"
               " fn main() -> i32 { let e = E::A; if e == E::A { ret 1; } ret 0; }",
         1);
 }
@@ -511,8 +511,8 @@ TEST_F(RuntimeTest, OpOverloadDivision)
 
 TEST_F(RuntimeTest, OpOverloadEqual)
 {
-    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
-              " ret self.x == o.x; } fn ne(self, o: Self) -> bool { ret self.x != o.x; } }"
+    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self: &Self, o: &Self) -> bool {"
+              " ret self.x == o.x; } fn ne(self: &Self, o: &Self) -> bool { ret self.x != o.x; } }"
               " fn main() -> i32 { let a = V { x: 5 }; let b = V { x: 5 };"
               " if a == b { ret 1; } ret 0; }",
         1);

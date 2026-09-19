@@ -512,8 +512,8 @@ TEST_F(RuntimeTest, OpOverloadMultiplication)
 
 TEST_F(RuntimeTest, OpOverloadNotEqual)
 {
-    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self, o: Self) -> bool {"
-              " ret self.x == o.x; } fn ne(self, o: Self) -> bool { ret self.x != o.x; } }"
+    expectRun("struct V { pub x: i32 } impl PartialEq for V { fn eq(self: &Self, o: &Self) -> bool {"
+              " ret self.x == o.x; } fn ne(self: &Self, o: &Self) -> bool { ret self.x != o.x; } }"
               " fn main() -> i32 { let a = V { x: 1 }; let b = V { x: 2 };"
               " if a != b { ret 1; } ret 0; }",
         1);
@@ -700,12 +700,12 @@ TEST_F(RuntimeTest, StringToCstrLengthMatches)
 
 TEST_F(RuntimeTest, OpOverloadLeGe)
 {
-    // Operator-overload calls consume their operands (by-value self/other), so
-    // each comparison needs fresh struct values.
-    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self, o: Self) -> bool {"
-              " ret self.x < o.x; } fn gt(self, o: Self) -> bool { ret self.x > o.x; }"
-              " fn le(self, o: Self) -> bool { ret self.x <= o.x; }"
-              " fn ge(self, o: Self) -> bool { ret self.x >= o.x; } }"
+    // The comparison traits borrow their operands, so one value can be compared
+    // more than once.
+    expectRun("struct V { pub x: i32 } impl PartialOrd for V { fn lt(self: &Self, o: &Self) -> bool {"
+              " ret self.x < o.x; } fn gt(self: &Self, o: &Self) -> bool { ret self.x > o.x; }"
+              " fn le(self: &Self, o: &Self) -> bool { ret self.x <= o.x; }"
+              " fn ge(self: &Self, o: &Self) -> bool { ret self.x >= o.x; } }"
               " fn main() -> i32 { let a = V { x: 3 }; let b = V { x: 3 };"
               " let c = V { x: 3 }; let d = V { x: 3 };"
               " if a <= b && c >= d { ret 1; } ret 0; }",
