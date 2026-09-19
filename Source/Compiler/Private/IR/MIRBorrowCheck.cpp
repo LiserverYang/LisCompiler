@@ -1204,6 +1204,27 @@ void FunctionChecker::collectBorrowSites()
             }
     }
 
+    // ... but a reference that is copied into a USER BINDING is a PROMOTED
+    // borrow, not a reservation: `let r = &mut v;` must keep blocking reads of v
+    // even though the temp it flowed through is also passed to a call later
+    // (`let r = &mut v; let x = v[0]; r.push(2);` is E4002). Propagate that back
+    // along the copy chain: whoever feeds a user binding is promoted too.
+    std::unordered_set<size_t> promotedTemps;
+    for (const auto &edge : copyEdges)
+        if (!body_.locals[edge.first].isTemp)
+            promotedTemps.insert(edge.second);
+    grew = true;
+    while (grew)
+    {
+        grew = false;
+        for (const auto &edge : copyEdges)
+            if (promotedTemps.count(edge.first) && !promotedTemps.count(edge.second))
+            {
+                promotedTemps.insert(edge.second);
+                grew = true;
+            }
+    }
+
     // Pass 2: the borrow sites themselves, in source order (the alias table is
     // built incrementally, exactly like the HIR checker's).
     for (size_t b = 0; b < body_.blocks.size(); ++b)
@@ -1249,7 +1270,8 @@ void FunctionChecker::collectBorrowSites()
             // reservation; marking a binding relaxed reads through its &mut
             // borrow (`let r = &mut v; let x = v[0]; r.push(2);` must be rejected).
             const bool twoPhase = body_.locals[dest.root].isTemp
-                                  && callArgLocals_.count(dest.root) > 0;
+                                  && callArgLocals_.count(dest.root) > 0
+                                  && promotedTemps.count(dest.root) == 0;
             std::vector<size_t> ids;
             const PlaceInfo rinfo = describePlace(ref->place);
             if (rinfo.throughDeref)
@@ -1975,8 +1997,14 @@ void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
 
 bool MIRBorrowCheck::enabled()
 {
+    // The MIR implementation is the DEFAULT (2026-09-19): the port reached
+    // parity — all 246 source-level borrow cases and the whole 1289-case suite
+    // run green with it, in both modes. LIS_BORROW_CHECK=hir restores the HIR
+    // implementations in HIRSemanticAnalyzer while they are still present (an
+    // escape hatch for bisecting a regression); they are deleted once the MIR
+    // checker has soaked.
     const char *checker = std::getenv("LIS_BORROW_CHECK");
-    return checker != nullptr && std::string(checker) == "mir";
+    return !(checker != nullptr && std::string(checker) == "hir");
 }
 
 void MIRBorrowCheck::run()

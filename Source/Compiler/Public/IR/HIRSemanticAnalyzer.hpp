@@ -44,9 +44,9 @@ private:
     bool suppressTypeErrors_ = false;
 
     /**
-     * `LIS_BORROW_CHECK=mir` (2026-09-19): the borrow / move / definite-
-     * assignment / dangling-return checks are DISABLED here and are produced by
-     * MIRBorrowCheck on the MIR CFG instead (they are CFG DATAFLOW — live ranges
+     * The borrow / move / definite-assignment / dangling-return checks are
+     * DISABLED here by default and are produced by MIRBorrowCheck on the MIR CFG
+     * instead (they are CFG DATAFLOW — live ranges
      * and per-point state — which the HIR tree can only approximate with
      * statement ordinals).
      *
@@ -607,10 +607,12 @@ public:
     HIRSemanticAnalyzer(std::shared_ptr<Context> cnt)
     {
         context = cnt;
-        // `LIS_BORROW_CHECK=mir` hands the borrow/move/init/dangling checks to
-        // MIRBorrowCheck (see the flag's comment).
+        // MIRBorrowCheck owns the borrow/move/init/dangling checks by default
+        // since the port reached parity; LIS_BORROW_CHECK=hir falls back to the
+        // implementations in this file (keep the two rules in sync with
+        // MIRBorrowCheck::enabled).
         const char *checker = std::getenv("LIS_BORROW_CHECK");
-        mirBorrowCheck_ = (checker != nullptr && std::string(checker) == "mir");
+        mirBorrowCheck_ = !(checker != nullptr && std::string(checker) == "hir");
         SymbolTable::getInstance().initGlobalScope();
     }
 
