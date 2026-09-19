@@ -201,6 +201,20 @@ impl Vec
         if i < 0 || i >= self.len - self.cursor { panic("Vec::at_mut index out of bounds"); }
         ret &mut self.data[self.cursor + i];
     }
+
+    // A BORROWING iterator over the live elements (2026-09-19): `for x in v`
+    // calls this, so the loop neither copies nor consumes the Vec, and it works
+    // for non-Copy elements (each step LENDS one). The borrow is promoted by the
+    // loop desugaring (it binds `&v` first), so the checker keeps the Vec
+    // borrowed for the whole loop.
+    // NOTE the explicit type arguments on BOTH sides: a bare `Vec`/`VecIter` in a
+    // signature is the generic DEFINITION, and the definition is a different type
+    // from the same type instantiated with the in-scope parameter — comparing them
+    // (a field initialiser, a return value) is a type mismatch.
+    fn iter(self: &Vec<T>) -> VecIter<T>
+    {
+        ret VecIter { src: self, pos: 0 };
+    }
 }
 
 // Reading an element BY VALUE. `get` (and the index operators below) hand the
@@ -250,6 +264,39 @@ impl Iterator<T> for Vec<T>
         let v = self.data[self.cursor];
         self.cursor = self.cursor + 1;
         ret Option::Some(v);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Borrowed iteration (2026-09-19): `for x in v` uses this, so the loop does not
+// consume the Vec and yields `&T` — the way to walk a Vec of NON-Copy elements
+// without taking them out of it.
+//
+// The iterator holds a SHARED borrow of the container. The loop desugaring binds
+// that reference first (`let __src = &v;`), which PROMOTES it, so the borrow
+// checker keeps the Vec borrowed for the whole loop: pushing to `v` inside the
+// body is E4001 rather than silent corruption, and `v` is usable again after the
+// loop.
+// ---------------------------------------------------------------------------
+
+// The two fields are PUB because the iterator is built by `Vec::iter`, a method
+// of Vec: private fields would need a VecIter constructor, and a static call on a
+// generic type with a generic-parameter argument (`VecIter::new(self)`) is
+// rejected (argument type mismatch — the analyzer cannot unify the two T's).
+struct VecIter<T>
+{
+    pub src: &Vec<T>,
+    pub pos: i32
+}
+
+impl<T> Iterator<&T> for VecIter<T>
+{
+    fn next(self: &mut Self) -> Option<&T>
+    {
+        if self.pos >= self.src.len() { ret Option::None; }
+        let p = self.pos;
+        self.pos = self.pos + 1;
+        ret Option::Some(self.src.at_ref(p));
     }
 }
 

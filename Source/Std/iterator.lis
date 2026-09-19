@@ -71,7 +71,7 @@ fn range(start: i32, end: i32) -> Range
 fn sum<T: Iterator<i32>>(it: T) -> i32
 {
     let mut s = 0;
-    for x in it {
+    for x in move it {
         s = s + x;
     }
     ret s;
@@ -81,7 +81,7 @@ fn sum<T: Iterator<i32>>(it: T) -> i32
 fn count<T: Iterator<i32>>(it: T) -> i32
 {
     let mut n = 0;
-    for _x in it {
+    for _x in move it {
         n = n + 1;
     }
     ret n;
@@ -92,7 +92,7 @@ fn count<T: Iterator<i32>>(it: T) -> i32
 //     first(range(1, 5))  // some(1)
 fn first<T: Iterator<i32>>(it: T) -> Option<i32>
 {
-    for x in it {
+    for x in move it {
         ret Option::Some(x);
     }
     ret Option::None;
@@ -105,7 +105,7 @@ fn last<T: Iterator<i32>>(it: T) -> Option<i32>
 {
     let mut last_v = 0;
     let mut found_any = false;
-    for x in it {
+    for x in move it {
         last_v = x;
         found_any = true;
     }
@@ -122,7 +122,7 @@ fn last<T: Iterator<i32>>(it: T) -> Option<i32>
 fn nth<T: Iterator<i32>>(it: T, n: i32) -> Option<i32>
 {
     let mut i = 0;
-    for x in it {
+    for x in move it {
         if i == n {
             ret Option::Some(x);
         }
@@ -137,7 +137,7 @@ fn nth<T: Iterator<i32>>(it: T, n: i32) -> Option<i32>
 fn product<T: Iterator<i32>>(it: T) -> i32
 {
     let mut p = 1;
-    for x in it {
+    for x in move it {
         p = p * x;
     }
     ret p;
