@@ -1371,14 +1371,195 @@ TEST_F(RuntimeTest, VecSetOutOfBoundsAborts)
         "Vec::set index out of bounds");
 }
 
-TEST_F(RuntimeTest, VecOfNonCopyElementRejected)
+// ── Vec of NON-Copy elements (2026-09-19) ─────────────────────────────────────
+//
+// `Vec<T>` has no Copy bound: elements may own heap buffers (String, another
+// Vec, a user struct with a Drop impl). The container destroys the elements it
+// still owns — `clear` and the Drop impl, through the `__drop` builtin — each
+// exactly once, and the `cursor` a `for` loop leaves behind (the moved-out
+// prefix) is never destroyed twice.
+//
+// `v[i]` / `v[i] = x` / `get` hand the element OVER, so they exist only for Copy
+// elements (`impl<T: Copy> ...`); a non-Copy container is read through
+// `at_ref`/`at_mut` or emptied with `pop`/`remove`/`for`.
+
+TEST_F(RuntimeTest, VecNonCopyPushPopAndPrint)
 {
-    // Dropping a Vec frees the buffer only, so a non-Copy element would leak
-    // whatever it owns: rejected up front by the `T: Copy` bound.
-    expectCompileFail("impt vec { Vec };\nimpt string { String };\n"
+    expectOutput("impt vec { Vec };\n"
+                 "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                 "    v.push(String::from_lit(\"alpha\"));\n"
+                 "    v.push(String::from_lit(\"beta\"));\n"
+                 "    if v.len() != 2 { ret 1; }\n"
+                 "    match v.pop() { Some(s) => { print_str(s.to_cstr()); println(); }, None => { ret 2; } }\n"
+                 "    ret 0; }",
+        "beta\n", 0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyForLoopKeepsOrder)
+{
+    // The loop MOVES each element out; the elements print in insertion order.
+    expectOutput("impt vec { Vec };\n"
+                 "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                 "    v.push(String::from_lit(\"a\"));\n"
+                 "    v.push(String::from_lit(\"bb\"));\n"
+                 "    v.push(String::from_lit(\"ccc\"));\n"
+                 "    for s in v { print_str(s.to_cstr()); print_int(s.len()); }\n"
+                 "    println();\n"
+                 "    ret 0; }",
+        "a1bb2ccc3\n", 0);
+}
+
+// The drop counter every non-Copy test below is built on: a struct that counts
+// its own destructor calls. A double drop or a leak shows up as a wrong count.
+static const char *kDropCounterPrologue =
+    "impt vec { Vec };\nimpt drop { Drop };\nimpt option { Option };\n"
+    "let ctr = 0;\n"
+    "struct Item { pub v: i32 }\n"
+    "impl Drop for Item { fn drop(self) { ctr = ctr + 1; } }\n";
+
+TEST_F(RuntimeTest, VecNonCopyDropRunsOncePerElement)
+{
+    // Leaving the block destroys the Vec, which destroys its three elements.
+    expectRunWithPrologue(
+        "fn main() -> i32 { { let mut v = Vec<Item>::new();\n"
+        "    v.push(Item { v: 1 }); v.push(Item { v: 2 }); v.push(Item { v: 3 });\n"
+        "    if v.len() != 3 { ret 1; } }\n"
+        "    ret ctr - 3; }",
+        kDropCounterPrologue, 0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyClearDestroysElements)
+{
+    expectRunWithPrologue(
+        "fn main() -> i32 { let mut v = Vec<Item>::new();\n"
+        "    v.push(Item { v: 1 }); v.push(Item { v: 2 });\n"
+        "    v.clear();\n"
+        "    if ctr != 2 { ret 1; }\n"
+        "    if v.len() != 0 { ret 2; }\n"
+        "    if v.is_empty() == false { ret 3; }\n"
+        "    ret ctr - 2; }",
+        kDropCounterPrologue, 0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyPartialIterationDoesNotDoubleDrop)
+{
+    // One element is moved out by next(), the next by pop(): two destructor runs
+    // in total — the moved-out prefix must not be destroyed a second time by the
+    // Vec's own drop.
+    expectRunWithPrologue(
+        "fn main() -> i32 { { let mut v = Vec<Item>::new();\n"
+        "    v.push(Item { v: 1 }); v.push(Item { v: 2 });\n"
+        "    let first = v.next();\n"
+        "    if v.len() != 1 { ret 1; }\n"
+        "    let second = v.pop();\n"
+        "    match second { Some(x) => { if x.v != 2 { ret 2; } }, None => { ret 3; } }\n"
+        "    if v.is_empty() == false { ret 4; } }\n"
+        "    ret ctr - 2; }",
+        kDropCounterPrologue, 0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyInsertRemoveKeepsOrderAndCounts)
+{
+    expectRunWithPrologue(
+        "fn main() -> i32 { { let mut v = Vec<Item>::new();\n"
+        "    v.push(Item { v: 1 }); v.push(Item { v: 2 }); v.push(Item { v: 3 });\n"
+        "    v.insert(1, Item { v: 9 });\n"
+        "    if v.len() != 4 { ret 1; }\n"
+        "    if v.at_ref(0).v != 1 || v.at_ref(1).v != 9 { ret 2; }\n"
+        "    if v.at_ref(2).v != 2 || v.at_ref(3).v != 3 { ret 3; }\n"
+        "    let r = v.remove(1);\n"
+        "    match r { Some(x) => { if x.v != 9 { ret 4; } }, None => { ret 5; } }\n"
+        "    if v.len() != 3 { ret 6; }\n"
+        "    if v.at_ref(1).v != 2 { ret 7; }\n"
+        "    match v.remove(99) { Some(x) => { ret 8; }, None => { } } }\n"
+        "    ret ctr - 4; }",
+        kDropCounterPrologue, 0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyAtRefAndAtMut)
+{
+    // The only way to look at a non-Copy element without taking it out. The
+    // borrow is untracked (documented), so this is also the test that the
+    // returned reference really points into the buffer.
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+              "    v.push(String::from_lit(\"hello\")); v.push(String::from_lit(\"hi\"));\n"
+              "    if v.at_ref(0).len() != 5 { ret 1; }\n"
+              "    let m = v.at_mut(1);\n"
+              "    *m = String::from_lit(\"world!\");\n"
+              "    if v.at_ref(1).len() != 6 { ret 2; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyGrowKeepsEveryElement)
+{
+    // 100 pushes reallocate the buffer several times; each move is bitwise (the
+    // element's ownership travels with it) and every element must survive.
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+              "    let mut i = 0;\n"
+              "    while i < 100 { v.push(String::from_lit(\"x\")); i = i + 1; }\n"
+              "    if v.len() != 100 { ret 1; }\n"
+              "    let mut j = 0;\n"
+              "    while j < 100 { if v.at_ref(j).len() != 1 { ret 2; } j = j + 1; }\n"
+              "    match v.pop() { Some(s) => { if s.len() != 1 { ret 3; } }, None => { ret 4; } }\n"
+              "    ret v.len() - 99; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyNestedVecElements)
+{
+    // A Vec as an element: the inner buffers are owned by the outer container
+    // and freed exactly once (a double free corrupts the heap and aborts).
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut outer = Vec<Vec<i32>>::new();\n"
+              "    let mut a = Vec<i32>::new(); a.push(1); a.push(2);\n"
+              "    outer.push(a);\n"
+              "    let mut b = Vec<i32>::new(); b.push(3);\n"
+              "    outer.push(b);\n"
+              "    if outer.len() != 2 { ret 1; }\n"
+              "    match outer.pop() { Some(inner) => { if inner[0] != 3 { ret 2; } },\n"
+              "        None => { ret 3; } }\n"
+              "    if outer.len() != 1 { ret 4; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecNonCopyAtRefOutOfBoundsAborts)
+{
+    expectPanic("impt vec { Vec };\n"
+                "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                "    v.push(String::from_lit(\"x\")); ret v.at_ref(3).len(); }",
+        "Vec::at_ref index out of bounds");
+}
+
+// The index operators and get() hand the element OVER (by value), so a non-Copy
+// element is rejected instead of being moved out of a container that keeps
+// owning it — the double drop this whole design avoids.
+TEST_F(RuntimeTest, VecIndexOnNonCopyElementRejected)
+{
+    expectCompileFail("impt vec { Vec };\n"
                       "fn main() -> i32 { let mut v = Vec<String>::new();\n"
-                      "    v.push(String::from_lit(\"x\")); ret 0; }",
-        "does not implement trait");
+                      "    v.push(String::from_lit(\"x\")); ret v[0].len(); }",
+        "does not implement trait 'Copy'");
+}
+
+TEST_F(RuntimeTest, VecSetOnNonCopyElementRejected)
+{
+    expectCompileFail("impt vec { Vec };\n"
+                      "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                      "    v.push(String::from_lit(\"x\"));\n"
+                      "    v[0] = String::from_lit(\"y\"); ret 0; }",
+        "does not implement trait 'Copy'");
+}
+
+TEST_F(RuntimeTest, VecGetOnNonCopyElementRejected)
+{
+    expectCompileFail("impt vec { Vec };\n"
+                      "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                      "    v.push(String::from_lit(\"x\")); let o = v.get(0); ret 0; }",
+        "does not implement trait 'Copy'");
 }
 
 TEST_F(RuntimeTest, VecIndexReadThroughMutBorrowRejected)

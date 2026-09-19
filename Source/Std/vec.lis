@@ -12,18 +12,20 @@
 //                                    // `let v: Vec<i32> = Vec::new();` is an error
 //     v.push(1);
 //     v.push(2);
-//     let x = v[0];          // Index::at  — panics when out of bounds
+//     let x = v[0];          // Index::at  — Copy elements only
 //     v[1] = 9;              // IndexMut::set
 //     let last = v.pop();    // Option<i32>
-//     for e in v { ... }     // consumes v (Vec implements Iterator<T>)
+//     for e in v { ... }     // consumes v (Vec implements Iterator<T>), in order
 //
-// ELEMENTS MUST BE `Copy` (the `T: Copy` bound below). A `Vec<String>` is
-// rejected at compile time instead of silently leaking its elements: dropping a
-// Vec only frees the buffer. Per-element destructors are the next step; when
-// they land, this bound goes away.
+// ELEMENTS MAY BE ANY TYPE (2026-09-19). A Copy element can be read out by
+// value (`v[i]`, `get`); anything else MOVES in and out of the container
+// (`push`/`pop`/`remove`/`insert` and `for`), or is lent by `at_ref`/`at_mut`.
+// The container destroys the elements it still owns — `clear` and the `Drop`
+// impl — each exactly once, via the compiler's `__drop` builtin.
 //
-// There is no `with_capacity` / `reserve` yet: growing needs the element size,
-// and `__sizeof` takes a VALUE of the element type (a `push`/`insert` has one).
+// `v[i]` / `v[i] = x` / `get` hand the element OVER, so they exist only for
+// Copy elements (`impl<T: Copy> ...`): returning a non-Copy element the
+// container still owns would leave two owners of one value (and drop it twice).
 //
 // Growth policy: start at 4 elements, then double. `new()` allocates 0 bytes
 // (`malloc(0)` is freeable), so an unused Vec costs nothing.
@@ -58,15 +60,19 @@ trait IndexMut<T>
 
 // ---------------------------------------------------------------------------
 
-struct Vec<T: Copy>
+struct Vec<T>
 {
-    // Private: only this type's methods may touch the buffer, so its
-    // len/cap invariant cannot be broken from outside (E3015 enforces it).
+    // Private: only this type's methods may touch the buffer and the cursor, so
+    // their invariants cannot be broken from outside (E3015 enforces it).
     data: *mut T,
     len: i32,
+    // Capacity, in elements.
     cap: i32,
-    // Drive position for `next()` (the `for` loop calls it on the Vec itself,
-    // so the iterator state lives here). `new()` starts it at 0.
+    // The first `cursor` slots were MOVED OUT by `next()` (the `for` loop calls
+    // it on the Vec itself), so the container owns exactly [cursor, len). Every
+    // public method below counts and indexes RELATIVE to that live region, which
+    // makes the cursor invisible from outside: `len()` is the number of elements
+    // still owned and `at_ref(0)` is the first of them.
     cursor: i32
 }
 
@@ -78,10 +84,10 @@ impl Vec
         ret Vec { data: __alloc<T>(0), len: 0, cap: 0, cursor: 0 };
     }
 
-    // Element count.
+    // Elements still owned (the moved-out prefix does not count).
     fn len(self: &Vec) -> i32
     {
-        ret self.len;
+        ret self.len - self.cursor;
     }
 
     // Allocated capacity, in elements.
@@ -92,12 +98,20 @@ impl Vec
 
     fn is_empty(self: &Vec) -> bool
     {
-        ret self.len == 0;
+        ret self.len <= self.cursor;
     }
 
-    // Drop the elements (a no-op for the caller: the buffer is kept).
+    // Destroy the elements and keep the buffer (which makes the Vec reusable
+    // without reallocating). Every element still owned is released exactly once;
+    // the slots `next()` already moved out are not touched.
     fn clear(self: &mut Vec)
     {
+        let mut i = self.cursor;
+        while i < self.len
+        {
+            __drop(self.data[i]);
+            i = i + 1;
+        }
         self.len = 0;
         self.cursor = 0;
     }
@@ -105,6 +119,9 @@ impl Vec
     // Make room for one more element. `elem_bytes` comes from `__sizeof(v)` at
     // the call site, which is why it is a parameter and not computed here (a
     // generic body has no value of type T to ask about).
+    //
+    // The copy is a bitwise MOVE: ownership of the elements travels with their
+    // bytes, so nothing is destroyed here — the old buffer is simply freed.
     fn grow(self: &mut Vec, elem_bytes: i32)
     {
         let mut new_cap = self.cap * 2;
@@ -124,76 +141,107 @@ impl Vec
         self.len = self.len + 1;
     }
 
-    // Remove and return the LAST element, or `none` when empty.
+    // Remove and return the LAST owned element, or `none` when empty.
     fn pop(self: &mut Vec) -> Option<T>
     {
-        if self.len == 0 { ret Option::None; }
+        if self.len <= self.cursor { ret Option::None; }
         self.len = self.len - 1;
         ret Option::Some(self.data[self.len]);
     }
 
-    // The element at `i`, or `none` when out of bounds (the checked accessor;
-    // `v[i]` is the aborting one).
-    fn get(self: &Vec, i: i32) -> Option<T>
-    {
-        if i < 0 || i >= self.len { ret Option::None; }
-        ret Option::Some(self.data[i]);
-    }
-
-    // Remove the element at `i`, shifting the rest left. `none` when out of
-    // bounds.
+    // Remove the element at live index `i`, shifting the rest left. `none` when
+    // out of bounds. The returned element is handed over (no copy, no drop).
     fn remove(self: &mut Vec, i: i32) -> Option<T>
     {
-        if i < 0 || i >= self.len { ret Option::None; }
-        let out = self.data[i];
-        let mut j = i;
+        if i < 0 || i >= self.len - self.cursor { ret Option::None; }
+        let at = self.cursor + i;
+        let out = self.data[at];
+        let mut j = at;
         while j + 1 < self.len {
             self.data[j] = self.data[j + 1];
             j = j + 1;
         }
         self.len = self.len - 1;
-        if self.cursor > self.len { self.cursor = self.len; }
         ret Option::Some(out);
     }
 
-    // Insert `v` at `i`, shifting the rest right. Aborts when `i` is out of
-    // bounds (`i == len` appends).
+    // Insert `v` at live index `i`, shifting the rest right. Aborts when `i` is
+    // out of bounds (`i == len()` appends).
     fn insert(self: &mut Vec, i: i32, v: T)
     {
-        if i < 0 || i > self.len { panic("Vec::insert index out of bounds"); }
+        if i < 0 || i > self.len - self.cursor { panic("Vec::insert index out of bounds"); }
         if self.len >= self.cap { self.grow(__sizeof(v)); }
+        let at = self.cursor + i;
         let mut j = self.len;
-        while j > i {
+        while j > at {
             self.data[j] = self.data[j - 1];
             j = j - 1;
         }
-        self.data[i] = v;
+        self.data[at] = v;
         self.len = self.len + 1;
+    }
+
+    // The element at live index `i`, LENT to the caller: no copy and no move,
+    // which is the only way to look at a non-Copy element without taking it out
+    // of the container.
+    //
+    // WARNING: the returned borrow is NOT tracked by the compiler — the same
+    // compromise as `String::to_cstr`. Keep this Vec alive and un-reallocated
+    // while the reference is used: `push`/`insert` may free the old buffer, and
+    // dropping the Vec frees it outright.
+    fn at_ref(self: &Vec, i: i32) -> &T
+    {
+        if i < 0 || i >= self.len - self.cursor { panic("Vec::at_ref index out of bounds"); }
+        ret &self.data[self.cursor + i];
+    }
+
+    // The element at live index `i`, mutably lent (see the warning on at_ref).
+    fn at_mut(self: &mut Vec, i: i32) -> &mut T
+    {
+        if i < 0 || i >= self.len - self.cursor { panic("Vec::at_mut index out of bounds"); }
+        ret &mut self.data[self.cursor + i];
+    }
+}
+
+// Reading an element BY VALUE. `get` (and the index operators below) hand the
+// element over, so the element must be Copy: the container would otherwise give
+// away a value it still owns and destroy it a second time at teardown.
+impl<T: Copy> Vec<T>
+{
+    // The element at live index `i`, or `none` when out of bounds (the checked
+    // accessor; `v[i]` is the aborting one).
+    fn get(self: &Vec, i: i32) -> Option<T>
+    {
+        if i < 0 || i >= self.len - self.cursor { ret Option::None; }
+        ret Option::Some(self.data[self.cursor + i]);
     }
 }
 
 // `v[i]` — index out of bounds aborts (arrays behave the same way).
-impl Index<T> for Vec<T>
+impl<T: Copy> Index<T> for Vec<T>
 {
     fn at(self: &Self, i: i32) -> T
     {
-        if i < 0 || i >= self.len { panic("Vec index out of bounds"); }
-        ret self.data[i];
+        if i < 0 || i >= self.len - self.cursor { panic("Vec index out of bounds"); }
+        ret self.data[self.cursor + i];
     }
 }
 
 // `v[i] = x` — index out of bounds aborts.
-impl IndexMut<T> for Vec<T>
+impl<T: Copy> IndexMut<T> for Vec<T>
 {
     fn set(self: &mut Self, i: i32, v: T)
     {
-        if i < 0 || i >= self.len { panic("Vec::set index out of bounds"); }
-        self.data[i] = v;
+        if i < 0 || i >= self.len - self.cursor { panic("Vec::set index out of bounds"); }
+        self.data[self.cursor + i] = v;
     }
 }
 
 // `for e in v { ... }` — consumes the Vec (the loop moves it into its own
-// iterator local) and yields a COPY of each element, in order.
+// iterator local) and yields every element, IN ORDER. A Copy element is copied
+// out; anything else is MOVED out, which is what `cursor` records: the slots
+// before it are no longer owned, so neither `clear` nor the Drop impl destroys
+// them again.
 impl Iterator<T> for Vec<T>
 {
     fn next(self: &mut Self) -> Option<T>
@@ -205,12 +253,23 @@ impl Iterator<T> for Vec<T>
     }
 }
 
-// Freeing the buffer. Elements need no destructor: the `T: Copy` bound above
-// guarantees there is nothing to release per element.
+// Releasing the buffer and the elements it still owns, [cursor, len).
+//
+// `__drop(x)` is the compiler's per-value destructor: for a type that needs no
+// drop (every primitive) it emits nothing at all, so a `Vec<i32>` pays exactly
+// one empty loop; for the rest it runs that type's own drop glue. The elements
+// `next()` already moved out are NOT touched here — the loop starts at the
+// cursor.
 impl Drop for Vec
 {
     fn drop(self)
     {
+        let mut i = self.cursor;
+        while i < self.len
+        {
+            __drop(self.data[i]);
+            i = i + 1;
+        }
         __free(self.data);
     }
 }

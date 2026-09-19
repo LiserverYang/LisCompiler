@@ -11,13 +11,31 @@
 //     match v.get(99) { ... }        // the checked accessor: none, never aborts
 //     for e in v { ... }             // consumes the Vec (Iterator<T>)
 //
-// Elements must be Copy: dropping a Vec frees the BUFFER, not the elements, so a
-// non-Copy element type is rejected at compile time instead of leaking. The
-// buffer grows by doubling (0 -> 4 -> 8 -> ...) and is released by the Drop impl.
-// Everything here COMPILES.
+// Elements may own resources (String, another Vec, a struct with a Drop impl):
+// the container destroys the elements it still owns -- clear() and the Drop impl
+// -- each exactly once. v[i] / v[i] = x / get() hand the element OVER, so they
+// exist only for Copy elements; a non-Copy container is read through
+// at_ref/at_mut (a lent view) or emptied with pop/remove/for. The buffer grows
+// by doubling (0 -> 4 -> 8 -> ...). Everything here COMPILES.
 
 impt vec { Vec };
 impt option { Option };
+impt string { String };
+impt drop { Drop };
+
+// Counts destructor runs, so the non-Copy section below can prove that each
+// element is released exactly once.
+let drops = 0;
+
+struct Tracked
+{
+    pub tag: i32
+}
+
+impl Drop for Tracked
+{
+    fn drop(self) { drops = drops + 1; }
+}
 
 // A Vec is an ordinary field: it is moved and dropped with the struct that owns
 // it, and the buffer goes away with the field.
@@ -105,6 +123,42 @@ fn main() -> i32
     v.clear();
     if v.len() != 0 { ret 13; }
     if v.cap() != cap { ret 14; }
+
+    // 7. NON-Copy elements. String owns a heap buffer, so the Vec must destroy
+    //    every element it still holds -- exactly once.
+    {
+        let mut names = Vec<String>::new();
+        names.push(String::from_lit("ada"));
+        names.push(String::from_lit("grace"));
+        if names.len() != 2 { ret 15; }
+        // at_ref lends a view (no copy, no move); at_mut lends a writable one.
+        if names.at_ref(0).len() != 3 { ret 16; }
+        let slot = names.at_mut(1);
+        *slot = String::from_lit("grace hopper");
+        if names.at_ref(1).len() != 12 { ret 17; }
+        // pop hands the element over: the caller now owns it.
+        match names.pop() {
+            Some(s) => { if s.len() != 12 { ret 18; } },
+            None => { ret 19; }
+        }
+        if names.len() != 1 { ret 20; }
+    }   // <- the Vec and the String it still owns are destroyed here
+
+    // 8. A user type with a destructor: three elements in, three destructor
+    //    runs out (a leak or a double drop would show up as a different count).
+    {
+        let mut tracked = Vec<Tracked>::new();
+        tracked.push(Tracked { tag: 1 });
+        tracked.push(Tracked { tag: 2 });
+        tracked.push(Tracked { tag: 3 });
+        if tracked.at_ref(2).tag != 3 { ret 21; }
+        tracked.clear();               // destroys all three
+        if drops != 3 { ret 22; }
+        // The container is reusable after clear(); the buffer was kept.
+        tracked.push(Tracked { tag: 4 });
+        if tracked.len() != 1 { ret 23; }
+    }
+    if drops != 4 { ret 24; }
 
     ret 0;
 }
