@@ -252,10 +252,21 @@ TEST_F(BorrowCheckerTest, AssignFieldWhileBorrowed)
         "because it is borrowed");
 }
 
-TEST_F(BorrowCheckerTest, MoveWhileBorrowed)
+TEST_F(BorrowCheckerTest, MoveWhileDeadBorrowAllowed)
 {
-    expectError("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }",
-        "cannot move out of 'x' because it is borrowed");
+    // DECISION (2026-09-19): a move only conflicts with a borrow that is still
+    // LIVE. `r` is never used again, so the borrow is over by the time x moves
+    // and nothing can dangle — the MIR checker follows the reference's live
+    // range (true NLL; Rust accepts this too). The HIR checker holds one lexical
+    // borrow set and rejects every move of a borrowed place: "moves are not
+    // NLL-ed" was that approximation, not a language rule. Both implementations
+    // run against this suite while the checker is ported, so the expectation
+    // follows the active one.
+    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }";
+    if (MIRBorrowCheck::enabled())
+        expectOk(src);
+    else
+        expectError(src, "cannot move out of 'x' because it is borrowed");
 }
 
 TEST_F(BorrowCheckerTest, MutateThroughMutBorrow)
@@ -321,18 +332,26 @@ TEST_F(BorrowCheckerTest, NllReadThenWrite)
     expectOk("struct S { pub v: i32 } fn main() { let mut x = S { v: 1 }; let r = &x; let v = r.v; x.v = 5; ret v; }");
 }
 
-TEST_F(BorrowCheckerTest, NllMoveStaysConservative)
+TEST_F(BorrowCheckerTest, NllMoveAfterHolderLastUseAllowed)
 {
-    // Moves are not NLL-ed: moving a borrowed place is forbidden even after the
-    // holder's last use (would leave the reference dangling).
-    expectError("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let v = r.v; let y = x; }",
-        "cannot move out of 'x' because it is borrowed");
+    // DECISION (2026-09-19): the borrow ends at the holder's last use (`r.v`),
+    // so the move afterwards is safe. See MoveWhileDeadBorrowAllowed.
+    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let v = r.v; let y = x; }";
+    if (MIRBorrowCheck::enabled())
+        expectOk(src);
+    else
+        expectError(src, "cannot move out of 'x' because it is borrowed");
 }
 
-TEST_F(BorrowCheckerTest, NllMoveOfUnusedBorrowStaysBlocked)
+TEST_F(BorrowCheckerTest, NllMoveOfUnusedBorrowAllowed)
 {
-    expectError("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }",
-        "cannot move out of 'x' because it is borrowed");
+    // Same decision as MoveWhileDeadBorrowAllowed, with the reference never used
+    // at all: nll liveness leaves the borrow live nowhere.
+    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }";
+    if (MIRBorrowCheck::enabled())
+        expectOk(src);
+    else
+        expectError(src, "cannot move out of 'x' because it is borrowed");
 }
 
 TEST_F(BorrowCheckerTest, BorrowEndsAtBlockExit)
@@ -1433,11 +1452,16 @@ TEST_F(BorrowCheckerTest, TwoLevelSamePathConflict)
         "borrowed");
 }
 
-TEST_F(BorrowCheckerTest, FieldBorrowThenWholeMoveRejected)
+TEST_F(BorrowCheckerTest, FieldBorrowThenWholeMoveAfterLastUse)
 {
-    expectError("struct S { pub v: i32 } fn main() { let x = S { v: 1 };"
-                " let r = &x.v; let y = x; }",
-        "borrowed");
+    // A FIELD borrow is a borrow of (a part of) x, and it ends at the holder's
+    // last use like any other (same decision as MoveWhileDeadBorrowAllowed).
+    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 };"
+                      " let r = &x.v; let y = x; }";
+    if (MIRBorrowCheck::enabled())
+        expectOk(src);
+    else
+        expectError(src, "borrowed");
 }
 
 TEST_F(BorrowCheckerTest, FieldMoveThenOtherFieldBorrow)
