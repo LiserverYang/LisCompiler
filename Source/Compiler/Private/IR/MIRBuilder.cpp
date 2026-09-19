@@ -31,8 +31,11 @@ std::string mangleName(const MIRFunction &fn)
 bool MIRBuilder::isCopyType(const std::shared_ptr<Type> &type)
 {
     // Single source of truth is Type::isCopyable() (primitives, raw pointers
-    // and SHARED references — `&mut T` is not Copy).
-    return !type || type->isCopyable();
+    // and SHARED references — `&mut T` is not Copy), plus a FUNCTION value: a
+    // code pointer owns nothing and is not a Copy TRAIT implementor, so treating
+    // it as a move made every call inside a loop consume its callee temp
+    // (`<T>::next` in every iterator helper) and queued a drop for it.
+    return !type || type->isCopyable() || type->getKind() == Type::Kind::Function;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -534,6 +537,14 @@ void MIRBuilder::emitDropDynamic(const MIRPlace &place)
 
 MIROperand MIRBuilder::placeToOperand(MIRPlace place)
 {
+    // A COMPARISON only reads its operands (the comparison traits take `&Self`),
+    // but a generic `T` without a Copy bound would otherwise be classified as a
+    // MOVE below: the borrow checker would then see `min(a, b)` consume both
+    // operands (and a non-Copy T would lose its drop). buildBinaryOp sets the
+    // flag while it evaluates a comparison's operands.
+    if (forceReadOperands_)
+        return MIRCopy{.place = std::move(place)};
+
     // Copy types (primitives, raw pointers, shared references) transfer by
     // value. A POINTER-LIKE type is not a Move source even when it is not
     // Copy: `&mut T` is non-Copy (duplicating it would break exclusivity),
@@ -1888,8 +1899,19 @@ MIRPlace MIRBuilder::buildNameRef(HIRNameRef *ref)
 MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
 {
     // Evaluate operands before making the temp (important for aliased places).
+    // A comparison READS both operands (`a < b` must not consume a or b — the
+    // comparison traits take `&Self`), whatever the operand type's Copy-ness.
+    const bool isComparison = bin->opKind == HIRBinaryOp::OpKind::Eq
+                              || bin->opKind == HIRBinaryOp::OpKind::Ne
+                              || bin->opKind == HIRBinaryOp::OpKind::Lt
+                              || bin->opKind == HIRBinaryOp::OpKind::Gt
+                              || bin->opKind == HIRBinaryOp::OpKind::Le
+                              || bin->opKind == HIRBinaryOp::OpKind::Ge;
+    const bool savedForceRead = forceReadOperands_;
+    forceReadOperands_ = isComparison;
     MIROperand lhs = exprToOperand(bin->left.get());
     MIROperand rhs = exprToOperand(bin->right.get());
+    forceReadOperands_ = savedForceRead;
 
     // Operator overloading: sema resolved `a + b` to `a.add(b)` on a struct
     // implementing the operator trait. Lower to a call of the trait method.

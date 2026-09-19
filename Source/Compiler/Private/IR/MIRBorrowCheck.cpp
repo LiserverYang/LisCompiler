@@ -143,6 +143,7 @@ struct PlaceInfo
     MovePath path;          // projections up to the first Deref
     bool throughDeref = false;
     bool derefIsLast = false;
+    size_t derefAt = 0;     // index of the first Deref projection
 };
 
 PlaceInfo describePlace(const MIRPlace &place)
@@ -160,6 +161,7 @@ PlaceInfo describePlace(const MIRPlace &place)
             if (!info.throughDeref)
             {
                 info.throughDeref = true;
+                info.derefAt = i;
                 info.derefIsLast = (i + 1 == place.projections.size());
             }
             continue;
@@ -363,6 +365,11 @@ private:
     std::vector<size_t> exemptionChain(size_t holder) const;
     /// What a reference local points at, when the alias table knows.
     const MIRPlace *referentOf(size_t holder) const;
+    /// True when the place goes through a REFERENCE (`&T` / `&mut T`). Going
+    /// through a RAW pointer (`*mut T`, stdlib only) is not a borrow at all: the
+    /// heap primitives exist precisely to move values in and out
+    /// (`self.data[self.len]` in Vec::pop), and nothing can dangle.
+    bool derefIsReference(const PlaceInfo &info, const MIRPlace &place) const;
     /// Check one use of a place against the active borrows.
     void checkAccess(const MIRPlace &place, AccessKind kind);
     void checkAccessRaw(const MIRPlace &target, AccessKind kind, const std::vector<size_t> &exempt, const MIRPlace &diagPlace);
@@ -402,6 +409,8 @@ void FunctionChecker::logAt(const MIRPlace &place, const std::string &msg, size_
 {
     if (!reporting_)
         return;
+    if (std::getenv("LIS_MIR_DEBUG") != nullptr)
+        std::cout << "  [dbg] in " << fn_.name << " / " << body_.funcName << ": " << msg << "\n";
     Logger::LogInfo info{};
     info.codePath = context_->filePath;
     info.code = &context_->fileValue;
@@ -775,12 +784,19 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
     if (!info.isLocal || info.root >= st.locals.size())
         return;
 
-    const bool nonCopy = place.type && !place.type->isCopyable();
+    // A FUNCTION value is a code pointer: it owns nothing and is never a move
+    // (mirrors MIRBuilder::isCopyType).
+    const bool nonCopy = place.type && !place.type->isCopyable()
+                         && place.type->getKind() != Type::Kind::Function;
     if (!nonCopy)
         return; // a Copy source is a read, not a move
 
     if (info.throughDeref)
     {
+        // A RAW pointer is not a borrow: moving a value out through `*mut T` is
+        // exactly what the stdlib heap containers do (`self.data[self.len]`).
+        if (!derefIsReference(info, place))
+            return;
         if (info.derefIsLast || info.path.empty())
         {
             logAt(place,
@@ -982,6 +998,22 @@ const MIRPlace *FunctionChecker::referentOf(size_t holder) const
     if (it == holderBorrow_.end())
         return nullptr;
     return &borrows_[it->second].place;
+}
+
+bool FunctionChecker::derefIsReference(const PlaceInfo &info, const MIRPlace &place) const
+{
+    if (!info.throughDeref || !info.isLocal || info.root >= body_.locals.size())
+        return true;
+    // The deref the access actually goes through is the LAST one: a chain like
+    // `self.data[i]` derefs `&mut Vec` first (a reference) and then the `*mut T`
+    // field (a raw pointer) — the element access is the raw one, and that is the
+    // one the borrow checker does not track (HIR treats `p[i]` the same way).
+    size_t lastDeref = info.derefAt;
+    for (size_t i = 0; i < place.projections.size(); ++i)
+        if (place.projections[i].kind == ProjectionKind::Deref)
+            lastDeref = i;
+    const std::shared_ptr<Type> pointee = typeAfter(body_.locals[info.root].type, place, lastDeref);
+    return pointee && pointee->getKind() == Type::Kind::Reference;
 }
 
 std::string FunctionChecker::borrowName(const MIRPlace &place) const
@@ -1459,6 +1491,10 @@ void FunctionChecker::checkAccess(const MIRPlace &place, AccessKind kind)
 
     if (info.throughDeref && info.isLocal)
     {
+        // A raw pointer is not tracked by the borrow checker at all (HIR does the
+        // same: `p[i]` is not a borrow of anything), so nothing to conflict with.
+        if (!derefIsReference(info, place))
+            return;
         // Taking a reference THROUGH a reference READS the pointer first — and
         // HIR reports that read before the borrow itself, which is where
         // "cannot read 'r' because it is borrowed as mutable" comes from.

@@ -315,6 +315,11 @@ private:
     /// `isDeclaration` marks the write that initialises a `let` binding (see
     /// MIRStmtAssign::isDeclaration).
     void emitAssign(MIRPlace lhs, MIRRValue rhs, bool isDeclaration = false);
+
+    /// While set, placeToOperand yields a READ (MIRCopy) instead of classifying
+    /// the operand as a move. buildBinaryOp raises it around the operands of a
+    /// COMPARISON, which only reads them.
+    bool forceReadOperands_ = false;
     void emitDrop(MIRPlace place);
 
     /** Drop `place` but skip the moved-out sub-paths (relative to `place`).
