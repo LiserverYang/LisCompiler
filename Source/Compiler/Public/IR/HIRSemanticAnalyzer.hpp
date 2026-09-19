@@ -305,34 +305,18 @@ private:
     /// True if two place paths overlap (one is a prefix of the other).
     static bool pathsOverlap(const std::vector<std::string> &a, const std::vector<std::string> &b);
 
-    // ── Stage 3: dangling / escape analysis (RefOrigin) ─────────────────────────
+    // ── Stage 3 (dangling returns) moved to MIRBorrowCheck ──────────────────────
     //
-    // A returned reference is dangling iff it (transitively) points into this
-    // function's stack frame. Every reference-typed expression resolves to a
-    // RefOrigin; Local → reject on return, everything else → allow.
+    // Rejecting a `ret` of a reference that points into this function's frame is
+    // E4007 in MIRBorrowCheck now: it reads the returned PLACE off the MIR (a
+    // reference-typed param or a global outlives the call; a local slot, a
+    // by-value param slot or a local struct field does not). The RefOrigin
+    // bookkeeping that used to live on Symbol is no longer maintained.
 
-    /// ReferenceType, or a SelfType with isRef (defensive).
+    /// ReferenceType, or a SelfType with isRef (defensive). Used by type checking.
     static bool isReferenceType(const std::shared_ptr<Type> &ty);
     /// A CustomType with at least one reference-typed field.
     static bool structHasRefFields(const std::shared_ptr<Type> &ty);
-    /// Origin of the reference VALUE held by a reference-typed binding.
-    RefOrigin originOfBinding(Symbol *sym);
-    /// Origin of the STORAGE denoted by the place (root, path) — what `&place` points at.
-    RefOrigin placeStorageOrigin(const std::string &root, const std::vector<std::string> &path);
-    /// Origin of a reference-typed expression's value (the returned-reference check).
-    RefOrigin originOfReferenceValue(HIRExpr *expr);
-    /// Origin of the reference value stored at the struct place (root, path).
-    RefOrigin fieldValueOrigin(const std::string &root, const std::vector<std::string> &path);
-    /// Mark a reference-typed / ref-fielded PARAM as Param (safe) at function entry.
-    void setupParamOrigin(Symbol *sym);
-    /// Populate a LOCAL binding's origins from its initializer (decl).
-    void setupBindingOrigins(HIRVarDecl *node);
-    /// Refresh origins after an assignment (re-assignment must re-derive them).
-    void updateAssignOrigins(HIRAssign *node);
-    /// Reject `ret` of a reference that points into this function's frame.
-    void checkDanglingReturn(HIRReturn *node);
-    /// Reject `ret` of a struct whose reference fields point into this frame.
-    void checkStructReturn(HIRExpr *value, const std::shared_ptr<CustomType> &declaredStruct, HIRNode &errNode);
 
     // -----------------------------------------------------------------------
     void log(HIRNode &node, const std::string &msg, size_t errorId = E_SemanticError, Logger::LogLevel level = Logger::LogLevel::ERROR, bool exit = false)

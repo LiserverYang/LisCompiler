@@ -2186,7 +2186,6 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
         sym->name = "self";
         sym->type = selfTy;
         sym->isMutable = node->selfIsMut || !node->selfIsRef;
-        setupParamOrigin(sym.get());
         SymbolTable::getInstance().insertSymbol("self", std::move(sym));
     }
 
@@ -2223,7 +2222,6 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
         sym->kind = SymbolKind::Param;
         sym->name = pname;
         sym->type = resolvedTy;
-        setupParamOrigin(sym.get());
         SymbolTable::getInstance().insertSymbol(pname, std::move(sym));
     }
 
@@ -2690,350 +2688,6 @@ bool HIRSemanticAnalyzer::structHasRefFields(const std::shared_ptr<Type> &ty)
         if (isReferenceType(f.type)) return true;
     return false;
 }
-
-RefOrigin HIRSemanticAnalyzer::originOfBinding(Symbol *sym)
-{
-    if (!sym || !sym->type) return RefOrigin::Unknown;
-    if (sym->kind == SymbolKind::GlobalVar) return RefOrigin::Global;
-    if (sym->kind == SymbolKind::Param) return RefOrigin::Param;
-    return sym->refOrigin.value_or(RefOrigin::Unknown); // LocalVar
-}
-
-RefOrigin HIRSemanticAnalyzer::placeStorageOrigin(const std::string &root,
-    const std::vector<std::string> &path)
-{
-    auto *sym = SymbolTable::getInstance().lookupSymbol(root);
-    if (!sym || !sym->type) return RefOrigin::Unknown;
-    if (sym->kind == SymbolKind::GlobalVar) return RefOrigin::Global;
-    // `&x` / `&param` — the bare slot lives in this function's frame.
-    if (path.empty()) return RefOrigin::Local;
-    // `&r.v` with r reference-typed — the field lives where r points.
-    if (isReferenceType(sym->type)) return originOfBinding(sym);
-    // `&s.v` with s a by-value struct — its fields are a local frame copy.
-    return RefOrigin::Local;
-}
-
-RefOrigin HIRSemanticAnalyzer::fieldValueOrigin(const std::string &root,
-    const std::vector<std::string> &path)
-{
-    if (path.size() != 1) return RefOrigin::Unknown; // nested fields not tracked (conservative)
-    auto *sym = SymbolTable::getInstance().lookupSymbol(root);
-    if (!sym || !sym->type) return RefOrigin::Unknown;
-
-    // The reference value lives in the struct the root binding points to.
-    if (isReferenceType(sym->type))
-    {
-        if (sym->kind == SymbolKind::Param) return RefOrigin::Param;      // caller's struct
-        if (sym->kind == SymbolKind::GlobalVar) return RefOrigin::Global; // static struct
-        // Local reference → resolve its target to find the holding struct.
-        if (sym->refTarget.has_value())
-        {
-            const auto &[tRoot, tPath] = *sym->refTarget;
-            if (tPath.empty())
-            {
-                auto *tSym = SymbolTable::getInstance().lookupSymbol(tRoot);
-                if (tSym)
-                {
-                    if (tSym->kind == SymbolKind::Param) return RefOrigin::Param;
-                    if (tSym->kind == SymbolKind::GlobalVar) return RefOrigin::Global;
-                    if (tSym->kind == SymbolKind::LocalVar)
-                    {
-                        auto it = tSym->refFieldOrigins.find(path[0]);
-                        return it != tSym->refFieldOrigins.end() ? it->second : RefOrigin::Unknown;
-                    }
-                }
-            }
-        }
-        return RefOrigin::Unknown;
-    }
-
-    // Direct struct binding stores the field value.
-    switch (sym->kind)
-    {
-    case SymbolKind::GlobalVar: return RefOrigin::Global;
-    case SymbolKind::Param: return RefOrigin::Param;
-    case SymbolKind::LocalVar:
-    {
-        auto it = sym->refFieldOrigins.find(path[0]);
-        return it != sym->refFieldOrigins.end() ? it->second : RefOrigin::Unknown;
-    }
-    default: return RefOrigin::Unknown;
-    }
-}
-
-RefOrigin HIRSemanticAnalyzer::originOfReferenceValue(HIRExpr *expr)
-{
-    if (!expr) return RefOrigin::Unknown;
-    if (auto *ref = dynamic_cast<HIRRef *>(expr))
-    {
-        std::string root;
-        std::vector<std::string> path;
-        if (!extractRootAndPath(ref->expr.get(), root, path)) return RefOrigin::Unknown;
-        return placeStorageOrigin(root, path);
-    }
-    if (auto *nr = dynamic_cast<HIRNameRef *>(expr))
-        return originOfBinding(SymbolTable::getInstance().lookupSymbol(nr->name));
-    if (auto *ma = dynamic_cast<HIRMemberAccess *>(expr))
-    {
-        std::string root;
-        std::vector<std::string> path;
-        if (!extractRootAndPath(ma, root, path)) return RefOrigin::Unknown;
-        return fieldValueOrigin(root, path);
-    }
-    if (auto *lit = dynamic_cast<HIRLiteral *>(expr))
-        return lit->kind == HIRLiteral::Kind::String ? RefOrigin::Global : RefOrigin::Unknown;
-    // Calls / binary / casts: origin unknown → conservative allow.
-    return RefOrigin::Unknown;
-}
-
-void HIRSemanticAnalyzer::setupParamOrigin(Symbol *sym)
-{
-    if (!sym || !sym->type) return;
-    if (isReferenceType(sym->type))
-    {
-        sym->refOrigin = RefOrigin::Param;
-        return;
-    }
-    if (auto ct = std::dynamic_pointer_cast<CustomType>(sym->type))
-    {
-        if (!structHasRefFields(ct)) return;
-        // A by-value struct param is a caller-provided copy; its reference fields
-        // point to caller-owned memory, so they are safe to return.
-        for (const auto &f : ct->getFields())
-            if (isReferenceType(f.type))
-                sym->refFieldOrigins[f.name] = RefOrigin::Param;
-    }
-}
-
-void HIRSemanticAnalyzer::setupBindingOrigins(HIRVarDecl *node)
-{
-    auto *sym = node->varSymbol;
-    if (!sym || !sym->type) return;
-    if (sym->kind != SymbolKind::LocalVar) return; // globals derived from kind at use time
-    if (!node->init.has_value()) return;
-    auto *init = node->init.value().get();
-    if (!init->type) return;
-
-    if (isReferenceType(sym->type))
-    {
-        sym->refOrigin = originOfReferenceValue(init);
-        // Target (where the reference points) for through-reference field reads.
-        sym->refTarget.reset();
-        if (auto *ref = dynamic_cast<HIRRef *>(init))
-        {
-            std::string root;
-            std::vector<std::string> path;
-            if (extractRootAndPath(ref->expr.get(), root, path))
-                sym->refTarget = std::make_pair(root, path);
-        }
-        else if (auto *nr = dynamic_cast<HIRNameRef *>(init))
-        {
-            auto *other = SymbolTable::getInstance().lookupSymbol(nr->name);
-            if (other && other->refTarget) sym->refTarget = other->refTarget;
-        }
-        return;
-    }
-
-    // Struct-typed local with reference fields: per-field origins.
-    auto ct = std::dynamic_pointer_cast<CustomType>(sym->type);
-    if (!ct || !structHasRefFields(ct)) return;
-
-    if (auto *sinit = dynamic_cast<HIRStructInit *>(init))
-    {
-        for (auto &[fname, mexpr] : sinit->members)
-        {
-            auto fit = std::find(ct->getFields().begin(), ct->getFields().end(), fname);
-            if (fit == ct->getFields().end()) continue;
-            if (!isReferenceType(fit->type)) continue;
-            sym->refFieldOrigins[fname] = originOfReferenceValue(mexpr.get());
-        }
-        return;
-    }
-    if (auto *nr = dynamic_cast<HIRNameRef *>(init))
-    {
-        auto *other = SymbolTable::getInstance().lookupSymbol(nr->name);
-        if (!other) return;
-        if (other->kind == SymbolKind::LocalVar)
-            sym->refFieldOrigins = other->refFieldOrigins; // struct copy
-        else if (other->kind == SymbolKind::Param)
-            for (const auto &f : ct->getFields())
-                if (isReferenceType(f.type))
-                    sym->refFieldOrigins[f.name] = RefOrigin::Param;
-                else if (other->kind == SymbolKind::GlobalVar)
-                    for (const auto &f : ct->getFields())
-                        if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Global;
-        return;
-    }
-    // Calls / member access / other: not tracked → empty map → Unknown.
-}
-
-void HIRSemanticAnalyzer::updateAssignOrigins(HIRAssign *node)
-{
-    auto *target = node->target.get();
-    auto *value = node->value.get();
-    if (!target || !value) return;
-
-    // Whole-binding assignment: `r = <ref>` or `s = <struct>`.
-    if (auto *nr = dynamic_cast<HIRNameRef *>(target))
-    {
-        auto *sym = SymbolTable::getInstance().lookupSymbol(nr->name);
-        if (!sym || sym->kind != SymbolKind::LocalVar) return;
-        if (!value->type) return;
-
-        if (isReferenceType(sym->type))
-        {
-            sym->refOrigin = originOfReferenceValue(value);
-            sym->refTarget.reset();
-            if (auto *ref = dynamic_cast<HIRRef *>(value))
-            {
-                std::string root;
-                std::vector<std::string> path;
-                if (extractRootAndPath(ref->expr.get(), root, path))
-                    sym->refTarget = std::make_pair(root, path);
-            }
-            else if (auto *vn = dynamic_cast<HIRNameRef *>(value))
-            {
-                auto *other = SymbolTable::getInstance().lookupSymbol(vn->name);
-                if (other && other->refTarget) sym->refTarget = other->refTarget;
-            }
-            return;
-        }
-
-        auto ct = std::dynamic_pointer_cast<CustomType>(sym->type);
-        if (!ct || !structHasRefFields(ct)) return;
-        // Whole-struct re-assignment re-derives field origins like a declaration.
-        sym->refFieldOrigins.clear();
-        if (auto *sinit = dynamic_cast<HIRStructInit *>(value))
-        {
-            for (auto &[fname, mexpr] : sinit->members)
-            {
-                auto fit = std::find(ct->getFields().begin(), ct->getFields().end(), fname);
-                if (fit == ct->getFields().end()) continue;
-                if (!isReferenceType(fit->type)) continue;
-                sym->refFieldOrigins[fname] = originOfReferenceValue(mexpr.get());
-            }
-        }
-        else if (auto *vn = dynamic_cast<HIRNameRef *>(value))
-        {
-            auto *other = SymbolTable::getInstance().lookupSymbol(vn->name);
-            if (!other) return;
-            if (other->kind == SymbolKind::LocalVar)
-                sym->refFieldOrigins = other->refFieldOrigins;
-            else if (other->kind == SymbolKind::Param)
-                for (const auto &f : ct->getFields())
-                    if (isReferenceType(f.type))
-                        sym->refFieldOrigins[f.name] = RefOrigin::Param;
-                    else if (other->kind == SymbolKind::GlobalVar)
-                        for (const auto &f : ct->getFields())
-                            if (isReferenceType(f.type)) sym->refFieldOrigins[f.name] = RefOrigin::Global;
-        }
-        return;
-    }
-
-    // Field assignment `s.r = <ref>` refreshes the storing struct's field origin.
-    if (auto *ma = dynamic_cast<HIRMemberAccess *>(target))
-    {
-        std::string root;
-        std::vector<std::string> path;
-        if (!extractRootAndPath(ma, root, path)) return;
-        if (path.size() != 1) return;           // nested: not tracked
-        if (!isReferenceType(ma->type)) return; // only reference-typed fields carry origins
-        auto *sym = SymbolTable::getInstance().lookupSymbol(root);
-        if (!sym || sym->kind != SymbolKind::LocalVar) return;
-
-        // If the store goes THROUGH a local reference (`r.v = &x`, r = &mut h),
-        // the field belongs to r's target struct.
-        Symbol *store = sym;
-        if (isReferenceType(sym->type))
-        {
-            if (!sym->refTarget.has_value()) return;
-            const auto &[tRoot, tPath] = *sym->refTarget;
-            if (!tPath.empty()) return;
-            store = SymbolTable::getInstance().lookupSymbol(tRoot);
-            if (!store || store->kind != SymbolKind::LocalVar) return;
-        }
-        store->refFieldOrigins[path[0]] = originOfReferenceValue(value);
-    }
-}
-
-void HIRSemanticAnalyzer::checkDanglingReturn(HIRReturn *node)
-{
-    if (mirBorrowCheck_) return; // MIRBorrowCheck checks the returned place on MIR
-    if (!node->value.has_value()) return;
-    auto *value = node->value.value().get();
-    auto declared = functionInfo.declaredReturnType;
-    if (!declared) return;
-
-    if (isReferenceType(declared))
-    {
-        RefOrigin o = originOfReferenceValue(value);
-        if (o == RefOrigin::Local)
-        {
-            // Name the referenced place for the message (`ret &x` → 'x').
-            std::string name = "this value";
-            std::string root;
-            std::vector<std::string> path;
-            HIRExpr *place = value;
-            if (auto *ref = dynamic_cast<HIRRef *>(value))
-                place = ref->expr.get();
-            if (extractRootAndPath(place, root, path))
-                name = root + (path.empty() ? "" : "." + joinPath(path));
-            log(*node,
-                "cannot return reference to '" + name + "': it does not live long enough (it points into this function's stack frame)",
-                E_BorrowDoesNotLiveLongEnough);
-        }
-        return;
-    }
-
-    auto ct = std::dynamic_pointer_cast<CustomType>(declared);
-    if (ct && structHasRefFields(ct))
-        checkStructReturn(value, ct, *node);
-}
-
-void HIRSemanticAnalyzer::checkStructReturn(HIRExpr *value,
-    const std::shared_ptr<CustomType> &declaredStruct,
-    HIRNode &errNode)
-{
-    if (mirBorrowCheck_) return; // MIRBorrowCheck checks the returned place on MIR
-    if (!declaredStruct || !structHasRefFields(declaredStruct)) return;
-
-    auto logLocal = [&](const std::string &fname)
-    {
-        log(errNode, "cannot return struct: reference field '" + fname + "' does not live long enough", E_BorrowDoesNotLiveLongEnough);
-    };
-
-    // `ret S { r: &x }` — check each reference-typed member directly.
-    if (auto *init = dynamic_cast<HIRStructInit *>(value))
-    {
-        auto valueStruct = std::dynamic_pointer_cast<CustomType>(init->type);
-        const auto &fields = valueStruct ? valueStruct->getFields() : declaredStruct->getFields();
-        for (auto &[fname, mexpr] : init->members)
-        {
-            auto fit = std::find(fields.begin(), fields.end(), fname);
-            if (fit == fields.end()) continue;
-            if (!isReferenceType(fit->type)) continue;
-            if (originOfReferenceValue(mexpr.get()) == RefOrigin::Local)
-                logLocal(fname);
-        }
-        return;
-    }
-
-    // `ret h` — a local struct binding's tracked field origins.
-    if (auto *nr = dynamic_cast<HIRNameRef *>(value))
-    {
-        auto *sym = SymbolTable::getInstance().lookupSymbol(nr->name);
-        if (!sym) return;
-        if (sym->kind == SymbolKind::LocalVar)
-            for (const auto &[f, o] : sym->refFieldOrigins)
-                if (o == RefOrigin::Local)
-                    logLocal(f);
-        // Params / globals: their reference fields point to caller / static storage.
-        return;
-    }
-
-    // Member access / call / other: nested struct fields not tracked → allow.
-}
-
 // ---------------------------------------------------------------------------
 // Move semantics of consuming `source` (whole variable or field path).
 // ---------------------------------------------------------------------------
@@ -3492,8 +3146,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         node->varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
     }
 
-    // Stage 3: derive this binding's reference / ref-field origins (locals only).
-    setupBindingOrigins(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -3742,8 +3394,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         }
     }
 
-    // Stage 3: re-assignment may change what a reference / ref field points to.
-    updateAssignOrigins(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -4151,13 +3801,8 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
     {
         log(*node, "return type '" + retTy->toString() + "' does not match declared '" + functionInfo.declaredReturnType->toString() + "'.");
     }
-    else if (functionInfo.declaredReturnType)
-    {
-        // Stage 3: reject returning a reference that points into this function's
-        // frame (and structs whose reference fields do). Skipped on type mismatch
-        // — the program is already invalid; the type error is the real one.
-        checkDanglingReturn(node);
-    }
+    // (Returning a reference into this frame — the old Stage 3 'dangling return'
+    // analysis — is now MIRBorrowCheck's E4007, computed from the returned PLACE.)
 
     // Nothing after a return in this sequence runs; the enclosing sequence OR-s
     // this into its own state.
