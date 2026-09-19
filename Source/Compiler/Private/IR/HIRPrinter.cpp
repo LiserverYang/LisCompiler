@@ -80,7 +80,6 @@ std::string literalKindToString(HIRLiteral::Kind kind)
     }
 }
 
-
 std::string typeToString(const std::shared_ptr<Type> &type)
 {
     if (!type) return "<unknown type>";
@@ -212,9 +211,9 @@ public:
     void visit(HIRUnaryOp *node)
     {
         printCommon(node);
-        const char *op = node->opKind == HIRUnaryOp::OpKind::Neg      ? "-"
-                         : node->opKind == HIRUnaryOp::OpKind::Not    ? "!"
-                                                                     : "~";
+        const char *op = node->opKind == HIRUnaryOp::OpKind::Neg   ? "-"
+                         : node->opKind == HIRUnaryOp::OpKind::Not ? "!"
+                                                                   : "~";
         os << " unary_op '" << op << "'";
     }
 

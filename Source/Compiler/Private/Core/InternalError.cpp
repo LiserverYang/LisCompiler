@@ -78,6 +78,5 @@ void InstallCrashHandlers(int argc, const char *const *argv)
     std::set_terminate([]()
         {
             ReportInternalCompilerError("std::terminate() — an exception escaped the compiler, or one was thrown while unwinding another");
-            std::_Exit(kInternalErrorExitCode);
-        });
+            std::_Exit(kInternalErrorExitCode); });
 }

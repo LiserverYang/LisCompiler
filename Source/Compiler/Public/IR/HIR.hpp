@@ -297,11 +297,11 @@ public:
     std::unique_ptr<HIRExpr> index;
 
     // ── operator-trait indexing (`v[i]`) ──────────────────────────────────────
-    Symbol *indexMethod = nullptr;                        // `Index::at`
-    std::string indexMethodName;                          // "vec$Vec::at" (mono-ready)
-    std::shared_ptr<FunctionType> indexMethodType;        // instantiated signature
-    std::string setMethodName;                            // `IndexMut::set`, filled when
-    std::shared_ptr<FunctionType> setMethodType;          // the node is an ASSIGN TARGET
+    Symbol *indexMethod = nullptr;                 // `Index::at`
+    std::string indexMethodName;                   // "vec$Vec::at" (mono-ready)
+    std::shared_ptr<FunctionType> indexMethodType; // instantiated signature
+    std::string setMethodName;                     // `IndexMut::set`, filled when
+    std::shared_ptr<FunctionType> setMethodType;   // the node is an ASSIGN TARGET
     /// The receiver's struct generic args ([i32] for Vec$i32). They MUST travel
     /// with the call: MIRMonomorphization renames a call whose genericParams is
     /// non-empty to `x_Mono_<args>`, which is the only name codegen emits.

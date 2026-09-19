@@ -6,7 +6,6 @@
 #include "Core/InternalError.hpp"
 #include "RuntimeTestFixture.hpp"
 
-
 // P1 regression: an integer literal too large for int64 used as a VALUE used to
 // crash HIRBuilder's unguarded std::stoll (std::terminate). It must now be
 // rejected with a clean diagnostic instead.
@@ -755,12 +754,11 @@ TEST_F(RuntimeTest, FailedMemberAccessReportsNoCascade)
         diag));
     size_t count = 0;
     for (size_t pos = diag.find("error["); pos != std::string::npos;
-         pos = diag.find("error[", pos + 1))
+        pos = diag.find("error[", pos + 1))
         ++count;
     EXPECT_EQ(count, 2u) << "expected exactly one diagnostic per failed member access, got:\n"
                          << diag;
 }
-
 
 // ── E0509: a field cannot leave a type that implements Drop ────────────────────
 //
@@ -895,7 +893,8 @@ TEST_F(RuntimeTest, SelectiveImportMissingMemberStillRejected)
 {
     std::string diag;
     bool ok = compileMulti("impt m { NOPE };\nfn main() -> i32 { ret 0; }",
-        {{"m", "let K = 7;"}}, &diag);
+        {{"m", "let K = 7;"}},
+        &diag);
     EXPECT_FALSE(ok) << "importing a name the module does not export must fail";
 }
 
@@ -906,19 +905,25 @@ TEST_F(RuntimeTest, ReadLineLoopTerminatesAtEof)
     expectOutputWithInput("fn main() -> i32 { while true { let line = read_line();"
                           " let s = String::from_lit(line); if s.len() == 0 { break; }"
                           " print_str(s.to_cstr()); println(); } ret 0; }",
-        "a\nb\n", "a\nb\n", 0);
+        "a\nb\n",
+        "a\nb\n",
+        0);
 }
 
 TEST_F(RuntimeTest, ReadIntAtEofIsZero)
 {
     expectOutputWithInput("fn main() -> i32 { print_int(read_int()); println(); ret 0; }",
-        "", "0\n", 0);
+        "",
+        "0\n",
+        0);
 }
 
 TEST_F(RuntimeTest, ReadFloatAtEofIsZero)
 {
     expectOutputWithInput("fn main() -> i32 { print_float(read_f64()); println(); ret 0; }",
-        "", "0.000000\n", 0);
+        "",
+        "0.000000\n",
+        0);
 }
 // ── Nesting depth limit (--max-depth, E2018) ───────────────────────────────────
 //
@@ -997,7 +1002,7 @@ TEST_F(RuntimeTest, InternalErrorReportIsActionable)
 TEST_F(RuntimeTest, DeeplyNestedExpressionRejected)
 {
     expectCompileFail("fn f() -> i32 { ret " + std::string(400, '(') + "1"
-                      + std::string(400, ')') + "; }",
+                          + std::string(400, ')') + "; }",
         "nesting is too deep");
 }
 
@@ -1007,7 +1012,8 @@ TEST_F(RuntimeTest, DeeplyChainedExpressionRejected)
     // recursion for every pass downstream, even though the parser builds it in a
     // loop.
     std::string src = "fn f() -> i32 { ret ";
-    for (int i = 0; i < 400; ++i) src += "0 - ";
+    for (int i = 0; i < 400; ++i)
+        src += "0 - ";
     src += "1; }";
     expectCompileFail(src, "nesting is too deep");
 }
@@ -1015,8 +1021,10 @@ TEST_F(RuntimeTest, DeeplyChainedExpressionRejected)
 TEST_F(RuntimeTest, DeeplyNestedStatementRejected)
 {
     std::string src = "fn f() -> i32 { ";
-    for (int i = 0; i < 400; ++i) src += "if true { ";
-    for (int i = 0; i < 400; ++i) src += "}";
+    for (int i = 0; i < 400; ++i)
+        src += "if true { ";
+    for (int i = 0; i < 400; ++i)
+        src += "}";
     src += " ret 0; }";
     expectCompileFail(src, "nesting is too deep");
 }
@@ -1024,9 +1032,11 @@ TEST_F(RuntimeTest, DeeplyNestedStatementRejected)
 TEST_F(RuntimeTest, DeeplyNestedTypeRejected)
 {
     std::string src = "fn f(x: ";
-    for (int i = 0; i < 400; ++i) src += "Option<";
+    for (int i = 0; i < 400; ++i)
+        src += "Option<";
     src += "i32";
-    for (int i = 0; i < 400; ++i) src += ">";
+    for (int i = 0; i < 400; ++i)
+        src += ">";
     src += ") -> i32 { ret 0; }";
     expectCompileFail(src, "nesting is too deep");
 }
@@ -1040,7 +1050,8 @@ TEST_F(RuntimeTest, ModerateNestingStillCompiles)
     expectRun(nested, 7);
 
     std::string chain = "fn main() -> i32 { ret 0";
-    for (int i = 0; i < 100; ++i) chain += " + 1";
+    for (int i = 0; i < 100; ++i)
+        chain += " + 1";
     chain += "; }";
     expectRun(chain, 100);
 }
@@ -1125,7 +1136,8 @@ TEST_F(RuntimeTest, ConditionalMoveKeepsUntrackedAliasAlive)
                  " let p = a.to_cstr(); let c = 0; if c == 1 { let b = a; }"
                  " let z = String::from_lit(\"ZZZZZZZZZZZZZZZZ\");"
                  " print_str(p); println(); ret 0; }",
-        "hello\n", 0);
+        "hello\n",
+        0);
 }
 
 TEST_F(RuntimeTest, EnumPayloadCopyBinding)
@@ -1563,7 +1575,8 @@ TEST_F(RuntimeTest, GenericEnumTwoTypesNonCopyPayloads)
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
-        "hello\n", 0);
+        "hello\n",
+        0);
 }
 
 // A branch that cannot fall through (it returns) contributes no state: the other
@@ -1883,7 +1896,9 @@ TEST_F(RuntimeTest, ReadLineComparesEqualByContentNotAddress)
     // different addresses; only a content comparison can make this true.
     expectOutputWithInput("fn main() -> i32 { let line = read_line();"
                           " if line == \"hi\" { print_str(\"same\"); } else { print_str(\"diff\"); } ret 0; }",
-        "hi\n", "same", 0);
+        "hi\n",
+        "same",
+        0);
 }
 
 TEST_F(RuntimeTest, StrLenBuiltin)

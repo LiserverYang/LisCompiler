@@ -49,7 +49,7 @@ ERRORID E_UseOfMovedValue = 3005;
 // cast): they were declared but never emitted. Every one of those failures is
 // reported as E3001 or E3002 with a specific message, which is the single
 // convention the analyzer follows.
-ERRORID E_UseOfUninitializedValue = 3011;   // read/borrow/move of a `let x;` binding
+ERRORID E_UseOfUninitializedValue = 3011;     // read/borrow/move of a `let x;` binding
 ERRORID E_UninitializedNonCopyBinding = 3012; // `let x: <Move>;` without an initializer
 ERRORID E_UnsafeBuiltinOutsideStdlib = 3013;  // heap primitive called outside the stdlib
 ERRORID E_PointerOpOutsideStdlib = 3014;      // raw-pointer indexing/deref outside the stdlib
@@ -78,6 +78,6 @@ ERRORID E_VariantPatternMismatch = 5005;
 
 // Error propagation (`expr?`) / Result errors (6000 series)
 
-ERRORID E_TryNotResult = 6001;        // operand is not a Result value
-ERRORID E_TryNotInResultFn = 6002;    // enclosing function does not return a Result
+ERRORID E_TryNotResult = 6001;         // operand is not a Result value
+ERRORID E_TryNotInResultFn = 6002;     // enclosing function does not return a Result
 ERRORID E_TryErrorTypeMismatch = 6003; // operand error type != function error type

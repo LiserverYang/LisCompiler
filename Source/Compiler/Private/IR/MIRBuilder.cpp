@@ -867,8 +867,7 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
                 break;
             }
         if (!diverges)
-            logAtItem(fn->position, fn->length,
-                "function '" + fn->name + "' is declared to return 'never' but never diverges; call panic(...) (directly or through another 'never' function) on every path.");
+            logAtItem(fn->position, fn->length, "function '" + fn->name + "' is declared to return 'never' but never diverges; call panic(...) (directly or through another 'never' function) on every path.");
     }
 
     // ── ensure the last block has a terminator ────────────────────────────────
@@ -1155,8 +1154,7 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
     {
         if (!idx->setMethodName.empty())
         {
-            emitIndexMethodCall(idx, idx->setMethodName, idx->setMethodType,
-                std::move(rhs));
+            emitIndexMethodCall(idx, idx->setMethodName, idx->setMethodType, std::move(rhs));
             return;
         }
     }
@@ -1198,7 +1196,8 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
 
 void MIRBuilder::buildCompoundAssign(HIRAssign *assign)
 {
-    auto accOp = [&]() { return convertBinOp(assign->compoundOp); };
+    auto accOp = [&]()
+    { return convertBinOp(assign->compoundOp); };
 
     // A USER container (`v[i] += x`): the element is only reachable through the
     // Index/IndexMut trait methods, so this is a read call, the operator, and a
@@ -1208,8 +1207,7 @@ void MIRBuilder::buildCompoundAssign(HIRAssign *assign)
         if (!idx->setMethodName.empty())
         {
             MIROperand indexOp = exprToOperand(idx->index.get());
-            MIRPlace cur = emitIndexMethodCall(idx, idx->indexMethodName, idx->indexMethodType,
-                std::nullopt, indexOp);
+            MIRPlace cur = emitIndexMethodCall(idx, idx->indexMethodName, idx->indexMethodType, std::nullopt, indexOp);
 
             MIRPlace acc = makeTempPlace(assign->value->type);
             emitAssign(acc, MIRRValueBinaryOp{
@@ -1219,8 +1217,7 @@ void MIRBuilder::buildCompoundAssign(HIRAssign *assign)
                                 .type = assign->value->type,
                             });
 
-            emitIndexMethodCall(idx, idx->setMethodName, idx->setMethodType,
-                placeToOperand(acc), indexOp);
+            emitIndexMethodCall(idx, idx->setMethodName, idx->setMethodType, placeToOperand(acc), indexOp);
             return;
         }
     }
@@ -1993,9 +1990,7 @@ MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
             emitAssign(boolTmp, MIRRValueBinaryOp{
                                     .op = convertBinOp(bin->opKind),
                                     .left = placeToOperand(dest),
-                                    .right = MIROperand{MIRConst{.kind = MIRConst::Kind::Int,
-                                                                    .value = (int64_t)0,
-                                                                    .type = i32Ty}},
+                                    .right = MIROperand{MIRConst{.kind = MIRConst::Kind::Int, .value = (int64_t)0, .type = i32Ty}},
                                     .type = bin->type,
                                 });
             return boolTmp;
@@ -2172,10 +2167,10 @@ MIRPlace MIRBuilder::buildTry(HIRTry *node)
 
         MIRPlace ret0{.base = PlaceBase::Local, .index = 0, .name = "_0", .projections = {}, .type = body_->returnType};
         emitAssign(ret0, MIRRValueStructInit{
-                            .structName = resultTy->getName(),
-                            .fields = std::move(fields),
-                            .type = body_->returnType,
-                        });
+                             .structName = resultTy->getName(),
+                             .fields = std::move(fields),
+                             .type = body_->returnType,
+                         });
         dropOwnedLocalsFrom(0);
         sealBlock(curBB_, MIRTermReturn{.value = std::nullopt});
     }
@@ -2389,8 +2384,7 @@ MIRPlace MIRBuilder::emitIndexMethodCall(HIRIndexAccess *ia,
         MIRPlace objPlace = buildExpr(ia->object.get());
         MIRPlace refTmp = makeTempPlace(selfRefTy ? std::static_pointer_cast<Type>(selfRefTy)
                                                   : ia->object->type);
-        emitAssign(refTmp, MIRRValueRef{.place = std::move(objPlace),
-                          .isMut = selfRefTy ? selfRefTy->isMutableRef() : false});
+        emitAssign(refTmp, MIRRValueRef{.place = std::move(objPlace), .isMut = selfRefTy ? selfRefTy->isMutableRef() : false});
         return placeToOperand(refTmp);
     }();
 

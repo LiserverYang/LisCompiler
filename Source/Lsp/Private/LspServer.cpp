@@ -194,8 +194,8 @@ llvm::json::Object LspServer::compileAndPublish(const std::string &uri)
             continue;
         llvm::json::Object d{
             {"range", makeRange(c.line, c.col, c.length)},
-            {"severity", c.level == Logger::LogLevel::ERROR ? 1
-                         : c.level == Logger::LogLevel::WARNING ? 2 : 3},
+            {"severity", c.level == Logger::LogLevel::ERROR ? 1 : c.level == Logger::LogLevel::WARNING ? 2
+                                                                                                       : 3},
             {"message", c.msg},
             {"source", "lisc"},
         };
@@ -222,9 +222,7 @@ void LspServer::rebuildIndex()
     const auto &attrs = lastContext_->stmtAttributions;
     const auto &items = lastContext_->hirProgram->items;
 
-    auto add = [&](const std::string &name, const std::string &uri,
-                   size_t line, size_t col, size_t length,
-                   const std::string &typeStr, const std::string &kindStr)
+    auto add = [&](const std::string &name, const std::string &uri, size_t line, size_t col, size_t length, const std::string &typeStr, const std::string &kindStr)
     {
         DefEntry e;
         e.name = name;
@@ -248,48 +246,39 @@ void LspServer::rebuildIndex()
             std::string nm = prettyName(displayName(f->name));
             if (f->isMethod)
                 nm = prettyName(displayName(f->associatedStruct)) + "::" + prettyName(f->name);
-            add(nm, uri, f->position.line, f->position.col, prettyName(f->name).size(),
-                f->type ? prettyName(f->type->toString()) : "", f->isMethod ? "method" : "function");
+            add(nm, uri, f->position.line, f->position.col, prettyName(f->name).size(), f->type ? prettyName(f->type->toString()) : "", f->isMethod ? "method" : "function");
             // Params have no source position in HIR — index them for
             // completion/hover only (empty uri).
             for (const auto &[pname, ptype] : f->params)
-                add(prettyName(pname), "", 0, 0, pname.size(),
-                    ptype ? prettyName(ptype->toString()) : "", "param");
+                add(prettyName(pname), "", 0, 0, pname.size(), ptype ? prettyName(ptype->toString()) : "", "param");
             if (f->body)
                 walkBlock(f->body.get(), uri);
         }
         else if (auto *s = dynamic_cast<HIRStruct *>(node))
         {
-            add(prettyName(displayName(s->name)), uri, s->position.line, s->position.col,
-                prettyName(displayName(s->name)).size(), prettyName(s->name), "struct");
+            add(prettyName(displayName(s->name)), uri, s->position.line, s->position.col, prettyName(displayName(s->name)).size(), prettyName(s->name), "struct");
         }
         else if (auto *e = dynamic_cast<HIREnum *>(node))
         {
-            add(prettyName(displayName(e->name)), uri, e->position.line, e->position.col,
-                prettyName(displayName(e->name)).size(), prettyName(e->name), "enum");
+            add(prettyName(displayName(e->name)), uri, e->position.line, e->position.col, prettyName(displayName(e->name)).size(), prettyName(e->name), "enum");
         }
         else if (auto *t = dynamic_cast<HIRTrait *>(node))
         {
-            add(prettyName(displayName(t->name)), uri, t->position.line, t->position.col,
-                prettyName(displayName(t->name)).size(), prettyName(t->name), "trait");
+            add(prettyName(displayName(t->name)), uri, t->position.line, t->position.col, prettyName(displayName(t->name)).size(), prettyName(t->name), "trait");
         }
         else if (auto *v = dynamic_cast<HIRVarDecl *>(node))
         {
             if (v->isGlobal)
-                add(prettyName(displayName(v->name)), uri, v->position.line, v->position.col,
-                    v->name.size(), v->type ? prettyName(v->type->toString()) : "", "variable");
+                add(prettyName(displayName(v->name)), uri, v->position.line, v->position.col, v->name.size(), v->type ? prettyName(v->type->toString()) : "", "variable");
         }
         else if (auto *impl = dynamic_cast<HIRImpl *>(node))
         {
             std::string structName = prettyName(displayName(impl->structName));
             for (const auto &m : impl->methods)
             {
-                add(structName + "::" + prettyName(m->name), uri, m->position.line,
-                    m->position.col, m->name.size(),
-                    m->type ? prettyName(m->type->toString()) : "", "method");
+                add(structName + "::" + prettyName(m->name), uri, m->position.line, m->position.col, m->name.size(), m->type ? prettyName(m->type->toString()) : "", "method");
                 for (const auto &[pname, ptype] : m->params)
-                    add(prettyName(pname), "", 0, 0, pname.size(),
-                        ptype ? prettyName(ptype->toString()) : "", "param");
+                    add(prettyName(pname), "", 0, 0, pname.size(), ptype ? prettyName(ptype->toString()) : "", "param");
                 if (m->body)
                     walkBlock(m->body.get(), uri);
             }
@@ -312,10 +301,7 @@ void LspServer::walkStmt(HIRStmt *stmt, const std::string &uri)
     if (auto *v = dynamic_cast<HIRVarDecl *>(stmt))
     {
         if (!v->isGlobal)
-            index_.push_back(DefEntry{prettyName(v->name), uri, v->position.line,
-                                      v->position.col, v->name.size(),
-                                      v->type ? prettyName(v->type->toString()) : "",
-                                      "variable"});
+            index_.push_back(DefEntry{prettyName(v->name), uri, v->position.line, v->position.col, v->name.size(), v->type ? prettyName(v->type->toString()) : "", "variable"});
         if (v->init && *v->init)
             walkExpr(v->init->get(), uri);
     }
@@ -363,11 +349,7 @@ void LspServer::walkExpr(HIRExpr *expr, const std::string &uri)
         // A variable USE: sema has written back the resolved name and set the
         // type — index both for hover (type display).
         if (n->symbol)
-            index_.push_back(DefEntry{prettyName(displayName(n->name)), uri,
-                                      n->position.line, n->position.col,
-                                      prettyName(displayName(n->name)).size(),
-                                      n->type ? prettyName(n->type->toString()) : "",
-                                      "use"});
+            index_.push_back(DefEntry{prettyName(displayName(n->name)), uri, n->position.line, n->position.col, prettyName(displayName(n->name)).size(), n->type ? prettyName(n->type->toString()) : "", "use"});
         return;
     }
     if (auto *c = dynamic_cast<HIRCall *>(expr))
@@ -375,19 +357,19 @@ void LspServer::walkExpr(HIRExpr *expr, const std::string &uri)
         if (c->callKind == HIRCall::CallKind::Method)
         {
             // Member call: index the SHORT name so `x.push_char` hovers match.
-            index_.push_back(DefEntry{prettyName(c->methodName), uri,
-                                      c->position.line, c->position.col,
-                                      c->methodName.size(),
-                                      c->type ? prettyName(c->type->toString()) : "",
-                                      "method"});
+            index_.push_back(DefEntry{prettyName(c->methodName), uri, c->position.line, c->position.col, c->methodName.size(), c->type ? prettyName(c->type->toString()) : "", "method"});
             if (c->object)
                 walkExpr(c->object.get(), uri);
         }
         else if (c->callKind == HIRCall::CallKind::Static)
         {
             index_.push_back(DefEntry{prettyName(displayName(c->staticTypeName)) + "::" + prettyName(c->methodName),
-                                      uri, c->position.line, c->position.col,
-                                      c->methodName.size(), "", "method"});
+                uri,
+                c->position.line,
+                c->position.col,
+                c->methodName.size(),
+                "",
+                "method"});
         }
         else if (c->callee)
         {
@@ -469,7 +451,11 @@ std::string LspServer::wordAt(const std::string &text, size_t line, size_t chara
     size_t cur = 0;
     for (size_t i = 0; i < text.size(); ++i)
     {
-        if (cur == line) { lineStart = i; break; }
+        if (cur == line)
+        {
+            lineStart = i;
+            break;
+        }
         if (text[i] == '\n') ++cur;
     }
     if (cur != line && line != 0)
@@ -486,8 +472,10 @@ std::string LspServer::wordAt(const std::string &text, size_t line, size_t chara
     {
         return std::isalnum((unsigned char)c) || c == '_';
     };
-    while (l > lineStart && isWord(text[l - 1])) --l;
-    while (r < lineEnd && isWord(text[r])) ++r;
+    while (l > lineStart && isWord(text[l - 1]))
+        --l;
+    while (r < lineEnd && isWord(text[r]))
+        ++r;
     if (l == r) return "";
     return text.substr(l, r - l);
 }
@@ -578,13 +566,38 @@ llvm::json::Value LspServer::hover(const std::string &uri, size_t line, size_t c
 llvm::json::Value LspServer::completion()
 {
     static const std::vector<std::pair<std::string, int>> keywords = {
-        {"impt", 14}, {"struct", 22}, {"enum", 13}, {"trait", 11}, {"impl", 11},
-        {"fn", 3}, {"let", 13}, {"mut", 14}, {"pub", 14}, {"ret", 14},
-        {"if", 14}, {"else", 14}, {"while", 14}, {"for", 14}, {"in", 14},
-        {"match", 14}, {"break", 14}, {"continue", 14}, {"as", 14},
-        {"self", 6}, {"move", 14}, {"true", 16}, {"false", 16},
-        {"i8", 7}, {"i16", 7}, {"i32", 7}, {"i64", 7}, {"f32", 7}, {"f64", 7},
-        {"bool", 17}, {"char", 7}, {"void", 7},
+        {"impt", 14},
+        {"struct", 22},
+        {"enum", 13},
+        {"trait", 11},
+        {"impl", 11},
+        {"fn", 3},
+        {"let", 13},
+        {"mut", 14},
+        {"pub", 14},
+        {"ret", 14},
+        {"if", 14},
+        {"else", 14},
+        {"while", 14},
+        {"for", 14},
+        {"in", 14},
+        {"match", 14},
+        {"break", 14},
+        {"continue", 14},
+        {"as", 14},
+        {"self", 6},
+        {"move", 14},
+        {"true", 16},
+        {"false", 16},
+        {"i8", 7},
+        {"i16", 7},
+        {"i32", 7},
+        {"i64", 7},
+        {"f32", 7},
+        {"f64", 7},
+        {"bool", 17},
+        {"char", 7},
+        {"void", 7},
     };
 
     llvm::json::Array items;
@@ -606,9 +619,12 @@ llvm::json::Value LspServer::completion()
         if (e.kindStr == "use")
             continue;
         int kind = e.kindStr == "function" ? 3 : e.kindStr == "struct" ? 22
-                   : e.kindStr == "enum" ? 13 : e.kindStr == "trait" ? 11
-                   : e.kindStr == "variable" ? 6 : e.kindStr == "param" ? 6
-                   : e.kindStr == "method" ? 2 : 6;
+                                             : e.kindStr == "enum"     ? 13
+                                             : e.kindStr == "trait"    ? 11
+                                             : e.kindStr == "variable" ? 6
+                                             : e.kindStr == "param"    ? 6
+                                             : e.kindStr == "method"   ? 2
+                                                                       : 6;
         emit(e.name, kind);
     }
 

@@ -5,8 +5,8 @@
 
 #include "Analysiser/Type.hpp"
 
-#include <algorithm>
 #include "Core/ModuleUtils.hpp"
+#include <algorithm>
 
 #include <cassert>
 #include <unordered_map>
@@ -255,8 +255,7 @@ void CustomType::upsertMethods(std::vector<Method> methods)
     // authoritative one from the full pass).
     for (auto &m : methods)
     {
-        auto existing = std::find_if(this->methods.begin(), this->methods.end(),
-            [&](const Method &candidate)
+        auto existing = std::find_if(this->methods.begin(), this->methods.end(), [&](const Method &candidate)
             { return candidate.name == m.name; });
         if (existing != this->methods.end())
             *existing = std::move(m);

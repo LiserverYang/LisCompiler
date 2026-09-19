@@ -115,7 +115,6 @@ private:
     /// Set currentModule_ from Context::stmtAttributions for the item at `index`.
     void setModuleForItem(size_t index);
 
-
     // ── Stage 3 (dangling returns) moved to MIRBorrowCheck ──────────────────────
     //
     // Rejecting a `ret` of a reference that points into this function's frame is
@@ -268,7 +267,8 @@ private:
      *  substituteType() rebuilds the FunctionType and drops its genericParams. */
     bool checkMethodGenericBounds(const std::shared_ptr<FunctionType> &fnType,
         const std::unordered_map<std::string, std::shared_ptr<Type>> &subst,
-        HIRNode &errNode, const std::string &owner);
+        HIRNode &errNode,
+        const std::string &owner);
 
     /** Bind one binary-operator operand to the trait method's parameter type.
      *

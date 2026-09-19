@@ -46,7 +46,10 @@ class MIRBorrowCheck : public Pass
 {
 public:
     MIRBorrowCheck() = default;
-    explicit MIRBorrowCheck(std::shared_ptr<Context> cnt) { context = cnt; }
+    explicit MIRBorrowCheck(std::shared_ptr<Context> cnt)
+    {
+        context = cnt;
+    }
 
     void run() override;
 

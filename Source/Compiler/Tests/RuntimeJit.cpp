@@ -89,7 +89,7 @@ void CaptureStdout(int &Saved, std::string &Path)
     // process that dies in between must not litter the directory the suite was
     // started from (the repository root). Pid-keyed so shards cannot collide.
     Path = (std::filesystem::temp_directory_path()
-               / ("lis_jit_out_" + std::to_string(LIS_GETPID()) + ".txt"))
+            / ("lis_jit_out_" + std::to_string(LIS_GETPID()) + ".txt"))
                .string();
     std::fflush(stdout);
     Saved = LIS_DUP(1);
@@ -134,8 +134,7 @@ int RunModuleInJit(std::unique_ptr<llvm::Module> Mod,
     std::call_once(InitOnce, []()
         {
             llvm::InitializeNativeTarget();
-            llvm::InitializeNativeTargetAsmPrinter();
-        });
+            llvm::InitializeNativeTargetAsmPrinter(); });
 
     if (!Mod || !Ctx)
         return -1000;
@@ -211,8 +210,8 @@ int RunModuleInJit(std::unique_ptr<llvm::Module> Mod,
     if (In)
     {
         InPath = (std::filesystem::temp_directory_path()
-                 / ("lis_jit_in_" + std::to_string(LIS_GETPID()) + ".txt"))
-                 .string();
+                  / ("lis_jit_in_" + std::to_string(LIS_GETPID()) + ".txt"))
+                     .string();
         FILE *Written = std::fopen(InPath.c_str(), "wb");
         if (Written)
         {
@@ -225,8 +224,7 @@ int RunModuleInJit(std::unique_ptr<llvm::Module> Mod,
         RedirectedIn = (Reopened != nullptr);
         if (Trace())
         {
-            std::fprintf(stderr, "[jit] stdin file %s written=%d reopened=%d\n",
-                InPath.c_str(), Written != nullptr, RedirectedIn);
+            std::fprintf(stderr, "[jit] stdin file %s written=%d reopened=%d\n", InPath.c_str(), Written != nullptr, RedirectedIn);
             std::fflush(stderr);
         }
     }

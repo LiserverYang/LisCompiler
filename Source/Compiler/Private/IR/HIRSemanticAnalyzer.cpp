@@ -713,9 +713,7 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::bestEffortGlobalType(HIRVarDecl *decl
 // receiver's type genuinely had no methods yet (visit(HIRCall)'s Method branch
 // looks the name up in `customTy->getMethods()`). Best-effort signatures are
 // enough for that lookup; pass 2 refreshes them through the same upsert.
-void HIRSemanticAnalyzer::preRegisterMethodType(HIRImpl *impl, HIRFunction *m,
-    const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns,
-    std::vector<CustomType::Method> &out)
+void HIRSemanticAnalyzer::preRegisterMethodType(HIRImpl *impl, HIRFunction *m, const std::unordered_map<std::string, std::shared_ptr<Type>> &inferredReturns, std::vector<CustomType::Method> &out)
 {
     m->isTraitMethod = impl->traitName.has_value();
     if (impl->traitName.has_value())
@@ -1563,8 +1561,8 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
             log(*node,
                 "recursive type '" + node->name
                     + "' has infinite size: a field names the type itself by value "
-                    "(directly, or inside a generic argument). Store the recursive "
-                    "part behind a pointer or reference instead.",
+                      "(directly, or inside a generic argument). Store the recursive "
+                      "part behind a pointer or reference instead.",
                 E_RecursiveType);
             member.type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
             CustomType::Field bad;
@@ -1652,7 +1650,7 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildEnumType(HIREnum *node)
                 log(*node,
                     "recursive type '" + node->name
                         + "' has infinite size: a variant payload names the type itself "
-                        "by value. Store it behind a pointer or reference instead.",
+                          "by value. Store it behind a pointer or reference instead.",
                     E_RecursiveType);
                 variant.payloadTypes.push_back(
                     context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32));
@@ -2115,7 +2113,6 @@ void HIRSemanticAnalyzer::checkFieldAccess(const CustomType::Field &field, const
 
 void HIRSemanticAnalyzer::visit(HIRFunction *node)
 {
-
     // Duplicate check for top-level functions (methods are checked by HIRImpl)
     if (!node->isMethod)
     {
@@ -2387,7 +2384,6 @@ void HIRSemanticAnalyzer::checkCallArgs(
             log(*args[i], "cannot infer the generic argument(s) of '" + displayName(std::static_pointer_cast<CustomType>(args[i]->type)->getOriginName()) + "'; write them explicitly (e.g. 'Option<i32>::None').");
         else if (!typesCompatible(paramTy, args[i]->type))
             log(*args[i], "argument type mismatch.");
-
     }
 }
 
@@ -2443,7 +2439,7 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
             {
                 auto ct = std::dynamic_pointer_cast<CustomType>(initType);
                 std::string origin = ct ? ct->getOriginName() : std::string();
-                const char *payloadVariant = origin == "option$Option"  ? "Some"
+                const char *payloadVariant = origin == "option$Option"   ? "Some"
                                              : origin == "result$Result" ? "Ok"
                                                                          : nullptr;
                 if (!payloadVariant)
@@ -2483,7 +2479,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         {
             log(*node, "global variable initializer must be a literal (not '" + (initType ? initType->toString() : std::string("?")) + "').");
         }
-
     }
 
     if (node->hasExplicitType)
@@ -2566,7 +2561,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
 
         node->varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -2747,7 +2741,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
             }
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -2903,7 +2896,7 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
         if (reachable)
         {
             const bool armTerminates = sequenceTerminated_
-                                      || (arm.tailValue && isNeverType(arm.tailValue->type));
+                                       || (arm.tailValue && isNeverType(arm.tailValue->type));
             if (!armTerminates)
                 haveMergedArm = true; // this arm can reach whatever follows
         }
@@ -2978,7 +2971,6 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
         }
     }
     sequenceTerminated_ = !reachable || neverFallsThrough;
-
 }
 
 // ---------------------------------------------------------------------------
@@ -3194,7 +3186,6 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
         log(*node, "cannot use '" + node->name + "': it has the uninhabited type 'never'.", E_UndefinedIdentifier);
         return;
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -3776,7 +3767,9 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
 
         // Type-check args against params[1..] (params[0] is the receiver).
         checkCallArgs(node->args, paramTypes,
-            /*paramOffset=*/1, *node, /*explainUninferredGeneric=*/false);
+            /*paramOffset=*/1,
+            *node,
+            /*explainUninferredGeneric=*/false);
 
         // Insert self as arg[0] (a &mut/& reference to the receiver).
         if (paramTypes.empty() || !std::dynamic_pointer_cast<ReferenceType>(paramTypes[0]))
@@ -4019,9 +4012,7 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
         const auto &argTy = node->args[i]->type;
         // A pointer parameter accepts ANY pointee (see ptrArgsAreAnyPtr); every
         // other parameter keeps the strict check.
-        const bool ok = argTy && (ptrArgsAreAnyPtr && argTys[i]->getKind() == Type::Kind::Pointer
-                                      ? isAnyPtr(argTy)
-                                      : typesCompatible(argTys[i], argTy));
+        const bool ok = argTy && (ptrArgsAreAnyPtr && argTys[i]->getKind() == Type::Kind::Pointer ? isAnyPtr(argTy) : typesCompatible(argTys[i], argTy));
         if (argTy && !ok)
             log(*node->args[i], "builtin '" + name + "' expects argument of type '" + argTys[i]->toString() + "', got '" + argTy->toString() + "'.");
     }
@@ -4219,18 +4210,15 @@ bool HIRSemanticAnalyzer::handleAssertBuiltin(HIRCall *node, const std::string &
     auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
     if (node->args.empty() || node->args.size() > 2)
-        log(*node, "builtin 'assert' expects 1 or 2 arguments (a condition, and an optional message), got "
-                       + std::to_string(node->args.size()) + ".");
+        log(*node, "builtin 'assert' expects 1 or 2 arguments (a condition, and an optional message), got " + std::to_string(node->args.size()) + ".");
 
     for (size_t i = 0; i < node->args.size(); ++i)
     {
         analyzeExpr(node->args[i].get());
         if (i == 0 && node->args[i]->type && !typesCompatible(boolTy, node->args[i]->type))
-            log(*node->args[i], "builtin 'assert' expects a 'bool' condition, got '"
-                                    + node->args[i]->type->toString() + "'.");
+            log(*node->args[i], "builtin 'assert' expects a 'bool' condition, got '" + node->args[i]->type->toString() + "'.");
         if (i == 1 && node->args[i]->type && !typesCompatible(i8PtrTy, node->args[i]->type))
-            log(*node->args[i], "builtin 'assert' expects the message to be a '&i8' (a string literal), got '"
-                                    + node->args[i]->type->toString() + "'.");
+            log(*node->args[i], "builtin 'assert' expects the message to be a '&i8' (a string literal), got '" + node->args[i]->type->toString() + "'.");
     }
 
     node->type = voidTy;
@@ -4254,15 +4242,13 @@ bool HIRSemanticAnalyzer::handleStrBuiltin(HIRCall *node, const std::string &nam
 
     const size_t expected = (name == "str_len") ? 1 : 2;
     if (node->args.size() != expected)
-        log(*node, "builtin '" + name + "' expects " + std::to_string(expected)
-                       + " argument(s), got " + std::to_string(node->args.size()) + ".");
+        log(*node, "builtin '" + name + "' expects " + std::to_string(expected) + " argument(s), got " + std::to_string(node->args.size()) + ".");
 
     for (auto &arg : node->args)
     {
         analyzeExpr(arg.get());
         if (arg->type && !typesCompatible(i8PtrTy, arg->type))
-            log(*arg, "builtin '" + name + "' expects a '&i8' argument (a C string), got '"
-                          + arg->type->toString() + "'.");
+            log(*arg, "builtin '" + name + "' expects a '&i8' argument (a C string), got '" + arg->type->toString() + "'.");
     }
 
     node->type = i32Ty;
@@ -4425,7 +4411,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         // 参数类型检查（使用实例化后的具体类型）。Free functions get the
         // context-free-generic explanation (see checkCallArgs).
         checkCallArgs(node->args, instantiatedFuncType->getParams(),
-            /*paramOffset=*/0, *node, /*explainUninferredGeneric=*/true);
+            /*paramOffset=*/0,
+            *node,
+            /*explainUninferredGeneric=*/true);
         // 设置返回值类型为实例化后的类型
         node->type = instantiatedFuncType->getReturnType();
         break;
@@ -4629,7 +4617,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
 
         // params[0] is the receiver, which is not an argument.
         checkCallArgs(node->args, instantiatedFuncType->getParams(),
-            /*paramOffset=*/1, *node, /*explainUninferredGeneric=*/false);
+            /*paramOffset=*/1,
+            *node,
+            /*explainUninferredGeneric=*/false);
 
         // Insert the receiver as arg[0]. A `&self` / `&mut self` method borrows
         // the receiver (HIRRef); a BY-VALUE `self` method (`fn drop(self)`)
@@ -4849,7 +4839,9 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             log(*node, "static method '" + node->methodName + "' expects " + std::to_string(it->params.size()) + " arguments, got " + std::to_string(node->args.size()) + ".");
 
         checkCallArgs(node->args, instantiatedFuncType->getParams(),
-            /*paramOffset=*/0, *node, /*explainUninferredGeneric=*/false);
+            /*paramOffset=*/0,
+            *node,
+            /*explainUninferredGeneric=*/false);
 
         node->type = instantiatedFuncType->getReturnType();
 
@@ -4901,7 +4893,6 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
     }
     else
         log(*node, "struct '" + ct->getName() + "' has no field '" + node->memberName + "'.");
-
 }
 
 // ---------------------------------------------------------------------------
@@ -4916,7 +4907,8 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
 bool HIRSemanticAnalyzer::checkMethodGenericBounds(
     const std::shared_ptr<FunctionType> &fnType,
     const std::unordered_map<std::string, std::shared_ptr<Type>> &subst,
-    HIRNode &errNode, const std::string &owner)
+    HIRNode &errNode,
+    const std::string &owner)
 {
     if (!fnType) return true;
 
@@ -4942,8 +4934,7 @@ bool HIRSemanticAnalyzer::checkMethodGenericBounds(
                 }
             if (satisfied) continue;
 
-            log(errNode, "type '" + arg->toString() + "' does not implement trait '"
-                             + displayName(constraint->getName()) + "' required by '" + owner + "'.");
+            log(errNode, "type '" + arg->toString() + "' does not implement trait '" + displayName(constraint->getName()) + "' required by '" + owner + "'.");
             return false;
         }
     }
@@ -4964,8 +4955,7 @@ bool HIRSemanticAnalyzer::resolveIndexMethod(HIRIndexAccess *node,
     Symbol *symbol = SymbolTable::getInstance().lookupSymbol(symName);
     if (!symbol)
     {
-        log(*node, "type '" + baseName + "' implements '" + traitName + "' but no method '"
-                       + methodName + "' is registered on it.");
+        log(*node, "type '" + baseName + "' implements '" + traitName + "' but no method '" + methodName + "' is registered on it.");
         return true; // reported; do not also emit the "not indexable" error
     }
 
@@ -4989,8 +4979,7 @@ bool HIRSemanticAnalyzer::resolveIndexMethod(HIRIndexAccess *node,
         // it (a double drop at teardown).
         if (!checkMethodGenericBounds(newTy, structSubst, *node, symName))
         {
-            log(*node, "indexing '" + ct->toString()
-                           + "' is only allowed for Copy elements: the index operator returns the element by value. Use at_ref/at_mut (they lend a reference) or a move-out method (pop/remove) instead.");
+            log(*node, "indexing '" + ct->toString() + "' is only allowed for Copy elements: the index operator returns the element by value. Use at_ref/at_mut (they lend a reference) or a move-out method (pop/remove) instead.");
             return true; // reported; do not also emit the "not indexable" error
         }
 
@@ -5000,9 +4989,7 @@ bool HIRSemanticAnalyzer::resolveIndexMethod(HIRIndexAccess *node,
     const size_t expected = forWrite ? 3 : 2;
     if (newTy->getParams().size() != expected)
     {
-        log(*node, std::string("index method '") + methodName + "' must take "
-                       + (forWrite ? "3 parameters (self, i, v)" : "2 parameters (self, i)")
-                       + ", got " + std::to_string(newTy->getParams().size()) + ".");
+        log(*node, std::string("index method '") + methodName + "' must take " + (forWrite ? "3 parameters (self, i, v)" : "2 parameters (self, i)") + ", got " + std::to_string(newTy->getParams().size()) + ".");
         return true;
     }
 
@@ -5109,8 +5096,7 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
             // Keeps the "is not indexable" phrasing the reference-to-struct
             // rejection has always used (and the test asserts): an instantiation
             // reaches this same branch, and the actionable part is the trait.
-            log(*node, "type '" + objTy->toString()
-                           + "' is not indexable; implement the 'Index<T>' trait to make it indexable.");
+            log(*node, "type '" + objTy->toString() + "' is not indexable; implement the 'Index<T>' trait to make it indexable.");
         }
         return;
     }
@@ -5166,7 +5152,6 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
         log(*node->index, "array index must be of type 'i32', got '" + node->index->type->toString() + "'.");
 
     node->type = elemTy;
-
 }
 
 // ---------------------------------------------------------------------------
@@ -5191,11 +5176,9 @@ void HIRSemanticAnalyzer::visit(HIRDeref *node)
     // stdlib-only `__deref` / `__deref_mut` bridge exists to keep auditable
     // (E3013/E3014). Everything else has no pointee at all.
     if (std::dynamic_pointer_cast<PointerType>(node->operand->type))
-        log(*node, "cannot dereference the raw pointer '" + node->operand->type->toString()
-                       + "': use the standard library's '__deref'/'__deref_mut' (user code cannot turn an address into a value).");
+        log(*node, "cannot dereference the raw pointer '" + node->operand->type->toString() + "': use the standard library's '__deref'/'__deref_mut' (user code cannot turn an address into a value).");
     else
-        log(*node, "cannot dereference a value of type '" + node->operand->type->toString()
-                       + "': '*p' requires a reference ('&T' or '&mut T').");
+        log(*node, "cannot dereference a value of type '" + node->operand->type->toString() + "': '*p' requires a reference ('&T' or '&mut T').");
 }
 // ---------------------------------------------------------------------------
 // Prefix VALUE operators: -x, !x, ~x (2026-09-19).
@@ -5213,9 +5196,9 @@ void HIRSemanticAnalyzer::visit(HIRUnaryOp *node)
     if (!node->operand->type) return; // the real error was already reported
 
     const auto &operandTy = node->operand->type;
-    const char *op = node->opKind == HIRUnaryOp::OpKind::Neg      ? "-"
-                     : node->opKind == HIRUnaryOp::OpKind::Not    ? "!"
-                                                                  : "~";
+    const char *op = node->opKind == HIRUnaryOp::OpKind::Neg   ? "-"
+                     : node->opKind == HIRUnaryOp::OpKind::Not ? "!"
+                                                               : "~";
 
     bool ok = false;
     switch (node->opKind)
@@ -5267,9 +5250,7 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
     if (!elemTy)
     {
         // `[]` — no element type to infer from, and `[T; 0]` is rejected too.
-        log(*node, node->isRepeat
-                       ? "array repeat element has no value to copy (its type is 'never')."
-                       : "empty array literal has no element type; write an explicit `[T; N]` with N > 0.");
+        log(*node, node->isRepeat ? "array repeat element has no value to copy (its type is 'never')." : "empty array literal has no element type; write an explicit `[T; N]` with N > 0.");
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
@@ -5584,9 +5565,7 @@ void HIRSemanticAnalyzer::visit(HIRTry *node)
     auto declaredCt = std::dynamic_pointer_cast<CustomType>(functionInfo.declaredReturnType);
     if (!declaredCt || declaredCt->getOriginName() != "result$Result")
     {
-        log(*node, "the '?' operator requires the enclosing function to return 'Result<_, E>' (it returns '"
-                + (functionInfo.declaredReturnType ? functionInfo.declaredReturnType->toString() : std::string("void")) + "').",
-            E_TryNotInResultFn);
+        log(*node, "the '?' operator requires the enclosing function to return 'Result<_, E>' (it returns '" + (functionInfo.declaredReturnType ? functionInfo.declaredReturnType->toString() : std::string("void")) + "').", E_TryNotInResultFn);
         node->type = okPayloadTy;
         return;
     }
@@ -5598,10 +5577,7 @@ void HIRSemanticAnalyzer::visit(HIRTry *node)
 
     if (!declaredErrTy || !typesCompatible(declaredErrTy, errPayloadTy))
     {
-        log(*node, "the error type of '?' ('" + errPayloadTy->toString()
-                + "') does not match the function error type ('"
-                + (declaredErrTy ? declaredErrTy->toString() : std::string("?")) + "').",
-            E_TryErrorTypeMismatch);
+        log(*node, "the error type of '?' ('" + errPayloadTy->toString() + "') does not match the function error type ('" + (declaredErrTy ? declaredErrTy->toString() : std::string("?")) + "').", E_TryErrorTypeMismatch);
         node->type = okPayloadTy;
         return;
     }

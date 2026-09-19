@@ -46,9 +46,9 @@ private:
     /// One indexable symbol (rebuilt after every compile).
     struct DefEntry
     {
-        std::string name;   // pretty (module prefix stripped) name
-        std::string uri;    // symbol's file
-        size_t line, col;   // 1-based, from HIR position
+        std::string name; // pretty (module prefix stripped) name
+        std::string uri;  // symbol's file
+        size_t line, col; // 1-based, from HIR position
         size_t length;
         std::string typeStr; // pretty type, for hover
         std::string kindStr; // "function"/"struct"/"enum"/"trait"/"variable"/"method"/"use"

@@ -443,8 +443,7 @@ void LLVMIRBuilder::lowerAssign(FunctionState &fs, const MIRStmtAssign &s)
                     {
                         auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(s.lhs.type));
                         uint64_t bytes = context->module->getDataLayout().getTypeAllocSize(arrTy);
-                        builder_->CreateMemCpy(dstPtr, llvm::MaybeAlign(4), srcPtr,
-                            llvm::MaybeAlign(4), bytes);
+                        builder_->CreateMemCpy(dstPtr, llvm::MaybeAlign(4), srcPtr, llvm::MaybeAlign(4), bytes);
                         return;
                     }
                 }
@@ -1533,8 +1532,7 @@ void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const 
         if (!args.empty() && args[0])
             bytes = context->module->getDataLayout().getTypeAllocSize(args[0]->getType());
         if (s.dest.has_value())
-            storePlace(fs, *s.dest,
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), bytes));
+            storePlace(fs, *s.dest, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), bytes));
     }
 }
 
@@ -1621,8 +1619,7 @@ llvm::Value *LLVMIRBuilder::getStderrFilePtr()
     // symbol → linking against one fails); other libcs export a global.
 #ifdef _WIN32
     llvm::Function *iob = getOrDeclareAcrtIobFunc();
-    return builder_->CreateCall(iob->getFunctionType(), iob,
-        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 2)});
+    return builder_->CreateCall(iob->getFunctionType(), iob, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 2)});
 #else
     llvm::GlobalVariable *g = context->module->getNamedGlobal("stderr");
     if (!g)

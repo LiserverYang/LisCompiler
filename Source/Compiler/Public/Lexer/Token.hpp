@@ -46,12 +46,12 @@ enum class TokenCode
     MATCH,    // "match"
 
     /* Type keywords */
-    I8,   // "i8"
-    I16,  // "i16"
-    I32,  // "i32"
-    I64,  // "i64"
-    F32,  // "f32"
-    F64,  // "f64"
+    I8,    // "i8"
+    I16,   // "i16"
+    I32,   // "i32"
+    I64,   // "i64"
+    F32,   // "f32"
+    F64,   // "f64"
     BOOL,  // "bool"
     CHAR,  // "char"
     VOID,  // "void"
@@ -69,29 +69,29 @@ enum class TokenCode
     IDENTIFIER, // [a-zA-Z_][a-zA-Z0-9_]*
 
     /* Operator */
-    PLUS,   // "+"
-    MINUS,  // "-"
-    STAR,   // "*"
-    SLASH,  // "/"
-    MOD,    // "%"
-    EQ_EQ,  // "=="
-    NOT_EQ, // "!="
-    LT,     // "<"
-    GT,     // ">"
-    LT_EQ,  // "<="
-    GT_EQ,  // ">="
-    ASSIGN,   // "="
-    NOT,      // !
-    TILDE,    // "~"
+    PLUS,         // "+"
+    MINUS,        // "-"
+    STAR,         // "*"
+    SLASH,        // "/"
+    MOD,          // "%"
+    EQ_EQ,        // "=="
+    NOT_EQ,       // "!="
+    LT,           // "<"
+    GT,           // ">"
+    LT_EQ,        // "<="
+    GT_EQ,        // ">="
+    ASSIGN,       // "="
+    NOT,          // !
+    TILDE,        // "~"
     PLUS_ASSIGN,  // "+="
     MINUS_ASSIGN, // "-="
     STAR_ASSIGN,  // "*="
     SLASH_ASSIGN, // "/="
     MOD_ASSIGN,   // "%="
-    BOR,      // |
-    OR,       // ||
-    AND,      // &&
-    QUESTION, // "?" — postfix error propagation (expr?), never a binary operator
+    BOR,          // |
+    OR,           // ||
+    AND,          // &&
+    QUESTION,     // "?" — postfix error propagation (expr?), never a binary operator
     /* Delimiter */
     LBRACE,          // "{"
     RBRACE,          // "}"

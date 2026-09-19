@@ -1243,5 +1243,3 @@ TEST_F(RuntimeTest, TryOperatorRequiresMatchingErrorType)
 // The end-to-end in-process path (compile a Lis snippet, JIT it, run it) is what
 // expectRun/expectOutput do for ~500 cases; the trivial module above covers the
 // JIT plumbing on its own.
-
-

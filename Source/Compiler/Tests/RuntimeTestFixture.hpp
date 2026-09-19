@@ -397,8 +397,7 @@ protected:
     /// stderr is captured (the builtin `panic` writes its message there); if
     /// `in` is non-null its bytes are fed to the child's stdin (via a pipe)
     /// before it runs.
-    int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr,
-        std::string *err = nullptr)
+    int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr, std::string *err = nullptr)
     {
         std::string linkCmd = "g++ -o \"" + exePath.string() + "\" \"" + objPath.string() + "\"";
         if (std::system(linkCmd.c_str()) != 0)

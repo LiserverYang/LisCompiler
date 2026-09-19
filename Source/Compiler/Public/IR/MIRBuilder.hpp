@@ -8,8 +8,8 @@
 #include "Core/Pass.hpp"
 #include "IR/HIR.hpp"
 #include "IR/MIR.hpp"
-#include "Logger/Logger.hpp"
 #include "IR/MIRPrinter.hpp"
+#include "Logger/Logger.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -91,7 +91,10 @@ private:
     /// that the other arm never assigned (MIRBorrowCheck reported it as "use of
     /// uninitialized value"; the backend would have loaded garbage).
     std::vector<std::unordered_map<std::string, size_t>> varMapStack_;
-    void pushVarScope() { varMapStack_.push_back(varMap_); }
+    void pushVarScope()
+    {
+        varMapStack_.push_back(varMap_);
+    }
     void popVarScope()
     {
         if (varMapStack_.empty())

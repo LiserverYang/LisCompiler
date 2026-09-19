@@ -141,18 +141,18 @@ bool sameState(const State &a, const State &b)
 /// The place, decomposed for move bookkeeping.
 struct PlaceInfo
 {
-    bool isLocal = false;   // a global / return slot is never moved out of
-    bool isGlobal = false;  // a module-level `let` — borrowed like a local
-    size_t root = 0;        // local index
+    bool isLocal = false;  // a global / return slot is never moved out of
+    bool isGlobal = false; // a module-level `let` — borrowed like a local
+    size_t root = 0;       // local index
     /// A global's identity is its NAME: MIRBuilder leaves MIRPlace::index
     /// unset for a global place (codegen looks the global up by name), so the
     /// index is not comparable across places.
     std::string globalName;
-    MovePath path;          // projections up to the first Deref
-    MovePath tail;          // projections AFTER the first Deref
+    MovePath path; // projections up to the first Deref
+    MovePath tail; // projections AFTER the first Deref
     bool throughDeref = false;
     bool derefIsLast = false;
-    size_t derefAt = 0;     // index of the first Deref projection
+    size_t derefAt = 0; // index of the first Deref projection
 };
 
 PlaceInfo describePlace(const MIRPlace &place)
@@ -249,11 +249,11 @@ enum class AccessKind
 /// One borrow of a place, created by '&place' / '&mut place'.
 struct BorrowRecord
 {
-    MIRPlace place;              // what is borrowed (root local + its path)
+    MIRPlace place; // what is borrowed (root local + its path)
     bool isMut = false;
-    size_t holder = 0;           // the local that stores the reference VALUE
-    size_t parent = SIZE_MAX;    // the pointer this one was reborrowed through
-    bool twoPhase = false;       // a call receiver / reference argument
+    size_t holder = 0;        // the local that stores the reference VALUE
+    size_t parent = SIZE_MAX; // the pointer this one was reborrowed through
+    bool twoPhase = false;    // a call receiver / reference argument
 };
 
 class FunctionChecker
@@ -605,8 +605,7 @@ void FunctionChecker::run()
     reporting_ = false;
 }
 
-State FunctionChecker::transfer(size_t blockIndex, const MIRBasicBlock &block, const State &in, bool report,
-    std::map<size_t, size_t> *active)
+State FunctionChecker::transfer(size_t blockIndex, const MIRBasicBlock &block, const State &in, bool report, std::map<size_t, size_t> *active)
 {
     State st = in;
     std::map<size_t, size_t> *saved = activeNow_;
@@ -791,8 +790,7 @@ void FunctionChecker::checkReadable(const MIRPlace &place, const State &st, bool
 
     if (!ls.maybeInit)
     {
-        logAt(place, "use of uninitialized value: '" + body_.locals[info.root].name + "'",
-            E_UseOfUninitializedValue);
+        logAt(place, "use of uninitialized value: '" + body_.locals[info.root].name + "'", E_UseOfUninitializedValue);
         return;
     }
 
@@ -957,8 +955,7 @@ void FunctionChecker::checkBorrowOfMoved(const MIRPlace &place, const State &st)
     {
         if (pathsOverlap(moved, info.path))
         {
-            logAt(place, "cannot borrow moved value '" + body_.locals[info.root].name + "'",
-                E_CannotBorrowMovedValue);
+            logAt(place, "cannot borrow moved value '" + body_.locals[info.root].name + "'", E_CannotBorrowMovedValue);
             return;
         }
     }
@@ -998,8 +995,8 @@ bool FunctionChecker::dropOwnerForbidden(const MIRPlace &place, const PlaceInfo 
     const size_t ownerUpTo = place.projections.empty()
                                  ? 0
                                  : (place.projections.back().kind == ProjectionKind::Field
-                                       ? place.projections.size() - 1
-                                       : place.projections.size());
+                                           ? place.projections.size() - 1
+                                           : place.projections.size());
     std::shared_ptr<Type> owner = typeAfter(body_.locals[info.root].type, place, ownerUpTo);
     while (owner && owner->getKind() == Type::Kind::Reference)
         owner = std::static_pointer_cast<ReferenceType>(owner)->getBaseType();
@@ -1112,7 +1109,8 @@ bool FunctionChecker::carriesReference(const std::shared_ptr<Type> &ty, int dept
 }
 
 bool FunctionChecker::carriesReferenceTo(const std::shared_ptr<Type> &ty,
-    const std::shared_ptr<Type> &pointee, int depth) const
+    const std::shared_ptr<Type> &pointee,
+    int depth) const
 {
     if (!ty || !pointee || depth > 4)
         return false;
@@ -1611,8 +1609,7 @@ void FunctionChecker::computeLiveness()
     }
 }
 
-void FunctionChecker::checkAccessRaw(const MIRPlace &target, AccessKind kind,
-    const std::vector<size_t> &exempt, const MIRPlace &diagPlace)
+void FunctionChecker::checkAccessRaw(const MIRPlace &target, AccessKind kind, const std::vector<size_t> &exempt, const MIRPlace &diagPlace)
 {
     if (!activeNow_)
         return;

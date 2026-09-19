@@ -5,7 +5,6 @@
 
 #include "RuntimeTestFixture.hpp"
 
-
 // P8: the HIR printer's tree walk must include value-match arm tail expressions.
 // Before the fix getHIRChildren(HIRMatch) only walked arm.body, so
 // `Some(v) => v + 1` arms were invisible in --print-hir.

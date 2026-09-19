@@ -5,7 +5,6 @@
 
 #include "RuntimeTestFixture.hpp"
 
-
 // ── P4 regression: cast narrowing must use explicit bit widths ─────────────────
 // The old check compared PrimKind enum ordinals, silently depending on the enum
 // being declared in width order. These pin the widths explicitly.
@@ -1118,7 +1117,8 @@ TEST_F(RuntimeTest, OptionUnwrapNonCopyPayload)
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
-        "payload\n", 0);
+        "payload\n",
+        0);
 }
 
 TEST_F(RuntimeTest, GenericEnumTwoTypesThroughGenericFunction)
@@ -1188,7 +1188,8 @@ TEST_F(RuntimeTest, TryOperatorNonCopyPayloads)
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
-        "payload\n", 0);
+        "payload\n",
+        0);
     expectOutput("fn bad() -> Result<i32, String> { ret Result::Err(String::from_lit(\"inner\")); }\n"
                  "fn f() -> Result<i32, String> { let v = bad()?; ret Result::Ok(v); }\n"
                  "fn main() -> i32 { let r = f();\n"
@@ -1196,7 +1197,8 @@ TEST_F(RuntimeTest, TryOperatorNonCopyPayloads)
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
-        "inner\n", 0);
+        "inner\n",
+        0);
 }
 
 // Minimal JIT sanity check: a hand-built module that returns 42, with no
@@ -1215,7 +1217,6 @@ TEST_F(RuntimeTest, JitTrivialModule)
     int code = RunModuleInJit(std::move(mod), std::move(ctx), nullptr, nullptr);
     EXPECT_EQ(code, 42);
 }
-
 
 // ── Vec: the standard library's growable array ────────────────────────────────
 //
@@ -1393,7 +1394,8 @@ TEST_F(RuntimeTest, VecNonCopyPushPopAndPrint)
                  "    if v.len() != 2 { ret 1; }\n"
                  "    match v.pop() { Some(s) => { print_str(s.to_cstr()); println(); }, None => { ret 2; } }\n"
                  "    ret 0; }",
-        "beta\n", 0);
+        "beta\n",
+        0);
 }
 
 TEST_F(RuntimeTest, VecNonCopyForLoopKeepsOrder)
@@ -1407,7 +1409,8 @@ TEST_F(RuntimeTest, VecNonCopyForLoopKeepsOrder)
                  "    for s in move v { print_str(s.to_cstr()); print_int(s.len()); }\n"
                  "    println();\n"
                  "    ret 0; }",
-        "a1bb2ccc3\n", 0);
+        "a1bb2ccc3\n",
+        0);
 }
 
 // The drop counter every non-Copy test below is built on: a struct that counts
@@ -1426,7 +1429,8 @@ TEST_F(RuntimeTest, VecNonCopyDropRunsOncePerElement)
         "    v.push(Item { v: 1 }); v.push(Item { v: 2 }); v.push(Item { v: 3 });\n"
         "    if v.len() != 3 { ret 1; } }\n"
         "    ret ctr - 3; }",
-        kDropCounterPrologue, 0);
+        kDropCounterPrologue,
+        0);
 }
 
 TEST_F(RuntimeTest, VecNonCopyClearDestroysElements)
@@ -1439,7 +1443,8 @@ TEST_F(RuntimeTest, VecNonCopyClearDestroysElements)
         "    if v.len() != 0 { ret 2; }\n"
         "    if v.is_empty() == false { ret 3; }\n"
         "    ret ctr - 2; }",
-        kDropCounterPrologue, 0);
+        kDropCounterPrologue,
+        0);
 }
 
 TEST_F(RuntimeTest, VecNonCopyPartialIterationDoesNotDoubleDrop)
@@ -1456,7 +1461,8 @@ TEST_F(RuntimeTest, VecNonCopyPartialIterationDoesNotDoubleDrop)
         "    match second { Some(x) => { if x.v != 2 { ret 2; } }, None => { ret 3; } }\n"
         "    if v.is_empty() == false { ret 4; } }\n"
         "    ret ctr - 2; }",
-        kDropCounterPrologue, 0);
+        kDropCounterPrologue,
+        0);
 }
 
 TEST_F(RuntimeTest, VecNonCopyInsertRemoveKeepsOrderAndCounts)
@@ -1474,7 +1480,8 @@ TEST_F(RuntimeTest, VecNonCopyInsertRemoveKeepsOrderAndCounts)
         "    if v.at_ref(1).v != 2 { ret 7; }\n"
         "    match v.remove(99) { Some(x) => { ret 8; }, None => { } } }\n"
         "    ret ctr - 4; }",
-        kDropCounterPrologue, 0);
+        kDropCounterPrologue,
+        0);
 }
 
 TEST_F(RuntimeTest, VecNonCopyAtRefAndAtMut)
@@ -1878,7 +1885,8 @@ TEST_F(RuntimeTest, ForBorrowsNonCopyElements)
                  "    println();\n"
                  "    if v.len() != 2 { ret 1; }\n"
                  "    ret 0; }\n",
-        "ab2cde3\n", 0);
+        "ab2cde3\n",
+        0);
 }
 
 // The collection stays borrowed for the whole loop: pushing in the body would
@@ -1886,9 +1894,9 @@ TEST_F(RuntimeTest, ForBorrowsNonCopyElements)
 TEST_F(RuntimeTest, ForBorrowBodyCannotMutateTheSource)
 {
     expectCompileFail("impt vec { Vec };\n"
-        "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
-        "    for e in v { v.push(2); }\n"
-        "    ret 0; }\n",
+                      "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
+                      "    for e in v { v.push(2); }\n"
+                      "    ret 0; }\n",
         "because it is already borrowed");
 }
 
@@ -1904,9 +1912,9 @@ TEST_F(RuntimeTest, ForMoveConsumesThePlace)
               "    ret s - 6; }\n",
         0);
     expectCompileFail("impt vec { Vec };\n"
-        "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
-        "    for x in move v { }\n"
-        "    ret v.len(); }\n",
+                      "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
+                      "    for x in move v { }\n"
+                      "    ret v.len(); }\n",
         "use of moved value");
 }
 
@@ -1953,8 +1961,8 @@ TEST_F(RuntimeTest, ForBorrowNestedLoops)
 TEST_F(RuntimeTest, ForNamedPureIteratorNeedsMove)
 {
     expectCompileFail("fn main() -> i32 { let r = range(1, 3); let mut s = 0;\n"
-        "    for i in r { s = s + i; }\n"
-        "    ret s; }\n",
+                      "    for i in r { s = s + i; }\n"
+                      "    ret s; }\n",
         "has no method 'iter'");
 }
 
@@ -2052,7 +2060,7 @@ TEST_F(RuntimeTest, LetElseEvaluatesItsFallbackOnlyOnTheMissPath)
 TEST_F(RuntimeTest, LetElseDivergingFallbackPanics)
 {
     expectPanic("fn maybe(b: bool) -> Option<i32> { if b { ret Option::Some(5); } ret Option::None; }\n"
-        "fn main() -> i32 { let x = maybe(false) else panic(\"no value\"); ret x; }\n",
+                "fn main() -> i32 { let x = maybe(false) else panic(\"no value\"); ret x; }\n",
         "panicked: no value");
 }
 
@@ -2068,7 +2076,8 @@ TEST_F(RuntimeTest, LetElseMovesANonCopyPayload)
                  "    let t = maybe(false) else String::from_lit(\"none\");\n"
                  "    print_str(s.to_cstr()); print_str(t.to_cstr()); println();\n"
                  "    ret 0; }\n",
-        "hinone\n", 0);
+        "hinone\n",
+        0);
 }
 
 // Only Option/Result unwrap this way (as with '?'), the fallback must have the
@@ -2080,6 +2089,6 @@ TEST_F(RuntimeTest, LetElseRejectedShapes)
     expectCompileFail("fn main() -> i32 { let x = Option::Some(1) else \"s\"; ret 0; }\n",
         "the fallback of 'let ... else' must have type");
     expectCompileFail("let g = Option::Some(1) else 0;\n"
-        "fn main() -> i32 { ret 0; }\n",
+                      "fn main() -> i32 { ret 0; }\n",
         "cannot use 'else'");
 }
