@@ -11,12 +11,14 @@ impt math { max, abs };
 impt option { Option, unwrap_or };
 impt result { Result, is_ok, is_err };
 impt string { String };
+impt vec { Vec };            // v[i] / v[i] = x 额外需要 Index / IndexMut，见下
 ```
 
-七个模块：`drop`（Drop trait）、`option`（Option<T>）、`result`（Result<T, E> + `?` 传播协议）、
+八个模块：`drop`（Drop trait）、`option`（Option<T>）、`result`（Result<T, E> + `?` 传播协议）、
 `iterator`（Iterator/Range/for 协议）、`math`（Numeric/算子 trait + 数值函数）、`chars`
-（字符分类）、`string`（String 堆字符串）。模块间依赖已显式声明（iterator 导入 option；
-string 导入 drop 与 option）—— 只需导入你直接使用的模块。
+（字符分类）、`string`（String 堆字符串）、`vec`（Vec<T> 堆数组 + Index/IndexMut trait）。
+模块间依赖已显式声明（iterator 导入 option；string 导入 drop 与 option；
+vec 导入 math/option/iterator/drop）—— 只需导入你直接使用的模块。
 
 > `unwrap_or` 在 `option` 与 `result` 里**各有一个**。两者都做选择性导入会触发
 > 「selective import conflicts with an existing name」——这是既有的冲突规则，不是 bug。
@@ -115,10 +117,47 @@ struct String
 - `to_cstr` 的返回借用编译器不追踪——调用方必须保证 owner 存活。
 - OOM 不检查。
 
+## Vec
+
+```lis
+trait Index<T>    { fn at(self: &Self, i: i32) -> T; }
+trait IndexMut<T> { fn set(self: &mut Self, i: i32, v: T); }
+struct Vec<T: Copy> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全私有
+```
+
+| 方法 | 签名 | 说明 |
+|---|---|---|
+| `Vec<i32>::new()` | `-> Vec<T>` | 空表，**不分配**（`malloc(0)`），首次 push 才要 4 个元素的空间 |
+| `len` / `cap` / `is_empty` | `&Vec -> i32 / i32 / bool` | 元素数 / 已分配容量 / 是否为空 |
+| `push(self: &mut Vec, v: T)` | | 满时**翻倍**扩容（0 → 4 → 8 → ...） |
+| `pop(self: &mut Vec)` | `-> Option<T>` | 取走最后一个元素 |
+| `get(self: &Vec, i: i32)` | `-> Option<T>` | 越界返回 `None`（**检查版**） |
+| `insert(self: &mut Vec, i: i32, v: T)` | | 越界 **panic**（`i == len` 等于追加） |
+| `remove(self: &mut Vec, i: i32)` | `-> Option<T>` | 删除并左移；越界 `None` |
+| `clear(self: &mut Vec)` | | 长度归零，**保留容量** |
+| `v[i]` | `Index::at` | 越界 `panic("Vec index out of bounds")`（与数组一致） |
+| `v[i] = x` | `IndexMut::set` | 越界 `panic` |
+| `for e in v` | `Iterator<T>::next` | **消费** v（游标在 v 里），逐个 yield 元素的**拷贝** |
+
+- **构造要写类型实参**：`Vec<i32>::new()`。本语言没有期望类型推断，`let v: Vec<i32> = Vec::new();`
+  里的标注**不能**回推 T（与 `let x: Option<i32> = Option::None;` 同一条规则）。
+- **元素必须是 Copy**：drop 只释放缓冲、不跑元素析构，所以 `Vec<String>` 在编译期被
+  拒绝（`type 'string$String' does not implement trait 'Copy' required by 'Vec'`），
+  而不是在运行时静默泄漏。元素析构是下一步。
+- 缓冲由 `impl Drop for Vec` 释放；Vec 是**移动**类型（`let b = a;` 之后 a 不可再用），
+  可以作字段/参数/返回值，移动与赋值都会释放旧缓冲。
+- 遍历用 `for e in v`（消费）或 `while i < v.len() { ... v[i] ... }`（借用）。还没有
+  `with_capacity` / `reserve` / `iter()`：扩容需要元素大小，而 `__sizeof` 要一个 T 的
+  **值**，所以大小由 `push`/`insert` 的实参带进来。
+
 ## math
 
 - marker/算子 trait：`Numeric` `Integer` `Add` `Sub` `Mul` `Div` `Rem` `PartialEq`
   `PartialOrd` `BitAnd` `BitOr` `BitXor` `Shl` `Shr`（见[运算符](./operators.md)）。
+- `Copy`（2026-09-19）：**空 marker trait**，声明「这个类型可以按位复制」。泛型容器用它
+  写约束（`struct Vec<T: Copy>`），于是泛型体里读一个 `T` 字段不再被判成「从引用后
+  移动」（E3017）。原语（整数/浮点/char/bool）在语义分析里被**播种**为自动实现 `Copy`，
+  用户类型要显式 `impl Copy for X { }`。
 - 函数：`min<T: Numeric>` `max<T: Numeric>` `clamp<T: Numeric>`、`abs(i32)` `fabs(f64)`
   （无一元负号，`0 - x` 实现）、`gcd` `lcm` `ipow` `is_even` `is_odd` `sign`
   `deg_to_rad` `rad_to_deg` `lerp`。

@@ -73,6 +73,25 @@ trait 声明时原语自动播种（stdlib 声明这些 trait 即生效）：
 `bool` 刻意不实现 `Numeric`（`true + false` 会对 i1 做加法）。结构体实现
 `Numeric`/`Integer` 被拒绝（marker 原语专属）。
 
+## 下标运算符 `v[i]`（2026-09-19）
+
+`[]` 也是可重载的运算符，由**两个** trait 组成（声明在 `vec.lis`，任何类型都能实现）：
+
+```lis
+trait Index<T>    { fn at(self: &Self, i: i32) -> T; }        // v[i]     — 读
+trait IndexMut<T> { fn set(self: &mut Self, i: i32, v: T); }  // v[i] = x — 写
+```
+
+- 索引必须是 `i32`；`at` 的接收者是 `&Self`，`set` 必须是 `&mut Self`（写要独占）。
+- 两个 trait 都返回/接收**元素的值**，不返回 `&T`：返回借用需要编译器追踪借用存活期，
+  而返回借用目前不追踪（见[已知限制](./limitations.md)）。
+- **数组与裸指针不走这两个 trait**：数组的 `a[i]` 仍是内建投影（带越界检查），
+  `*T` 的 `p[i]` 仍是 stdlib 专用的裸地址运算。用户类型没实现 trait 时，
+  `v[i]` 报 "type 'X' is not indexable; implement the 'Index<T>' trait"。
+- 借用检查把它当**方法调用**看：读不登记借用（只检查），写由赋值本身检查——
+  见[借用检查](./borrow.md)的「下标运算符是调用」。
+- 标准库的 `Vec<T>` 是第一个实现者，用法见[标准库](./stdlib.md)。
+
 ## 类型转换（as）
 
 <grammar>

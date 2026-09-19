@@ -82,16 +82,27 @@ assert(str_len(line) > 0, "empty input");
 | 函数 | 签名 | 说明 |
 |---|---|---|
 | `__alloc(n: i32) -> *mut i8` | `malloc(n)`，返回可写堆缓冲 | |
-| `__free(p: *i8) -> void` | `free(p)` | |
-| `__memcpy(dst: *mut i8, src: *i8, n: i32) -> *mut i8` | `memcpy`，返回 dst | |
-| `__strlen(s: *i8) -> i32` | `strlen` | |
+| `__alloc<T>(n: i32) -> *mut T` | 同上，但返回**带类型的**指针；`n` 仍是**字节数** | |
+| `__sizeof(x: T) -> i32` | `sizeof(T)`，编译期常量，不求值参数 | |
+| `__free(p: *T) -> void` | `free(p)`（任何指针类型） | |
+| `__memcpy(dst: *mut T, src: *S, n: i32) -> *mut T` | `memcpy`，返回 dst（任何指针类型） | |
+| `__strlen(s: *T) -> i32` | `strlen`（任何指针类型） | |
 | `__deref(p: *T) -> &T` | 把只读裸指针变成共享引用（stdlib 专用） | |
 | `__deref_mut(p: *mut T) -> &mut T` | 把可写裸指针变成可变引用（stdlib 专用） | |
+
+**带类型的 `__alloc<T>`（2026-09-19）**：标准库容器需要一块「指向 T 的堆缓冲」，
+而 `*mut i8` 无法索引出 T。`__alloc<T>(n)` 生成的仍是 `malloc(n)`（`n` 是**字节**，
+由调用方用 `__sizeof(v) * count` 算），但返回 `*mut T`，于是 `p[i]` 得到干净的
+`getelementptr T`。T 可以是尚未确定的泛型参数（`*mut T` 在单态化时才落地），
+这正是 `Vec<T>` 的缓冲所依赖的。`__sizeof` 只接受一个**任意类型**的值并把
+`DataLayout` 的 `getTypeAllocSize` 作为 i32 常量发出——参数不会被求值，所以
+`__sizeof(v)` 不移动 `v`；泛型体内没有 T 的值可用时，就把大小**从调用点传进来**
+（`Vec::push` 的 `grow(__sizeof(v))` 就是这么写的）。
 
 **这些是编译器的「不安全核心」，只能在标准库（`<bin>/lstdlib` 内的文件）里调用**，
 否则编译错误 E3013（堆原语）/ E3014（裸指针操作）。它们直接落到 libc，
 没有任何边界、生命周期或别名检查；把它们关在标准库里，是语言其余部分能够安全使用堆的前提。
-用户要用堆，就走 `String`（将来还有堆集合）这类带检查的标准库 API。
+用户要用堆，就走 `String`、`Vec<T>` 这类带检查的标准库 API。
 
 **OOM 不检查**：`malloc` 失败时后续写会崩溃（语言无错误处理机制）。
 
