@@ -14,6 +14,7 @@
 
 #include "IR/MIRBorrowCheck.hpp"
 
+#include "Analysiser/Symbol.hpp"
 #include "Core/Context.hpp"
 #include "IR/MIRPrinter.hpp"
 #include "Logger/ErrorID.hpp"
@@ -51,12 +52,36 @@ std::string joinPath(const MovePath &path)
     return out;
 }
 
-/// One is a prefix of the other (including the empty path = the whole value).
+/// Two places are rooted at the same thing: the same LOCAL, or the same GLOBAL
+/// (module-level `let`). The two index spaces are disjoint, so the kind has to
+/// be compared too.
+bool sameRoot(const struct PlaceInfo &a, const struct PlaceInfo &b);
+
+/// Do two path SEGMENTS denote overlapping storage? Mirrors the HIR checker:
+///  - a field never overlaps an index (`a.f` vs `a[0]`);
+///  - two constant indices are disjoint unless they are equal (`a[0]` vs `a[1]`);
+///  - the unknown-index wildcard `[*]` overlaps every index;
+///  - the deref marker `*` overlaps only itself.
+bool pathSegmentOverlaps(const std::string &a, const std::string &b)
+{
+    if (a == b)
+        return true;
+    if (a == "*" || b == "*")
+        return false;
+    const bool aIndex = a.size() >= 2 && a.front() == '[';
+    const bool bIndex = b.size() >= 2 && b.front() == '[';
+    if (aIndex != bIndex || !aIndex)
+        return false; // an index never overlaps a field, nor two different fields
+    return a == "[*]" || b == "[*]";
+}
+
+/// One path is a prefix of the other (including the empty path = the whole
+/// value), comparing every shared segment.
 bool pathsOverlap(const MovePath &a, const MovePath &b)
 {
     const size_t n = std::min(a.size(), b.size());
     for (size_t i = 0; i < n; ++i)
-        if (a[i] != b[i])
+        if (!pathSegmentOverlaps(a[i], b[i]))
             return false;
     return true;
 }
@@ -109,7 +134,12 @@ bool sameState(const State &a, const State &b)
 struct PlaceInfo
 {
     bool isLocal = false;   // a global / return slot is never moved out of
+    bool isGlobal = false;  // a module-level `let` — borrowed like a local
     size_t root = 0;        // local index
+    /// A global's identity is its NAME: MIRBuilder leaves MIRPlace::index
+    /// unset for a global place (codegen looks the global up by name), so the
+    /// index is not comparable across places.
+    std::string globalName;
     MovePath path;          // projections up to the first Deref
     bool throughDeref = false;
     bool derefIsLast = false;
@@ -119,7 +149,9 @@ PlaceInfo describePlace(const MIRPlace &place)
 {
     PlaceInfo info;
     info.isLocal = (place.base == PlaceBase::Local);
+    info.isGlobal = (place.base == PlaceBase::Global);
     info.root = place.index;
+    info.globalName = info.isGlobal ? place.name : std::string();
     for (size_t i = 0; i < place.projections.size(); ++i)
     {
         const Projection &p = place.projections[i];
@@ -133,9 +165,25 @@ PlaceInfo describePlace(const MIRPlace &place)
             continue;
         }
         if (!info.throughDeref)
-            info.path.push_back(p.kind == ProjectionKind::Field ? p.field : std::string("*"));
+        {
+            if (p.kind == ProjectionKind::Field)
+                info.path.push_back(p.field);
+            else if (p.hasConstIndex)
+                info.path.push_back("[" + std::to_string(p.constIndex) + "]");
+            else
+                info.path.push_back("[*]"); // an unknown index may alias ANY element
+        }
     }
     return info;
+}
+
+bool sameRoot(const PlaceInfo &a, const PlaceInfo &b)
+{
+    if (a.isLocal != b.isLocal || a.isGlobal != b.isGlobal)
+        return false;
+    if (a.isGlobal)
+        return a.globalName == b.globalName;
+    return a.root == b.root;
 }
 
 /// The type a projection chain denotes, starting from the base local's type.
@@ -231,6 +279,14 @@ private:
     /// Live locals after each statement (per block), for the borrow kill rule.
     std::vector<std::vector<std::vector<char>>> liveAfter_;
     std::vector<std::vector<char>> liveOut_;
+    // ── dangling returns (E4007) ────────────────────────────────────────────
+    /// Where the reference VALUE held by a local ultimately points (the HIR
+    /// checker's per-Symbol RefOrigin, re-derived on MIR). A reference into
+    /// this function's own frame (Local) dangles once the function returns.
+    std::unordered_map<size_t, RefOrigin> refOriginOf_;
+    /// Struct local -> the origins of its reference-typed fields.
+    std::unordered_map<size_t, std::map<std::string, RefOrigin>> refFieldOriginOf_;
+
     /// The active-borrow set the transfer is currently working on: borrow id ->
     /// the local that CURRENTLY carries the reference value. MIR materializes
     /// '&x' into a temp and then copies the reference into the real binding
@@ -310,6 +366,27 @@ private:
     /// Check one use of a place against the active borrows.
     void checkAccess(const MIRPlace &place, AccessKind kind);
     void checkAccessRaw(const MIRPlace &target, AccessKind kind, const std::vector<size_t> &exempt, const MIRPlace &diagPlace);
+    /// Walk every statement in order and record where the reference values held by
+    /// locals point (and the per-field origins of struct locals). The last
+    /// assignment wins, exactly like the HIR checker's per-Symbol state — which is
+    /// what makes 'let mut r = &G; r = &x; ret r;' rejected.
+    void collectReferenceOrigins();
+    RefOrigin originOfBinding(size_t local) const;
+    /// Where the STORAGE a place denotes lives ('&<place>' points at it).
+    RefOrigin storageOrigin(const MIRPlace &place) const;
+    /// Origin of the reference VALUE stored in a struct field.
+    RefOrigin fieldValueOrigin(const MIRPlace &place) const;
+    RefOrigin originOfOperand(const MIROperand &op) const;
+    const MIRPlace *operandPlace(const MIROperand &op) const;
+    /// The name a dangling-return message should print ('ret r' names r, 'ret &x'
+    /// names the place the borrow points at).
+    std::string returnedName(const MIROperand &op) const;
+    /// Reject 'ret <reference into this frame>' and 'ret <struct with such a
+    /// field>' (E4007).
+    void checkReturnTerm(const MIRTermReturn &ret);
+    static bool isReferenceType(const std::shared_ptr<Type> &ty);
+    static bool structHasRefFields(const std::shared_ptr<Type> &ty);
+
     /// Insert the borrows a statement creates, move them onto the destination of
     /// a reference copy, and drop the ones whose current holder is dead (or
     /// overwritten) — the transfer function of the borrow-set analysis.
@@ -412,6 +489,7 @@ void FunctionChecker::run()
     // Borrowing needs the alias/two-phase tables and the live ranges of the
     // locals that hold references; both are computed before any fixpoint runs.
     collectBorrowSites();
+    collectReferenceOrigins();
     computeLiveness();
 
     in_.assign(blockCount, topState());
@@ -557,6 +635,7 @@ void FunctionChecker::transferTerm(const MIRTerminator &term, State &st, bool re
     {
         if (ret->value.has_value())
             useOperand(*ret->value, st, report);
+        checkReturnTerm(*ret);
         return;
     }
     if (auto *call = std::get_if<MIRTermCall>(&term))
@@ -1313,7 +1392,7 @@ void FunctionChecker::checkAccessRaw(const MIRPlace &target, AccessKind kind,
     {
         const BorrowRecord &b = borrows_[entry.first];
         const PlaceInfo binfo = describePlace(b.place);
-        if (binfo.root != tinfo.root || !pathsOverlap(binfo.path, tinfo.path))
+        if (!sameRoot(binfo, tinfo) || !pathsOverlap(binfo.path, tinfo.path))
             continue;
         // Using a reference is GRANTED by the borrows that produced it: they are
         // what makes the access legal in the first place.
@@ -1373,11 +1452,36 @@ void FunctionChecker::checkAccess(const MIRPlace &place, AccessKind kind)
     if (!activeNow_)
         return;
     const PlaceInfo info = describePlace(place);
-    if (!info.isLocal)
+    // A global place is checked like a local one (same table, separate index
+    // space); the return slot and other compiler-made bases are not tracked.
+    if (!info.isLocal && !info.isGlobal)
         return;
 
-    if (info.throughDeref)
+    if (info.throughDeref && info.isLocal)
     {
+        // Taking a reference THROUGH a reference READS the pointer first — and
+        // HIR reports that read before the borrow itself, which is where
+        // "cannot read 'r' because it is borrowed as mutable" comes from.
+        if (kind == AccessKind::BorrowMut || kind == AccessKind::BorrowShared)
+        {
+            checkAccessRaw(placeOfLocal(info.root), AccessKind::Read, {}, place);
+            if (const MIRPlace *readTarget = referentOf(info.root))
+            {
+                MIRPlace resolvedRead = *readTarget;
+                bool seenReadDeref = false;
+                for (const Projection &p : place.projections)
+                {
+                    if (p.kind == ProjectionKind::Deref)
+                    {
+                        seenReadDeref = true;
+                        continue;
+                    }
+                    if (seenReadDeref)
+                        resolvedRead.projections.push_back(p);
+                }
+                checkAccessRaw(resolvedRead, AccessKind::Read, exemptionChain(info.root), place);
+            }
+        }
         // Going through '*r' USES r: writing through it, moving out of it or
         // reborrowing it must find the pointer free ...
         if (kind != AccessKind::Read)
@@ -1402,6 +1506,14 @@ void FunctionChecker::checkAccess(const MIRPlace &place, AccessKind kind)
         }
         return;
     }
+
+    // `&<place>` ANALYSES the place first, and a COPY-typed place is read by that
+    // analysis even though the enclosing expression is a borrow (HIR does the
+    // same in visit(HIRMemberAccess)/visit(HIRIndexAccess)) — which is where
+    // "cannot read 'a[0]' because it is borrowed as mutable" comes from.
+    if ((kind == AccessKind::BorrowMut || kind == AccessKind::BorrowShared)
+        && place.type && place.type->isCopyable())
+        checkAccessRaw(place, AccessKind::Read, {}, place);
 
     checkAccessRaw(place, kind, {}, place);
 }
@@ -1465,7 +1577,254 @@ void FunctionChecker::settleBorrows(size_t blockIndex, size_t stmtIndex, const M
     // 4. A reference value created here becomes active AFTER this statement.
     if (creates)
         for (size_t id : site->second)
+        {
             active[id] = borrows_[id].holder;
+        }
+}
+
+// ─── dangling returns (E4007) ───────────────────────────────────────────────
+//
+// A reference is dangling after this function returns iff it (transitively)
+// points into this function's own stack frame. Reference-typed params and
+// globals outlive the call; local slots, by-value param slots and local struct
+// fields do not. Unknown stays conservative (never falsely reject), exactly like
+// the HIR checker's RefOrigin rules — re-derived here from the MIR places.
+
+bool FunctionChecker::isReferenceType(const std::shared_ptr<Type> &ty)
+{
+    if (!ty)
+        return false;
+    if (ty->getKind() == Type::Kind::Reference)
+        return true;
+    // Defensive: trait-method self params are represented as SelfType.
+    if (auto st = std::dynamic_pointer_cast<SelfType>(ty))
+        return st->isReference();
+    return false;
+}
+
+bool FunctionChecker::structHasRefFields(const std::shared_ptr<Type> &ty)
+{
+    auto ct = std::dynamic_pointer_cast<CustomType>(ty);
+    if (!ct)
+        return false;
+    for (const auto &f : ct->getFields())
+        if (isReferenceType(f.type))
+            return true;
+    return false;
+}
+
+RefOrigin FunctionChecker::originOfBinding(size_t local) const
+{
+    if (local >= body_.locals.size())
+        return RefOrigin::Unknown;
+    // A reference-typed parameter points into caller-owned storage.
+    if (body_.locals[local].isArg)
+        return RefOrigin::Param;
+    auto it = refOriginOf_.find(local);
+    if (it != refOriginOf_.end())
+        return it->second;
+    return RefOrigin::Unknown;
+}
+
+RefOrigin FunctionChecker::storageOrigin(const MIRPlace &place) const
+{
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal)
+        return RefOrigin::Global;
+    // '&*p' / '&r.v': the storage is where the pointer points.
+    if (info.throughDeref)
+        return originOfBinding(info.root);
+    // '&x' / '&param': the bare slot itself lives in this function's frame.
+    if (info.path.empty())
+        return RefOrigin::Local;
+    // '&r.v' with r reference-typed — the field lives where r points.
+    if (isReferenceType(body_.locals[info.root].type))
+        return originOfBinding(info.root);
+    // '&s.v' with s a by-value struct — a local frame copy (also for a by-value
+    // PARAM: the callee owns that copy).
+    return RefOrigin::Local;
+}
+
+RefOrigin FunctionChecker::fieldValueOrigin(const MIRPlace &place) const
+{
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal)
+        return RefOrigin::Global;
+    if (info.path.size() != 1)
+        return RefOrigin::Unknown; // nested fields are not tracked (conservative)
+    const MIRLocal &root = body_.locals[info.root];
+    // The reference value lives in the struct the root binding points at.
+    if (isReferenceType(root.type))
+        return originOfBinding(info.root);
+    if (root.isArg)
+        return RefOrigin::Param; // a caller-provided struct copy
+    auto it = refFieldOriginOf_.find(info.root);
+    if (it != refFieldOriginOf_.end())
+    {
+        auto field = it->second.find(info.path[0]);
+        if (field != it->second.end())
+            return field->second;
+    }
+    return RefOrigin::Unknown;
+}
+
+const MIRPlace *FunctionChecker::operandPlace(const MIROperand &op) const
+{
+    if (auto *cp = std::get_if<MIRCopy>(&op))
+        return &cp->place;
+    if (auto *mv = std::get_if<MIRMove>(&op))
+        return &mv->place;
+    return nullptr;
+}
+
+RefOrigin FunctionChecker::originOfOperand(const MIROperand &op) const
+{
+    if (auto *c = std::get_if<MIRConst>(&op))
+        return c->kind == MIRConst::Kind::String ? RefOrigin::Global : RefOrigin::Unknown;
+    const MIRPlace *place = operandPlace(op);
+    if (!place)
+        return RefOrigin::Unknown;
+    const PlaceInfo info = describePlace(*place);
+    if (!info.isLocal)
+        return RefOrigin::Global;
+    if (info.throughDeref)
+        return originOfBinding(info.root);
+    if (!info.path.empty())
+        return fieldValueOrigin(*place);
+    return originOfBinding(info.root);
+}
+
+void FunctionChecker::collectReferenceOrigins()
+{
+    // Where the reference value produced by a right-hand side points.
+    auto rvalueOrigin = [&](const MIRRValue &rv) -> RefOrigin
+    {
+        if (auto *use = std::get_if<MIRRValueUse>(&rv))
+            return originOfOperand(use->operand);
+        if (auto *ref = std::get_if<MIRRValueRef>(&rv))
+            return storageOrigin(ref->place);
+        return RefOrigin::Unknown;
+    };
+
+    for (size_t b = 0; b < body_.blocks.size(); ++b)
+    {
+        for (const MIRStatement &stmt : body_.blocks[b].stmts)
+        {
+            auto *as = std::get_if<MIRStmtAssign>(&stmt);
+            if (!as)
+                continue;
+            const PlaceInfo dest = describePlace(as->lhs);
+            if (!dest.isLocal || dest.throughDeref)
+                continue;
+
+            // A whole binding: a reference value, or a struct carrying fields.
+            if (dest.path.empty())
+            {
+                if (isReferenceType(as->lhs.type))
+                {
+                    refOriginOf_[dest.root] = rvalueOrigin(as->rhs);
+                    continue;
+                }
+                // A struct literal: read the origins off its members.
+                if (const MIRRValueStructInit *init = std::get_if<MIRRValueStructInit>(&as->rhs))
+                {
+                    for (const auto &field : init->fields)
+                        refFieldOriginOf_[dest.root][field.first] = originOfOperand(field.second);
+                    continue;
+                }
+                // A struct COPY/MOVE: carry the source's per-field origins.
+                if (auto *use = std::get_if<MIRRValueUse>(&as->rhs))
+                {
+                    const MIRPlace *src = nullptr;
+                    if (auto *cp = std::get_if<MIRCopy>(&use->operand))
+                        src = &cp->place;
+                    else if (auto *mv = std::get_if<MIRMove>(&use->operand))
+                        src = &mv->place;
+                    if (src)
+                    {
+                        const PlaceInfo sinfo = describePlace(*src);
+                        if (sinfo.isLocal && !sinfo.throughDeref && sinfo.path.empty())
+                        {
+                            auto it = refFieldOriginOf_.find(sinfo.root);
+                            if (it != refFieldOriginOf_.end())
+                                refFieldOriginOf_[dest.root] = it->second;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // A FIELD store of a reference value: 'h.r = &x' (or 'h.r = r2').
+            if (dest.path.size() == 1 && isReferenceType(as->lhs.type))
+                refFieldOriginOf_[dest.root][dest.path[0]] = rvalueOrigin(as->rhs);
+        }
+    }
+}
+
+std::string FunctionChecker::returnedName(const MIROperand &op) const
+{
+    const MIRPlace *place = operandPlace(op);
+    if (!place)
+        return "this value";
+    const PlaceInfo info = describePlace(*place);
+    // 'ret r' names the binding the user wrote.
+    if (info.isLocal && !body_.locals[info.root].isTemp)
+        return displayName(*place);
+    // 'ret &x' returns a TEMP holding the borrow — name what it points at.
+    if (info.isLocal)
+        if (const MIRPlace *target = referentOf(info.root))
+            return displayName(*target);
+    return "this value";
+}
+
+void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
+{
+    const std::shared_ptr<Type> declared = body_.returnType;
+    if (!declared)
+        return;
+
+    // The returned value normally travels through the RETURN SLOT
+    // ('_0 = copy _2; return;'), so a terminator without an operand is checked
+    // against local 0 — whose origin the pre-pass tracked like any other local.
+    const MIROperand operand = ret.value.has_value()
+                                   ? *ret.value
+                                   : MIROperand(MIRCopy{.place = placeOfLocal(0)});
+
+    if (isReferenceType(declared))
+    {
+        if (originOfOperand(operand) != RefOrigin::Local)
+            return;
+        const MIRPlace *place = operandPlace(operand);
+        const std::string name = returnedName(operand);
+        if (place)
+            logAt(*place,
+                "cannot return reference to '" + name
+                    + "': it does not live long enough (it points into this function's stack frame)",
+                E_BorrowDoesNotLiveLongEnough);
+        return;
+    }
+
+    auto ct = std::dynamic_pointer_cast<CustomType>(declared);
+    if (!ct || !structHasRefFields(ct))
+        return;
+
+    // 'ret h' / 'ret H { r: &x }': MIRBuilder materializes a struct literal into a
+    // temp and returns the temp, so the tracked per-field origins of the returned
+    // PLACE are what the check reads (collectReferenceOrigins filled them).
+    const MIRPlace *place = operandPlace(operand);
+    if (!place)
+        return;
+    const PlaceInfo info = describePlace(*place);
+    if (!info.isLocal || info.throughDeref || !info.path.empty() || body_.locals[info.root].isArg)
+        return;
+    auto it = refFieldOriginOf_.find(info.root);
+    if (it == refFieldOriginOf_.end())
+        return;
+    for (const auto &entry : it->second)
+        if (entry.second == RefOrigin::Local)
+            logAt(*place,
+                "cannot return struct: reference field '" + entry.first + "' does not live long enough",
+                E_BorrowDoesNotLiveLongEnough);
 }
 
 } // namespace

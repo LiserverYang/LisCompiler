@@ -2400,10 +2400,19 @@ MIRPlace MIRBuilder::buildIndexAccess(HIRIndexAccess *ia)
     MIRPlace idx = buildExpr(ia->index.get());
     MIRPlace idxTemp = makeTempPlace(idx.type);
     emitAssign(idxTemp, MIRRValueUse{placeToOperand(idx)});
-    base.projections.push_back(Projection{
+    Projection indexProj{
         .kind = ProjectionKind::Index,
         .localIndex = idxTemp.index,
-    });
+    };
+    // A LITERAL index is part of the place: `a[0]` and `a[1]` are disjoint, and
+    // the borrow checker needs to know that (a computed index stays unknown).
+    if (auto *lit = dynamic_cast<HIRLiteral *>(ia->index.get());
+        lit != nullptr && lit->kind == HIRLiteral::Kind::Int)
+    {
+        indexProj.hasConstIndex = true;
+        indexProj.constIndex = std::get<int64_t>(lit->value);
+    }
+    base.projections.push_back(std::move(indexProj));
     // Update the type to the element type (already resolved in sema).
     if (ia->type)
         base.type = ia->type;

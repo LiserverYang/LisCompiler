@@ -36,6 +36,14 @@ struct Projection
     ProjectionKind kind;
     std::string field; // for Field
     size_t localIndex; // for Index (the temp holding the index)
+
+    /// An Index whose index expression is an integer LITERAL carries the value,
+    /// so a checker can tell `a[0]` and `a[1]` apart: distinct constant indices
+    /// are DISJOINT places (`&mut a[0]` and `&mut a[1]` may both be live, Rust
+    /// accepts it). A computed index keeps hasConstIndex = false and collapses to
+    /// the wildcard, which is the conservative reading (it may alias any element).
+    bool hasConstIndex = false;
+    int64_t constIndex = 0;
 };
 
 struct MIRPlace
