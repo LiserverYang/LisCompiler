@@ -688,6 +688,8 @@ MIRProgram MIRBuilder::buildProgram(HIRProgram *prog)
         auto addFunction = [&](MIRFunction &&fn)
         {
             fn.sourceFilePath = currentItemFilePath_;
+            auto cached = context->fileContents.find(currentItemFilePath_);
+            fn.sourceText = cached != context->fileContents.end() ? &cached->second : nullptr;
             out.functions.push_back(std::make_shared<MIRFunction>(std::move(fn)));
         };
 

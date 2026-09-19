@@ -449,7 +449,9 @@ void FunctionChecker::logAt(const MIRPlace &place, const std::string &msg, size_
     // The ITEM's file (module items keep their own path), like the HIR analyzer;
     // Context::filePath is the main file by the time this pass runs.
     info.codePath = fn_.sourceFilePath.empty() ? context_->filePath : fn_.sourceFilePath;
-    info.code = &context_->fileValue;
+    // The module's OWN text when it is cached (Context::fileContents), so the
+    // printed snippet is the offending line, not a line of the main file.
+    info.code = fn_.sourceText ? fn_.sourceText : &context_->fileValue;
     info.col = place.pos.col;
     info.line = place.pos.line;
     info.length = place.length;

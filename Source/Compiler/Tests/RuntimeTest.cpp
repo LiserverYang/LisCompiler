@@ -1043,6 +1043,23 @@ TEST_F(RuntimeTest, BorrowErrorInModuleNamesTheModuleFile)
         << "the diagnostic must name the module file, got:\n"
         << diag;
     EXPECT_NE(diag.find("E4003"), std::string::npos) << diag;
+    // ... and it must quote THAT file's source line: the module text comes from
+    // Context::fileContents (the main file's text would print an unrelated line).
+    // The Logger colorizes the offending span, so strip SGR sequences first.
+    std::string plain;
+    for (size_t i = 0; i < diag.size();)
+    {
+        if (diag[i] == '\x1b' && i + 1 < diag.size() && diag[i + 1] == '[')
+        {
+            size_t end = diag.find('m', i);
+            i = end == std::string::npos ? diag.size() : end + 1;
+            continue;
+        }
+        plain += diag[i++];
+    }
+    EXPECT_NE(plain.find("x.v = 5;"), std::string::npos)
+        << "the diagnostic must quote the module's own source line, got:\n"
+        << plain;
 }
 
 TEST_F(RuntimeTest, ModuleCrossReference)

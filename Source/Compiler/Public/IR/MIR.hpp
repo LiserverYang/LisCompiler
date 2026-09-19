@@ -345,6 +345,12 @@ struct MIRFunction
     /// function names its own file. Context::filePath is the main file by the
     /// time the later passes run. Empty → fall back to Context::filePath.
     std::string sourceFilePath;
+
+    /// Source TEXT of that file, when it is a MODULE file cached in
+    /// Context::fileContents (the main file lives in Context::fileValue). The
+    /// storage is stable, so a diagnostic can print the offending source LINE
+    /// instead of a line from the main file. Null → use Context::fileValue.
+    const std::string *sourceText = nullptr;
 };
 
 struct MIRGlobal

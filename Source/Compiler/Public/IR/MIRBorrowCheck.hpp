@@ -30,10 +30,10 @@
  * and the runtime suite are its oracle: a missed OR spurious diagnostic fails a
  * test.
  *
- * Diagnostics name the ITEM's source file (MIRFunction::sourceFilePath, stamped
- * by MIRBuilder from Context::stmtAttributions), like the HIR analyzer; the
- * source TEXT still comes from Context::fileValue, which is the main file —
- * HIRSemanticAnalyzer has the same limitation.
+ * Diagnostics name the ITEM's source file AND quote its source line
+ * (MIRFunction::sourceFilePath / ::sourceText, stamped by MIRBuilder from
+ * Context::stmtAttributions and Context::fileContents), so an error inside a
+ * stdlib or user module is reported against that module.
  */
 #pragma once
 
