@@ -927,13 +927,76 @@ TEST_F(BorrowCheckerTest, ArrayElementSharedBorrowOk)
     expectOk("fn main() { let a = [1, 2, 3]; let r = &a[1]; let t = r; ret 0; }");
 }
 
-TEST_F(BorrowCheckerTest, ArrayElementMutBorrowsConflict)
+TEST_F(BorrowCheckerTest, ArrayElementMutBorrowsOfDisjointIndicesOk)
 {
-    // `&mut a[i]` borrows the whole array root `a` (index is a `[*]`
-    // projection), so two element mut borrows conflict even on distinct indices.
-    expectError("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
-                " let t0 = r0; }",
+    // A CONSTANT index is part of the place now (`a[0]` vs `a[1]`), so two
+    // element borrows of different elements are disjoint and may both be live.
+    // Every index used to collapse to the wildcard `[*]`, which made these
+    // conflict even though they cannot alias (Rust accepts this too).
+    expectOk("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
+             " let t0 = r0; let t1 = r1; ret 0; }");
+}
+
+TEST_F(BorrowCheckerTest, ArrayDynamicIndexStaysConservative)
+{
+    // An index the compiler cannot evaluate keeps the wildcard: it may be ANY
+    // element, so it still conflicts with a borrow of a known one.
+    expectError("fn main() { let mut a = [1, 2, 3]; let i = 1; let r0 = &mut a[0]; let r1 = &mut a[i];"
+                " let t0 = r0; let t1 = r1; ret 0; }",
         "borrowed as mutable");
+}
+
+TEST_F(BorrowCheckerTest, WholeArrayMutBorrowBlocksAnyElement)
+{
+    expectError("fn main() { let mut a = [1, 2, 3]; let r = &mut a; let q = &mut a[1]; let t = r; }",
+        "borrowed as mutable");
+}
+
+// ── deref-derived borrows: the alias table ─────────────────────────────────────
+// `*r` (with `r = &mut x`) IS the place `x`, and `&mut *r` is a REBORROW of it.
+// Before place resolution a borrow taken through a dereference registered
+// nothing at all: two `&mut *r` on the same reference were accepted while both
+// wrote through (Rust rejects the second with E0499).
+
+TEST_F(BorrowCheckerTest, ReborrowThroughDerefIsAllowed)
+{
+    expectOk("fn main() { let mut x = 1; let r = &mut x; let s = &mut *r; *s = 5; ret x; }");
+}
+
+TEST_F(BorrowCheckerTest, WriteThroughOwnDerefIsAllowed)
+{
+    // Writing through your own exclusive borrow is what having one is for.
+    expectOk("fn main() { let mut x = 1; let r = &mut x; *r = 9; ret x; }");
+}
+
+TEST_F(BorrowCheckerTest, SecondReborrowWhileTheFirstIsLiveRejected)
+{
+    expectError("fn main() { let mut x = 1; let r = &mut x; let s = &mut *r; let t = &mut *r;"
+                " *s = 5; *t = 6; ret x; }",
+        "borrowed as mutable");
+}
+
+TEST_F(BorrowCheckerTest, ReborrowEndsAtTheLastUseOfItsHolder)
+{
+    // NLL applies to a reborrow like to any promoted borrow: after `*s = 5` the
+    // reborrow is dead, so reading the referent through r is fine again.
+    expectOk("fn main() { let mut x = 1; let r = &mut x; let s = &mut *r; *s = 5; let v = *r; ret v; }");
+}
+
+TEST_F(BorrowCheckerTest, ReadThroughDerefWhileTheReborrowIsLiveRejected)
+{
+    // Reading `*r` USES r, and r is frozen while the reborrow lives.
+    expectError("fn main() { let mut x = 1; let r = &mut x; let s = &mut *r; let v = *r; *s = v; ret x; }",
+        "borrowed");
+}
+
+TEST_F(BorrowCheckerTest, DerefResolvesToTheOriginalPlace)
+{
+    // The reference is resolved through the alias table, not treated as an opaque
+    // key: a borrow of `x` itself conflicts with a reborrow through `r`.
+    expectError("fn main() { let mut x = 1; let r = &mut x; let s = &mut *r; let q = &mut x;"
+                " *s = 5; let t = q; ret 0; }",
+        "already borrowed");
 }
 
 TEST_F(BorrowCheckerTest, ArraySameElementMutBorrowConflict)
@@ -1640,9 +1703,11 @@ TEST_F(BorrowCheckerTest, TempBorrowOfLiteral)
 
 TEST_F(BorrowCheckerTest, MutBorrowOfArrayElementThenOtherElement)
 {
-    expectError("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
-                " let t = r0; }",
-        "borrowed");
+    // Distinct CONSTANT indices are disjoint places (2026-09-19): the second
+    // borrow no longer conflicts. Writing through the first element while the
+    // second is borrowed is likewise fine.
+    expectOk("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
+             " *r0 = 7; *r1 = 8; let t = r0; *t = 9; ret 0; }");
 }
 
 TEST_F(BorrowCheckerTest, ParamMoveThenUseOther)

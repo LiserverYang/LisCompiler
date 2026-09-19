@@ -121,8 +121,53 @@ bool isUninferredGenericDefinition(const std::shared_ptr<Type> &expected, const 
     return ce->getGenericArgs().size() != ca->getGenericArgs().size();
 }
 
-/// Decompose a member-access chain (p.a.b) into the root variable name and the
-/// field path ["a","b"]. Returns false if `expr` is not a simple chain.
+/// Path segment for an index that is NOT a compile-time constant. It denotes
+/// "some element", so it overlaps every other index segment (conservative, and
+/// the only sound answer without value tracking).
+constexpr const char *kIndexWildcard = "[*]";
+
+/// Path segment marking a DEREF of the place built so far (`*p`, `(*p).a`).
+/// `*p` for a reference whose referent is unknown (a parameter, or any binding
+/// without an alias entry) stays keyed by this segment: all `*p` of the same
+/// expression shape denote the same memory, which is enough to catch two
+/// borrows derived from the same reference.
+constexpr const char *kDeref = "*";
+
+/// `[7]` for a constant index, `[*]` for anything else.
+std::string indexSegment(HIRExpr *index)
+{
+    if (auto *lit = dynamic_cast<HIRLiteral *>(index))
+        if (lit->kind == HIRLiteral::Kind::Int && !lit->overflowed)
+            return "[" + std::to_string(std::get<int64_t>(lit->value)) + "]";
+    return kIndexWildcard;
+}
+
+/// True when two path SEGMENTS may denote the same memory.
+///  - two field names overlap only when equal;
+///  - two index segments overlap when equal OR when either is the wildcard
+///    (`[*]` means "an element we cannot pin down");
+///  - a field never overlaps an index (`a.f` vs `a[0]`);
+///  - the deref marker of an unresolved reference overlaps only itself.
+bool pathSegmentOverlaps(const std::string &a, const std::string &b)
+{
+    if (a == b) return true;
+    if (a == kDeref || b == kDeref) return false;
+    bool aIndex = a.size() >= 2 && a.front() == '[';
+    bool bIndex = b.size() >= 2 && b.front() == '[';
+    if (aIndex != bIndex) return false;
+    if (!aIndex) return false; // two different field names
+    return a == kIndexWildcard || b == kIndexWildcard;
+}
+
+/// Decompose a member-access / index / deref chain into the root variable name
+/// and its place path. The path segments are: a field name ("a"), a constant
+/// index ("[0]"), the unknown-index wildcard ("[*]") or the deref marker ("*").
+///
+/// SYNTAX ONLY — `*r` comes back as (root "r", ["*"]). Conflict detection uses
+/// resolvePlace(), which rewrites that through the alias table so `*r` denotes
+/// the place `r` was borrowed from (this is what makes `&mut *r` and `&mut x`
+/// conflict). Move/ownership bookkeeping deliberately keeps the syntactic form:
+/// `movedFields` is keyed by the BINDING, not by what a reference points at.
 bool extractRootAndPath(HIRExpr *expr, std::string &root, std::vector<std::string> &path)
 {
     if (auto *ma = dynamic_cast<HIRMemberAccess *>(expr))
@@ -133,12 +178,14 @@ bool extractRootAndPath(HIRExpr *expr, std::string &root, std::vector<std::strin
     }
     if (auto *ia = dynamic_cast<HIRIndexAccess *>(expr))
     {
-        // Any index maps to the wildcard segment "[*]": a[0] and a[1] both become
-        // path ["[*]"] (conservative — disjoint-element borrows are rejected, but
-        // the checker stays sound; a whole-array borrow `&a` still overlaps every
-        // element). Refined per-index tracking is a future improvement.
         if (!extractRootAndPath(ia->object.get(), root, path)) return false;
-        path.push_back("[*]");
+        path.push_back(indexSegment(ia->index.get()));
+        return true;
+    }
+    if (auto *d = dynamic_cast<HIRDeref *>(expr))
+    {
+        if (!extractRootAndPath(d->operand.get(), root, path)) return false;
+        path.push_back(kDeref);
         return true;
     }
     if (auto *nr = dynamic_cast<HIRNameRef *>(expr))
@@ -152,11 +199,28 @@ bool extractRootAndPath(HIRExpr *expr, std::string &root, std::vector<std::strin
 
 std::string joinPath(const std::vector<std::string> &path)
 {
+    // A field is dot-separated (`p.a`), an index segment is appended (`a[0]`),
+    // so diagnostics read like the source.
     std::string s;
     for (size_t i = 0; i < path.size(); ++i)
     {
-        if (i) s += ".";
+        if (i && path[i].front() != '[') s += ".";
         s += path[i];
+    }
+    return s;
+}
+/// Render a place for a diagnostic: `a[0].f`, `*r`, `*r.a`, `a[*]`.
+std::string placeName(const std::string &root, const std::vector<std::string> &path)
+{
+    std::string s = root;
+    for (const auto &seg : path)
+    {
+        if (seg == kDeref)
+            s = "*" + s;
+        else if (!seg.empty() && seg.front() == '[')
+            s += seg;
+        else
+            s += "." + seg;
     }
     return s;
 }
@@ -2240,8 +2304,14 @@ void HIRSemanticAnalyzer::visit(HIRBlock *node)
 bool HIRSemanticAnalyzer::pathsOverlap(const std::vector<std::string> &a,
     const std::vector<std::string> &b)
 {
+    // One place is a prefix of the other (`a` overlaps `a[0]`, `a[0]` overlaps
+    // `a[0].f`). Each shared segment is compared by pathSegmentOverlaps, so the
+    // index wildcard `[*]` still matches a concrete `[0]`, while two DIFFERENT
+    // constant indices are correctly disjoint.
     size_t n = std::min(a.size(), b.size());
-    return std::equal(a.begin(), a.begin() + n, b.begin());
+    for (size_t i = 0; i < n; ++i)
+        if (!pathSegmentOverlaps(a[i], b[i])) return false;
+    return true;
 }
 
 void HIRSemanticAnalyzer::borrowConflictInfo(std::string &msg, size_t &errorId, const std::string &name, BorrowUseKind kind)
@@ -2274,15 +2344,22 @@ void HIRSemanticAnalyzer::borrowConflictInfo(std::string &msg, size_t &errorId, 
 bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
     const std::vector<std::string> &path,
     BorrowUseKind kind,
-    HIRNode &errNode)
+    HIRNode &errNode,
+    const std::vector<std::string> *skipHolders)
 {
     if (activeBorrows_.empty()) return true;
     bool ok = true;
-    std::string name = root + (path.empty() ? "" : "." + joinPath(path));
+    std::string name = placeName(root, path);
 
     for (const auto &b : activeBorrows_)
     {
         if (b.root != root || !pathsOverlap(b.path, path)) continue;
+        // A reference is never blocked by the borrows of its own derivation
+        // chain: the place it points at is exactly what those borrows granted it
+        // (see exemptionChain).
+        if (skipHolders && !skipHolders->empty()
+            && std::find(skipHolders->begin(), skipHolders->end(), b.holderName) != skipHolders->end())
+            continue;
 
         bool conflict = false;
         switch (kind)
@@ -2317,7 +2394,8 @@ bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
             if (b.isPromoted && kind != BorrowUseKind::Move)
             {
                 pendingBorrowConflicts_.push_back(
-                    PendingConflict{root, path, kind, stmtOrdinal_, errNode.position, errNode.length});
+                    PendingConflict{root, path, kind, stmtOrdinal_, errNode.position, errNode.length,
+                        skipHolders ? *skipHolders : std::vector<std::string>{}});
             }
             else
             {
@@ -2354,6 +2432,10 @@ void HIRSemanticAnalyzer::resolvePromotedBorrows()
         for (const auto &b : promotedBorrows_)
         {
             if (b.root != pc.root || !pathsOverlap(b.path, pc.path)) continue;
+            // Same exemption the inline check applied (see checkBorrowUse).
+            if (!pc.skipHolders.empty()
+                && std::find(pc.skipHolders.begin(), pc.skipHolders.end(), b.holderName) != pc.skipHolders.end())
+                continue;
 
             // The borrow is live at the conflicting use iff it was created at or
             // before that statement AND its holder is still possibly used there.
@@ -2368,7 +2450,7 @@ void HIRSemanticAnalyzer::resolvePromotedBorrows()
 
             if (live)
             {
-                std::string name = pc.root + (pc.path.empty() ? "" : "." + joinPath(pc.path));
+                std::string name = placeName(pc.root, pc.path);
                 std::string msg;
                 size_t errId = E_SemanticError;
                 borrowConflictInfo(msg, errId, name, pc.kind);
@@ -2385,11 +2467,126 @@ bool HIRSemanticAnalyzer::registerBorrow(const std::string &root,
     bool isMut,
     bool isPromoted,
     HIRNode &errNode,
-    bool isTwoPhase)
+    bool isTwoPhase,
+    const std::vector<std::string> *skipHolders)
 {
-    if (!checkBorrowUse(root, path, isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode))
+    if (!checkBorrowUse(root, path, isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode, skipHolders))
         return false;
     activeBorrows_.push_back(Borrow{root, "", path, isMut, isPromoted, 0, errNode.position, isTwoPhase});
+    return true;
+}
+
+void HIRSemanticAnalyzer::recordAlias(const std::string &holder, HIRExpr *init)
+{
+    if (!init)
+    {
+        aliasOf_.erase(holder);
+        return;
+    }
+
+    // `let r = &mut <place>;` — remember the referent, resolved through any
+    // alias in between, so a chain (`let a = &mut x; let b = &mut *a;`) still
+    // points at `x`.
+    if (auto *ref = dynamic_cast<HIRRef *>(init))
+    {
+        std::string root;
+        std::vector<std::string> path;
+        if (resolvePlace(ref->expr.get(), root, path))
+        {
+            aliasOf_[holder] = {std::move(root), std::move(path)};
+
+            // `&mut *r` also REBORROWS through r: remember that, because an
+            // access through the new reference has to be exempt from r's own
+            // borrow of the place as well (see exemptionChain).
+            std::string hroot;
+            std::vector<std::string> hpath;
+            if (derefHolderOf(ref->expr.get(), hroot, hpath) && hpath.empty())
+                aliasParent_[holder] = std::move(hroot);
+            else
+                aliasParent_.erase(holder);
+            return;
+        }
+    }
+
+    // `let q = r;` / `q = r;` — a reference moved (or shared-copied) from another
+    // binding keeps the same referent.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(init))
+    {
+        auto it = aliasOf_.find(nr->name);
+        if (it != aliasOf_.end())
+        {
+            aliasOf_[holder] = it->second;
+            // The copy takes over the source's role; the walk in exemptionChain
+            // follows the source's own chain from here.
+            aliasParent_[holder] = nr->name;
+            return;
+        }
+    }
+
+    // Anything else (`r = other_ref_param;`, a conditional, ...) leaves the
+    // referent unknown: drop the entries so a stale target is never used.
+    aliasOf_.erase(holder);
+    aliasParent_.erase(holder);
+}
+
+std::vector<std::string> HIRSemanticAnalyzer::exemptionChain(const std::string &holder)
+{
+    std::vector<std::string> chain;
+    if (holder.empty()) return chain;
+    chain.push_back(holder);
+
+    std::string cur = holder;
+    for (size_t guard = 0; guard < 32; ++guard)
+    {
+        auto it = aliasParent_.find(cur);
+        if (it == aliasParent_.end() || it->second.empty()) break;
+        cur = it->second;
+        if (std::find(chain.begin(), chain.end(), cur) != chain.end()) break; // cycle guard
+        chain.push_back(cur);
+    }
+    return chain;
+}
+
+bool HIRSemanticAnalyzer::derefHolderOf(HIRExpr *expr,
+    std::string &root,
+    std::vector<std::string> &path)
+{
+    std::string sroot;
+    std::vector<std::string> spath;
+    if (!extractRootAndPath(expr, sroot, spath)) return false;
+
+    for (size_t i = 0; i < spath.size(); ++i)
+        if (spath[i] == kDeref)
+        {
+            root = std::move(sroot);
+            path.assign(spath.begin(), spath.begin() + i);
+            return true;
+        }
+    return false;
+}
+
+bool HIRSemanticAnalyzer::resolvePlace(HIRExpr *expr,
+    std::string &root,
+    std::vector<std::string> &path)
+{
+    if (!extractRootAndPath(expr, root, path)) return false;
+
+    // Rewrite a leading deref into the place the holder was borrowed from:
+    // `*r` (with `r = &mut x`) IS `x`, and `(*r).a` is `x.a`. A reference with no
+    // known referent (a parameter, or a binding whose value was overwritten)
+    // keeps the deref segment, which still gives every `*p` of the same shape one
+    // shared identity.
+    for (size_t guard = 0; guard < 32; ++guard)
+    {
+        if (path.empty() || path.front() != kDeref) break;
+        auto it = aliasOf_.find(root);
+        if (it == aliasOf_.end()) break;
+
+        std::vector<std::string> resolved = it->second.second;
+        resolved.insert(resolved.end(), path.begin() + 1, path.end());
+        root = it->second.first;
+        path = std::move(resolved);
+    }
     return true;
 }
 
@@ -2917,7 +3114,7 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
     // with NLL liveness).
     std::string root;
     std::vector<std::string> path;
-    if (extractRootAndPath(source, root, path)
+    if (resolvePlace(source, root, path)
         && source->type && !source->type->isCopyable())
         checkBorrowUse(root, path, BorrowUseKind::Move, errNode);
 
@@ -3071,14 +3268,25 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         // Borrow promotion: `let r = &p` binds the borrow to the variable r, so
         // it survives the statement. Under NLL its liveness runs to r's last use;
         // record the holder + creation ordinal and keep a function-scoped copy.
-        if (dynamic_cast<HIRRef *>(node->init.value().get()) && !activeBorrows_.empty())
+        if (auto *ref = dynamic_cast<HIRRef *>(node->init.value().get()))
         {
-            activeBorrows_.back().isPromoted = true;
-            activeBorrows_.back().holderName = node->name;
-            activeBorrows_.back().createStmt = stmtOrdinal_;
-            promotedBorrows_.push_back(activeBorrows_.back());
+            // Everything the initialiser registered, not just the last entry: a
+            // borrow through a deref also freezes the pointer it went through
+            // (HIRRef::borrowMark).
+            for (size_t i = ref->borrowMark; i < activeBorrows_.size(); ++i)
+            {
+                activeBorrows_[i].isPromoted = true;
+                activeBorrows_[i].holderName = node->name;
+                activeBorrows_[i].createStmt = stmtOrdinal_;
+                promotedBorrows_.push_back(activeBorrows_[i]);
+            }
         }
     }
+
+    // Keep the alias table in step with this binding: `let r = &mut x;` records
+    // r -> x (so `*r` denotes `x`), `let q = r;` copies the entry, and anything
+    // else leaves the referent unknown (see recordAlias).
+    recordAlias(node->name, node->init.has_value() ? node->init.value().get() : nullptr);
 
     if (node->hasExplicitType)
     {
@@ -3193,10 +3401,21 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     // Borrow-check: writing to a borrowed place is forbidden. A write THROUGH a
     // reference (`r.v = 5` where r = &mut x) roots on `r`, which is not itself
     // a borrowed binding, so it passes here and is governed by mutability below.
+    // Writing through a dereference uses the POINTER as well: `*r = v` needs r
+    // itself to be free, and the referent check exempts r's own borrow — writing
+    // through your own exclusive borrow is exactly what having one is for.
     std::string targetRoot;
     std::vector<std::string> targetPath;
-    if (extractRootAndPath(node->target.get(), targetRoot, targetPath))
-        checkBorrowUse(targetRoot, targetPath, BorrowUseKind::Write, *node);
+    std::string holderRoot;
+    std::vector<std::string> holderPath;
+    bool viaHolder = derefHolderOf(node->target.get(), holderRoot, holderPath);
+    if (viaHolder)
+        checkBorrowUse(holderRoot, holderPath, BorrowUseKind::Write, *node);
+    std::vector<std::string> exempt = viaHolder ? exemptionChain(holderRoot)
+                                                : std::vector<std::string>{};
+    if (resolvePlace(node->target.get(), targetRoot, targetPath))
+        checkBorrowUse(targetRoot, targetPath, BorrowUseKind::Write, *node,
+            exempt.empty() ? nullptr : &exempt);
 
     // A never-valued RHS is compatible with any target type (bottom), like a
     // never-valued initialiser or argument.
@@ -3338,6 +3557,10 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
             // A whole-binding write also satisfies definite assignment.
             tsym->initialized = true;
         }
+
+        // A reference binding may now point somewhere else (`r = &mut y;`), or
+        // nowhere we can name — keep the alias table honest either way.
+        recordAlias(targetRef->name, node->value.get());
     }
     else if (auto *targetMa = dynamic_cast<HIRMemberAccess *>(node->target.get()))
     {
@@ -5574,13 +5797,13 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
         log(*node, "struct '" + ct->getName() + "' has no field '" + node->memberName + "'.");
 
     // Borrow-check: a Copy field read conflicts with active &mut borrows. The
-    // access root is the object's root binding (a reference root means the read
-    // goes THROUGH a borrow, which is allowed — the root name differs from any
-    // borrowed binding). Non-Copy field moves are checked at consuming sites.
+    // access is resolved to its PLACE — alias-resolved, so a read through a
+    // reference (`*r`, `(*r).a`) is checked against the referent, not against the
+    // reference binding. Non-Copy field moves are checked at consuming sites.
     std::string root;
     std::vector<std::string> path;
     if (node->type && node->type->isCopyable()
-        && extractRootAndPath(node, root, path))
+        && resolvePlace(node, root, path))
         checkBorrowUse(root, path, BorrowUseKind::Read, *node);
 }
 
@@ -5653,12 +5876,14 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
     node->type = elemTy;
 
     // A Copy element read conflicts with active &mut borrows (same rule as a
-    // Copy field read in visit(HIRMemberAccess)); the path carries the "[*]"
-    // index segment from extractRootAndPath.
+    // Copy field read in visit(HIRMemberAccess)). The path carries a CONSTANT
+    // index segment ("[0]") when the index is a literal — so a borrow of `a[0]`
+    // does not block `a[1]` — and the wildcard "[*]" when it is not, which
+    // overlaps every element (sound: the value is not known).
     std::string root;
     std::vector<std::string> path;
     if (node->type && node->type->isCopyable()
-        && extractRootAndPath(node, root, path))
+        && resolvePlace(node, root, path))
         checkBorrowUse(root, path, BorrowUseKind::Read, *node);
 }
 
@@ -5675,6 +5900,31 @@ void HIRSemanticAnalyzer::visit(HIRDeref *node)
     if (auto ref = std::dynamic_pointer_cast<ReferenceType>(node->operand->type))
     {
         node->type = ref->getBaseType();
+
+        // A Copy read THROUGH the deref conflicts with a live exclusive borrow of
+        // the same place (`let s = &mut *r; let v = *r;` — Rust rejects this with
+        // E0503 while `s` is live). The WRITE case is handled by visit(HIRAssign)
+        // with the same resolved place, and a non-Copy read is E3017 in
+        // handleMoveSource.
+        if (!inAssignTarget_ && node->type->isCopyable())
+        {
+            // Reading `*r` USES r and then reads the referent: both are checked,
+            // and the referent check exempts r's own borrow — the very borrow
+            // that makes the read legal.
+            std::string holderRoot;
+            std::vector<std::string> holderPath;
+            bool viaHolder = derefHolderOf(node, holderRoot, holderPath);
+            if (viaHolder)
+                checkBorrowUse(holderRoot, holderPath, BorrowUseKind::Read, *node);
+
+            std::vector<std::string> exempt = viaHolder ? exemptionChain(holderRoot)
+                                                        : std::vector<std::string>{};
+            std::string root;
+            std::vector<std::string> path;
+            if (resolvePlace(node, root, path))
+                checkBorrowUse(root, path, BorrowUseKind::Read, *node,
+                    exempt.empty() ? nullptr : &exempt);
+        }
         return;
     }
 
@@ -5973,15 +6223,42 @@ void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRRef *node)
 {
+    // Everything registered from here on belongs to this `&` expression, so a
+    // var-decl initialiser can promote the whole group (see HIRRef::borrowMark).
+    node->borrowMark = activeBorrows_.size();
+
     analyzeExpr(node->expr.get());
     if (node->expr->type)
         node->type = context->typeContext->getReference(node->expr->type, node->isMutable);
 
     // Borrow-check: `&p` / `&mut p` borrows the place p. Register the borrow
     // after checking aliasing and that p hasn't been moved.
+    //
+    // The place is ALIAS-RESOLVED, which is what makes a borrow taken through a
+    // dereference join the same accounting as the original: `&mut *r` (with
+    // `r = &mut x`) borrows `x`, so a second `&mut *r`, a `&mut x`, or a plain
+    // `*r = v` in between are all conflicts. Before this the deref form was not
+    // tracked at all — two live `&mut *r` were accepted.
+    // A borrow THROUGH a dereference (`&mut *r`) has two halves: the POINTER has
+    // to be usable right now, and the referent is what gets borrowed. The first
+    // half is what freezes the parent — a second `&mut *r` while the first
+    // reborrow is still live is rejected here (Rust's E0499) — and the second
+    // joins the referent place, so `&mut x`, `*r = v` or a plain read of `x`
+    // conflict with it.
+    std::string holderRoot;
+    std::vector<std::string> holderPath;
+    bool viaHolder = derefHolderOf(node->expr.get(), holderRoot, holderPath);
+    if (viaHolder)
+    {
+        // Registering the FREEZE is also the "is the pointer usable right now"
+        // check — registerBorrow checks the same place with the same kind first,
+        // so the diagnostic is reported once and only when the freeze is taken.
+        registerBorrow(holderRoot, holderPath, node->isMutable, /*isPromoted=*/false, *node);
+    }
+
     std::string root;
     std::vector<std::string> path;
-    if (extractRootAndPath(node->expr.get(), root, path))
+    if (resolvePlace(node->expr.get(), root, path))
     {
         if (auto *sym = SymbolTable::getInstance().lookupSymbol(root))
         {
@@ -6003,7 +6280,10 @@ void HIRSemanticAnalyzer::visit(HIRRef *node)
                 }
             }
             // Temporary borrow by default; `let r = &p` promotes it (visit(HIRVarDecl)).
-            registerBorrow(root, path, node->isMutable, /*isPromoted=*/false, *node);
+            std::vector<std::string> exempt = viaHolder ? exemptionChain(holderRoot)
+                                                        : std::vector<std::string>{};
+            registerBorrow(root, path, node->isMutable, /*isPromoted=*/false, *node,
+                /*isTwoPhase=*/false, exempt.empty() ? nullptr : &exempt);
         }
     }
 }

@@ -198,6 +198,12 @@ private:
         size_t ordinal;
         SourcePosition pos;
         size_t length;
+        /// The holders exempted by the check that produced this conflict
+        /// (checkBorrowUse's skipHolders) — the confirming pass must apply the
+        /// SAME exemption, or an access through a reference would be blocked by
+        /// that reference's own borrow of the place (and by the borrow it was
+        /// reborrowed through).
+        std::vector<std::string> skipHolders;
     };
     std::vector<PendingConflict> pendingBorrowConflicts_;
 
@@ -216,14 +222,62 @@ private:
     /// `isTwoPhase` marks the reservation described on Borrow::isTwoPhase: a
     /// borrow taken for a call (receiver / reference argument) that permits
     /// reads of the same place until the statement ends.
-    bool registerBorrow(const std::string &root, const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode, bool isTwoPhase = false);
+    bool registerBorrow(const std::string &root, const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode, bool isTwoPhase = false, const std::vector<std::string> *skipHolders = nullptr);
 
     /// Check a place use against active borrows; logs a conflict and returns
     /// false if the access is forbidden.
-    bool checkBorrowUse(const std::string &root, const std::vector<std::string> &path, BorrowUseKind kind, HIRNode &errNode);
+    /** `skipHolder` exempts ONE existing borrow from the check: the borrow that
+     *  the SAME reference holds on its own referent. `*r = v` writes through r,
+     *  which is legal exactly because r's exclusive borrow is what grants the
+     *  write, and `&mut *r` reborrows the place r already owns. Without the
+     *  exemption a reference could never use what it borrows. */
+    bool checkBorrowUse(const std::string &root, const std::vector<std::string> &path, BorrowUseKind kind, HIRNode &errNode, const std::vector<std::string> *skipHolders = nullptr);
+
+    /** The HOLDER place of a place expression that goes through a deref:
+     *  `*r` / `(*r).a` / `a[0].*p` → the place of the pointer. Using `*r` USES
+     *  `r`, so the holder must be free right now, and that is also what freezes
+     *  the parent borrow while a reborrow lives. False when there is no deref. */
+    bool derefHolderOf(HIRExpr *expr, std::string &root, std::vector<std::string> &path);
 
     /// Remove non-promoted (temporary) borrows created after `marker`.
     void endTemporaryBorrowsSince(size_t marker);
+
+    /**
+     * `holder -> the place it was borrowed FROM` (`let r = &mut x;` records
+     * `r -> x`). Conflict detection resolves `*r` through this table, so `&mut *r`
+     * and `&mut x` denote the same place. Without it, borrows taken THROUGH a
+     * dereference were not tracked at all: two live `&mut *r` on the same
+     * reference were accepted (measured), while Rust rejects the second with
+     * E0499.
+     *
+     * The entry is refreshed by `let r = &mut y;`, copied by `let q = r;`, and
+     * erased whenever the binding is assigned something that is not a `&`
+     * expression — the referent is then unknown, and `*r` falls back to an opaque
+     * deref key (`(r, ["*"])`), which still catches two borrows derived from the
+     * same reference but cannot see through to the original place.
+     */
+    std::unordered_map<std::string, std::pair<std::string, std::vector<std::string>>> aliasOf_;
+
+    /** `holder -> the holder it was REBORROWED through` (`let s = &mut *r;` records
+     *  s -> r). Together with aliasOf_ this gives the derivation chain of a
+     *  reference, which is what an access through it must exempt: `*s = v` is
+     *  legal even though BOTH s and r hold a borrow of the place — s's borrow is
+     *  the grant, and r's is frozen behind it (Rust's rule for reborrows). Every
+     *  other access to the place still sees both. */
+    std::unordered_map<std::string, std::string> aliasParent_;
+
+    /// `holder` and every reference it was reborrowed through, nearest first.
+    /// Empty for an unknown holder.
+    std::vector<std::string> exemptionChain(const std::string &holder);
+
+    /// Record (or erase) `holder`s referent from its initialiser/assigned value.
+    void recordAlias(const std::string &holder, HIRExpr *init);
+
+    /** The place a use refers to, for CONFLICT DETECTION: extractRootAndPath()
+     *  plus alias resolution of leading derefs. Move/ownership bookkeeping keeps
+     *  the syntactic form (`movedFields` is keyed by the binding, not by what a
+     *  reference points at). Returns false when `expr` is not a place. */
+    bool resolvePlace(HIRExpr *expr, std::string &root, std::vector<std::string> &path);
 
     /// True if two place paths overlap (one is a prefix of the other).
     static bool pathsOverlap(const std::vector<std::string> &a, const std::vector<std::string> &b);
