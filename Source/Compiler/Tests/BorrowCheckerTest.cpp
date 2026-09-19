@@ -32,6 +32,8 @@
 #include "Core/Context.hpp"
 #include "IR/HIRBuilder.hpp"
 #include "IR/HIRSemanticAnalyzer.hpp"
+#include "IR/MIRBorrowCheck.hpp"
+#include "IR/MIRBuilder.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Logger/Logger.hpp"
 #include "Parser/Parser.hpp"
@@ -129,6 +131,19 @@ protected:
         captureStdout();
         HIRSemanticAnalyzer sema(context);
         sema.visit(context->hirProgram.get());
+        // The MIR stages too: with LIS_BORROW_CHECK=mir the borrow / move /
+        // definite-assignment checks run on MIR, and this suite is the oracle
+        // for that implementation.
+        if (Logger::GetErrorCount() == 0)
+        {
+            MIRBuilder mir(context);
+            context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
+            if (Logger::GetErrorCount() == 0)
+            {
+                MIRBorrowCheck borrowCheck(context);
+                borrowCheck.run();
+            }
+        }
         restoreStdout();
         std::string out = readCaptured();
         return out;

@@ -43,6 +43,22 @@ private:
      */
     bool suppressTypeErrors_ = false;
 
+    /**
+     * `LIS_BORROW_CHECK=mir` (2026-09-19): the borrow / move / definite-
+     * assignment / dangling-return checks are DISABLED here and are produced by
+     * MIRBorrowCheck on the MIR CFG instead (they are CFG DATAFLOW — live ranges
+     * and per-point state — which the HIR tree can only approximate with
+     * statement ordinals).
+     *
+     * What STAYS in this pass: type checking, mutability (E3004/E4006 — a
+     * property of the place, no dataflow involved) and "a non-Copy binding needs
+     * an initializer" (E3012 — a syntax rule).
+     *
+     * The flag exists so the existing test corpus acts as a differential oracle
+     * for the MIR implementation while it is being written; the default is `hir`.
+     */
+    bool mirBorrowCheck_ = false;
+
     /** Loop nesting depth, for validating break/continue placement. */
     size_t loopDepth_ = 0;
 
@@ -591,6 +607,10 @@ public:
     HIRSemanticAnalyzer(std::shared_ptr<Context> cnt)
     {
         context = cnt;
+        // `LIS_BORROW_CHECK=mir` hands the borrow/move/init/dangling checks to
+        // MIRBorrowCheck (see the flag's comment).
+        const char *checker = std::getenv("LIS_BORROW_CHECK");
+        mirBorrowCheck_ = (checker != nullptr && std::string(checker) == "mir");
         SymbolTable::getInstance().initGlobalScope();
     }
 

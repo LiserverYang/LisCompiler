@@ -2404,6 +2404,8 @@ bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
     HIRNode &errNode,
     const std::vector<std::string> *skipHolders)
 {
+    // In `mir` mode the borrow checks are MIRBorrowCheck's job (see the flag).
+    if (mirBorrowCheck_) return true;
     if (activeBorrows_.empty()) return true;
     bool ok = true;
     std::string name = placeName(root, path);
@@ -2484,6 +2486,11 @@ void HIRSemanticAnalyzer::logAtPosition(const SourcePosition &pos, size_t length
 
 void HIRSemanticAnalyzer::resolvePromotedBorrows()
 {
+    if (mirBorrowCheck_)
+    {
+        pendingBorrowConflicts_.clear();
+        return;
+    }
     for (const auto &pc : pendingBorrowConflicts_)
     {
         for (const auto &b : promotedBorrows_)
@@ -2527,6 +2534,7 @@ bool HIRSemanticAnalyzer::registerBorrow(const std::string &root,
     bool isTwoPhase,
     const std::vector<std::string> *skipHolders)
 {
+    if (mirBorrowCheck_) return true; // MIRBorrowCheck owns this in `mir` mode
     if (!checkBorrowUse(root, path, isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode, skipHolders))
         return false;
     activeBorrows_.push_back(Borrow{root, "", path, isMut, isPromoted, 0, errNode.position, isTwoPhase});
@@ -2950,6 +2958,7 @@ void HIRSemanticAnalyzer::updateAssignOrigins(HIRAssign *node)
 
 void HIRSemanticAnalyzer::checkDanglingReturn(HIRReturn *node)
 {
+    if (mirBorrowCheck_) return; // MIRBorrowCheck checks the returned place on MIR
     if (!node->value.has_value()) return;
     auto *value = node->value.value().get();
     auto declared = functionInfo.declaredReturnType;
@@ -2985,6 +2994,7 @@ void HIRSemanticAnalyzer::checkStructReturn(HIRExpr *value,
     const std::shared_ptr<CustomType> &declaredStruct,
     HIRNode &errNode)
 {
+    if (mirBorrowCheck_) return; // MIRBorrowCheck checks the returned place on MIR
     if (!declaredStruct || !structHasRefFields(declaredStruct)) return;
 
     auto logLocal = [&](const std::string &fname)
@@ -3157,6 +3167,9 @@ std::shared_ptr<CustomType> HIRSemanticAnalyzer::dropTypePartiallyMovedBy(HIRExp
 
 void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
 {
+    // The move/ownership rules are re-implemented on the MIR CFG (see the flag).
+    if (mirBorrowCheck_) return;
+
     // A source whose analysis FAILED has no type, so it is not a move of
     // anything: the real error was already reported, and the bookkeeping below
     // would only manufacture follow-on diagnostics. `let x = s.nope;` used to
@@ -4064,7 +4077,7 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
             if (it == preBodyMoves.end()) continue; // declared in the body, not enclosing
             bool nowMoved = sym->state == VarState::Moved || !sym->movedFields.empty();
             bool wasMoved = it->second.first || it->second.second;
-            if (nowMoved && !wasMoved)
+            if (nowMoved && !wasMoved && !mirBorrowCheck_)
                 log(*node, "value '" + name + "' is moved inside this loop without being "
                                               "re-assigned; the next iteration would move it again.",
                     E_UseOfMovedValue);
@@ -4276,6 +4289,9 @@ void HIRSemanticAnalyzer::mergeInitState(InitState &dst, const InitState &other)
 
 void HIRSemanticAnalyzer::checkInitializedUse(HIRExpr *placeExpr, HIRNode &errNode)
 {
+    // Definite assignment is CFG dataflow now: MIRBorrowCheck owns it.
+    if (mirBorrowCheck_) return;
+
     // Unreachable code cannot read anything: after a `ret`/`break`/`continue`, a
     // diverging call, or a branch that never falls through, the definite-
     // assignment state is meaningless. MIRBuilder drops those statements too.
@@ -4390,10 +4406,13 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
     // borrows. Non-Copy uses are moves and are checked at the consuming sites
     // (handleMoveSource). Also close the read-after-move gap in non-consuming
     // positions (e.g. `if x == 0` after `let y = x;`).
-    if (sym->type && sym->type->isCopyable())
-        checkBorrowUse(node->name, {}, BorrowUseKind::Read, *node);
-    if (sym->state == VarState::Moved)
-        log(*node, "use of moved value: '" + node->name + "'", E_UseOfMovedValue);
+    if (!mirBorrowCheck_)
+    {
+        if (sym->type && sym->type->isCopyable())
+            checkBorrowUse(node->name, {}, BorrowUseKind::Read, *node);
+        if (sym->state == VarState::Moved)
+            log(*node, "use of moved value: '" + node->name + "'", E_UseOfMovedValue);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6852,6 +6871,10 @@ void HIRSemanticAnalyzer::visit(HIRRef *node)
     {
         if (auto *sym = SymbolTable::getInstance().lookupSymbol(root))
         {
+            // In `mir` mode the moved-state and the borrow bookkeeping below are
+            // MIRBorrowCheck's job (it sees the same place with a Deref projection).
+            if (mirBorrowCheck_) return;
+
             // A whole-value move poisons every borrow of the root.
             if (sym->state == VarState::Moved)
             {

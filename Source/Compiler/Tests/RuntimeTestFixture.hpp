@@ -46,6 +46,7 @@ extern char *_pgmptr; // full path of the running executable (MinGW CRT)
 #include "IR/HIRBuilder.hpp"
 #include "IR/HIRSemanticAnalyzer.hpp"
 #include "IR/LLVMIRBuilder.hpp"
+#include "IR/MIRBorrowCheck.hpp"
 #include "IR/MIRBuilder.hpp"
 #include "IR/MIRMonomorphization.hpp"
 #include "Lexer/Lexer.hpp"
@@ -251,6 +252,14 @@ protected:
         // kill the whole test process. Mirror the sema handling above.
         context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
         if (Logger::GetErrorCount() > 0) return false;
+        // Borrow / move / definite-assignment checking on MIR: a no-op unless
+        // LIS_BORROW_CHECK=mir selects it (then HIRSemanticAnalyzer above has
+        // skipped its own implementations of the same rules).
+        {
+            MIRBorrowCheck borrowCheck(context);
+            borrowCheck.run();
+            if (Logger::GetErrorCount() > 0) return false;
+        }
         MIRMonomorphization mono(context);
         mono.run();
         LLVMIRBuilder llvm(context, *context->llvmContext, "test.lis");
@@ -342,6 +351,14 @@ protected:
         // kill the whole test process. Mirror the sema handling above.
         context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
         if (Logger::GetErrorCount() > 0) return false;
+        // Borrow / move / definite-assignment checking on MIR: a no-op unless
+        // LIS_BORROW_CHECK=mir selects it (then HIRSemanticAnalyzer above has
+        // skipped its own implementations of the same rules).
+        {
+            MIRBorrowCheck borrowCheck(context);
+            borrowCheck.run();
+            if (Logger::GetErrorCount() > 0) return false;
+        }
         MIRMonomorphization mono(context);
         mono.run();
         LLVMIRBuilder llvm(context, *context->llvmContext, "test.lis");
