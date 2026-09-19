@@ -1020,6 +1020,14 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
         break;
     }
 
+    // Whether the projection that produced `currentTy` was a Deref. MIR appends
+    // a Deref before every Index on a pointer-like base (MIRBuilder's
+    // buildIndexAccess), so after one `currentTy` IS the element type — of ANY
+    // kind (a primitive, a struct, an enum, another pointer, a reference, even an
+    // array). The Index projection must then be pointer arithmetic on
+    // `currentTy*`, not "step into an array value".
+    bool afterDeref = false;
+
     for (const auto &proj : p.projections)
     {
         switch (proj.kind)
@@ -1037,6 +1045,7 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
             ptr = builder_->CreateLoad(
                 toLLVMType(currentTy), ptr, "deref");
             currentTy = innerTy;
+            afterDeref = true;
             break;
         }
         case ProjectionKind::Field:
@@ -1049,11 +1058,25 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
 
             ptr = builder_->CreateStructGEP(st, ptr, idx, proj.field.c_str());
             currentTy = fieldTypeOf(sName, proj.field);
+            afterDeref = false;
             break;
         }
         case ProjectionKind::Index:
         {
-            auto elemTy = getElementType(currentTy);
+            // The element type. An ARRAY is stepped into — its element type,
+            // with the runtime bounds check below (`a[i]`, and `r[i]` for
+            // `r: &[T; N]`, which MIR derefs into the array first).
+            //
+            // EVERYTHING ELSE reached through a Deref is a pointer's pointee:
+            // indexing it is pointer arithmetic on `currentTy*`, so the element
+            // type is `currentTy` whatever it is — a primitive, a struct, an
+            // enum, another pointer. Before this, only a primitive had that
+            // second reading: `*mut String` / `*mut Vec<i32>` (a standard
+            // library container buffer) fell into getElementType's
+            // `llvm_unreachable` and killed the compiler.
+            const bool arrayValue = currentTy->getKind() == Type::Kind::Array;
+            auto elemTy = arrayValue ? getElementType(currentTy)
+                                     : (afterDeref ? currentTy : getElementType(currentTy));
             MIRPlace idxPlace{PlaceBase::Local, proj.localIndex, "_idx", {}, fs.body->locals[proj.localIndex].type};
             llvm::Value *idx = loadPlace(fs, idxPlace);
 
@@ -1063,8 +1086,9 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
             // not an ArrayType) has no length to check and is left unchecked
             // (documented in string.lis). sema already rejected empty/oversized
             // arrays, so N >= 1 here.
-            if (auto arrTy = std::dynamic_pointer_cast<ArrayType>(currentTy))
+            if (arrayValue)
             {
+                auto arrTy = std::dynamic_pointer_cast<ArrayType>(currentTy);
                 llvm::Value *neg = builder_->CreateICmpSLT(idx, builder_->getInt32(0));
                 llvm::Value *oob = builder_->CreateICmpSGE(
                     idx, builder_->getInt32((uint32_t)arrTy->getSize()));
@@ -1088,6 +1112,7 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
                 {idx},
                 "idx");
             currentTy = elemTy;
+            afterDeref = false;
             break;
         }
         }
@@ -1816,9 +1841,16 @@ LLVMIRBuilder::getElementType(const std::shared_ptr<Type> &ty)
     case Type::Kind::Array:
         return std::static_pointer_cast<ArrayType>(ty)->getElementType();
 
-    // A deref'd pointer to a primitive (e.g. `data: *mut i8` → i8 after the
-    // Deref projection) is indexed as `T*` — the element type is the pointee.
+    // A deref'd pointer (e.g. `data: *mut i8` → i8 after the Deref projection)
+    // is indexed as `T*` — the element type is the pointee. Since the Index
+    // projection only calls this for an ARRAY VALUE (lowerPlaceAsPtr tracks the
+    // Deref), the remaining kinds answer "the type itself": a struct/enum
+    // element (`Vec<String>`'s `*mut String`) and a generic parameter both used
+    // to hit the unreachable below and abort the compiler with
+    // "getElementType: type has no element type".
     case Type::Kind::Primitive:
+    case Type::Kind::Custom:
+    case Type::Kind::GenericParam:
         return ty;
 
     default:
