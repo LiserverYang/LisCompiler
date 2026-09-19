@@ -3636,7 +3636,17 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRIf *node)
 {
+    // The condition is fully evaluated BEFORE either branch runs, so the
+    // temporary borrows it created are over by then. A method receiver is only
+    // RESERVED while its call is set up (two-phase, see the borrow notes), and a
+    // reservation is not relaxed for a write — without releasing it here, the
+    // body could not touch the very receiver the condition had asked:
+    // `if i < v.len() { v[i] = x; }` reported E4003 ("cannot assign to 'v[*]'
+    // because it is borrowed") against the condition's own `len()` call, because
+    // a statement's temporaries otherwise live until the end of the whole `if`.
+    const size_t condBorrowStart = activeBorrows_.size();
     analyzeExpr(node->cond.get());
+    endTemporaryBorrowsSince(condBorrowStart);
 
     auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
     if (node->cond->type && !node->cond->type->equals(boolTy))
@@ -3692,7 +3702,14 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
 {
     auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
+    // The scrutinee is evaluated before any arm runs, so its temporary borrows
+    // are over by then — `match f(&mut x) { ... x ... }` may use `x` in the arms.
+    // (Before this, a `&mut` created in the scrutinee stayed live for the whole
+    // match and every arm that touched the argument again was E4002 — the reason
+    // lisvm had to bind the call result first and match the binding.)
+    const size_t scrutineeBorrowStart = activeBorrows_.size();
     analyzeExpr(node->scrutinee.get());
+    endTemporaryBorrowsSince(scrutineeBorrowStart);
     if (!node->scrutinee->type)
         return;
 
@@ -3887,7 +3904,13 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
 {
     if (node->cond.has_value())
     {
+        // Same as visit(HIRIf): the condition's temporary reservations end with
+        // the condition, so the body may write what the condition read —
+        // `while i < v.len() { v[i] = ... }`.
+        const size_t condBorrowStart = activeBorrows_.size();
         analyzeExpr(node->cond.value().get());
+        endTemporaryBorrowsSince(condBorrowStart);
+
         auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
         if (node->cond.value()->type && !node->cond.value()->type->equals(boolTy))
             log(*node, "loop condition must be bool.");

@@ -1618,3 +1618,44 @@ TEST_F(RuntimeTest, ExampleVec)
     // a for-loop over one, and clear (exit code 0 = every check held).
     expectExample("vec", 0);
 }
+
+// ── condition / scrutinee temporaries end with the condition (2026-09-19) ──────
+//
+// A method receiver is only RESERVED while the call is set up (two-phase), and a
+// reservation is not relaxed for a write. A condition (or a match scrutinee) is
+// fully evaluated before the body runs, so its reservations must be over by then
+// — otherwise the body cannot touch the very receiver the condition asked about.
+
+TEST_F(RuntimeTest, IfConditionReservationEndsBeforeTheBody)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(7); v.push(8);\n"
+              "    let i = 1;\n"
+              "    if i < v.len() { v[i] = 9; }\n"
+              "    ret v[0] + v[1] - 16; }",
+        0);
+}
+
+TEST_F(RuntimeTest, LoopConditionReservationEndsBeforeTheBody)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1); v.push(2);\n"
+              "    let mut i = 0;\n"
+              "    while i < v.len() { v[i] = v[i] + 10; i = i + 1; }\n"
+              "    ret v[0] + v[1] - 23; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MatchScrutineeReservationEndsBeforeTheArms)
+{
+    // The lisvm workaround (bind the call first, match the binding) is no longer
+    // needed: the arms may use the argument the scrutinee borrowed.
+    expectRun("fn bump(c: &mut i32) -> Result<i32, i32> { *c = *c + 1; ret Result::Ok(*c); }\n"
+              "fn main() -> i32 { let mut c = 1;\n"
+              "    match bump(&mut c) {\n"
+              "        Ok(v) => { c = c + 10; if v != 2 { ret 1; } },\n"
+              "        Err(e) => { ret 2; }\n"
+              "    }\n"
+              "    ret c - 12; }",
+        0);
+}
