@@ -900,7 +900,8 @@ TEST_F(RuntimeTest, NestedForBreakInner)
 
 TEST_F(RuntimeTest, MultipleGenericInstantiation)
 {
-    expectRun("fn dbl<T: Numeric>(x: T) -> T { ret x + x; }"
+    // `T: Copy` because `x + x` consumes a by-value operand twice (2026-09-19).
+    expectRun("fn dbl<T: Numeric + Copy>(x: T) -> T { ret x + x; }"
               " fn main() -> i32 { let a = dbl(21); let b = dbl(2); ret a + b; }",
         46);
 }

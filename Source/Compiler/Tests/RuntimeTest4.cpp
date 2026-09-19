@@ -854,7 +854,8 @@ TEST_F(RuntimeTest, GenericDoubleParam)
 
 TEST_F(RuntimeTest, GenericFunctionOnI64)
 {
-    expectRun("fn dbl<T: Numeric>(x: T) -> T { ret x + x; }"
+    // `T: Copy` because `x + x` consumes a by-value operand twice (2026-09-19).
+    expectRun("fn dbl<T: Numeric + Copy>(x: T) -> T { ret x + x; }"
               " fn main() -> i64 { let a = 4 as i64; ret dbl(a); }",
         8);
 }

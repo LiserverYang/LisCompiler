@@ -66,7 +66,7 @@ namespace
 /// longer auto-preloaded — selective imports promote the public API's bare
 /// names (the internal names stay `math$max` etc.).
 static const char *kStdlibPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
     "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
     "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
     "impt string { String };\n"
@@ -89,7 +89,7 @@ static const char *kResultPrologue =
     "impt drop { Drop };\n";
 
 static const char *kMathPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
 
 /// Exit status of a child process that reached the builtin panic: libc
 /// abort(). UCRT maps its __fastfail(FAST_FAIL_FATAL_APP_EXIT) to 0xC0000409;

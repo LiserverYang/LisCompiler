@@ -467,7 +467,10 @@ TEST_F(RuntimeTest, GenericStructNested)
 
 TEST_F(RuntimeTest, GenericBoundedAddWorks)
 {
-    expectRun("fn f<T: Numeric>(x: T) -> T { ret x + x; }"
+    // DECISION (2026-09-19): a generic parameter obeys the ownership rules, and
+    // the arithmetic traits take their operands BY VALUE — so `x + x` needs the
+    // parameter to be Copy (Rust reports E0382 for the same code).
+    expectRun("fn f<T: Numeric + Copy>(x: T) -> T { ret x + x; }"
               " fn main() -> i32 { ret f(21); }",
         42);
 }

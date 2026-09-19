@@ -1281,6 +1281,26 @@ TEST_F(BorrowCheckerTest, ArrayRefReadElementThroughIndex)
 
 // ── C2: if/else and moves ──────────────────────────────────────────────────────
 
+TEST_F(BorrowCheckerTest, GenericParamUsedTwiceByValue)
+{
+    // DECISION (2026-09-19): a generic parameter is subject to the ownership
+    // rules like any other value. The arithmetic traits take their operands BY
+    // VALUE, so `x + x` consumes x twice unless the parameter is Copy-bound
+    // (rustc reports E0382 for the same code). The HIR checker is lenient here —
+    // its generic-operator path does no move bookkeeping — which is exactly the
+    // gap the MIR port closes.
+    // The trait is declared locally: this harness has no stdlib search path, so
+    // `impt math { ... }` cannot be resolved here.
+    const char *src = "trait Add { fn add(self, other: Self) -> Self; }"
+                      " fn f<T: Add>(x: T) -> T { ret x + x; }"
+                      " fn main() -> i32 { ret 0; }";
+    // Both implementations reject THIS shape (the HIR checker does bookkeep a
+    // user-declared operator trait's operands); the difference was specific to
+    // the stdlib's seeded marker traits, see the three RuntimeTest cases that now
+    // write `T: Numeric + Copy`.
+    expectError(src, "use of moved value");
+}
+
 TEST_F(BorrowCheckerTest, MoveInOneBranchDoesNotPoisonTheOther)
 {
     // DECISION (2026-09-19): moves are tracked as CFG DATAFLOW, so a move in one
