@@ -285,10 +285,14 @@ public:
 
 // ---------------------------------------------------------------------------
 /// `[a, b, c]` — an array literal; all elements must share one type.
+/// `[v; N]` — the repeat form: `elements` holds the single element expression
+/// and `repeatCount` is its copy count (the element is evaluated ONCE).
 class HIRArrayLiteral : public HIRExpr
 {
 public:
     std::vector<std::unique_ptr<HIRExpr>> elements;
+    bool isRepeat = false;
+    int64_t repeatCount = 0;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);

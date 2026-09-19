@@ -600,6 +600,20 @@ class ArrayLiteral : public Expr
 public:
     std::vector<std::unique_ptr<Expr>> elements;
 
+    /**
+     * `[v; N]` — the REPEAT form. `elements` then holds exactly the one
+     * element expression and `repeatCount` is its compile-time copy count.
+     *
+     * Semantics (design decision): the element expression is evaluated ONCE
+     * and its value is copied N times, so `[f(); 3]` calls `f` a single time
+     * (the elements must be Copy, which the semantic analyzer already
+     * enforces for every array literal). N must be an integer literal, exactly
+     * like the `[T; N]` type; a huge literal is clamped to INT64_MAX by the
+     * parser so the size check reports it instead of std::stoll terminating.
+     */
+    bool isRepeat = false;
+    int64_t repeatCount = 0;
+
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);

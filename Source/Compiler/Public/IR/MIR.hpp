@@ -151,6 +151,14 @@ struct MIRRValueArrayInit
 {
     std::vector<MIROperand> elements;
     std::shared_ptr<Type> type; // the ArrayType
+
+    /// `[v; N]` (the HIR repeat form). 0 means "one operand per element" (the
+    /// normal literal). When > 0, `elements` holds the SINGLE element operand
+    /// and the backend replicates it `repeatCount` times — a store loop rather
+    /// than N insertvalue nodes, because N may be up to MAX_ARRAY_ELEMENTS
+    /// (1 << 20). The element is evaluated once in MIRBuilder, so any side
+    /// effect in it happens exactly once.
+    size_t repeatCount = 0;
 };
 
 using MIRRValue = std::variant<

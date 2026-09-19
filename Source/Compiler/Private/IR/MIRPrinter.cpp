@@ -241,10 +241,18 @@ static std::string fmtRValue(const MIRRValue &rv)
         {
             s << fmtType(v.type)
               << col(C::OP) << " [" << col(C::RST);
-            for (size_t i = 0; i < v.elements.size(); ++i)
+            if (v.repeatCount > 0)
             {
-                if (i) s << col(C::OP) << ", " << col(C::RST);
-                s << fmtOperand(v.elements[i]);
+                if (!v.elements.empty()) s << fmtOperand(v.elements[0]);
+                s << col(C::OP) << "; " << v.repeatCount << col(C::RST);
+            }
+            else
+            {
+                for (size_t i = 0; i < v.elements.size(); ++i)
+                {
+                    if (i) s << col(C::OP) << ", " << col(C::RST);
+                    s << fmtOperand(v.elements[i]);
+                }
             }
             s << col(C::OP) << "]" << col(C::RST);
         }

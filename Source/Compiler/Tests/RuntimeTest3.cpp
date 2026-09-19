@@ -1660,3 +1660,72 @@ TEST_F(RuntimeTest, TwoPhaseMutArgReadsSiblingIndex)
               " fn main() -> i32 { let mut m = V { vars: [7, 0, 0, 0], sp: 1 }; m.dup_top(); ret m.vars[1]; }",
         8);
 }
+
+// ── array repeat literal [v; N] ───────────────────────────────────────────────
+// The element is evaluated ONCE and the value is copied N times (it must be
+// Copy, which every array element already must be). N is an integer literal and
+// obeys the same bounds as the [T; N] TYPE. Before this the only way to build a
+// table was to spell every element out — the lisvm project wrote 64 zeros.
+
+TEST_F(RuntimeTest, ArrayRepeatLiteralBuildsTheArray)
+{
+    expectRun("fn main() -> i32 { let a = [7; 3]; ret a[0] + a[1] + a[2]; }", 21);
+}
+
+TEST_F(RuntimeTest, ArrayRepeatLiteralMatchesDeclaredType)
+{
+    // The literal infers [i32; 3], which must equal the annotated type.
+    expectRun("fn main() -> i32 { let a: [i32; 3] = [1; 3]; ret a[0] + a[2]; }", 2);
+}
+
+TEST_F(RuntimeTest, ArrayRepeatLiteralElementEvaluatedOnce)
+{
+    // bump is called exactly once even though the array holds three copies:
+    // 1 (call count) * 100 + 1 + 1 + 1. Three evaluations would give 306.
+    expectRun("struct C { pub n: i32 }"
+              " fn bump(c: &mut C) -> i32 { c.n = c.n + 1; ret c.n; }"
+              " fn main() -> i32 { let mut c = C { n: 0 }; let a = [bump(&mut c); 3]; ret c.n * 100 + a[0] + a[1] + a[2]; }",
+        103);
+}
+
+TEST_F(RuntimeTest, ArrayRepeatLargeCount)
+{
+    // 20k elements. The repeat lowers to a store loop and the [N x i32] SSA
+    // aggregate is never built, so this compiles in well under a second; the
+    // aggregate form made the same program take ~35 s (and an element-by-element
+    // literal of that size ~6 minutes) because every element became an SSA node.
+    expectRun("fn main() -> i32 { let a = [5; 20000]; ret a[0] + a[19999]; }", 10);
+}
+
+TEST_F(RuntimeTest, ArrayRepeatVeryLargeCountCompiles)
+{
+    // Compile-only (running it would need 4 MB of stack): 1 << 20 is the array
+    // size limit, and the repeat must stay a handful of IR instructions. A
+    // regression to the aggregate form turns this into a multi-minute compile.
+    EXPECT_TRUE(compile("fn main() -> i32 { let a = [0; 1000000]; ret a[0]; }"));
+}
+
+TEST_F(RuntimeTest, ArrayRepeatZeroCountRejected)
+{
+    expectCompileFail("fn main() -> i32 { let a = [0; 0]; ret 0; }",
+        "array repeat count must be a positive integer");
+}
+
+TEST_F(RuntimeTest, ArrayRepeatCountOverLimitRejected)
+{
+    expectCompileFail("fn main() -> i32 { let a = [0; 2000000]; ret 0; }",
+        "exceeds the limit");
+}
+
+TEST_F(RuntimeTest, ArrayRepeatNonCopyElementRejected)
+{
+    expectCompileFail("struct S { pub v: i32 }"
+                      " fn main() -> i32 { let s = S { v: 1 }; let a = [s; 3]; ret 0; }",
+        "must be Copy");
+}
+
+TEST_F(RuntimeTest, ArrayRepeatCountMustBeAnIntegerLiteral)
+{
+    expectCompileFail("fn main() -> i32 { let n = 3; let a = [0; n]; ret 0; }",
+        "array repeat count must be an integer literal");
+}

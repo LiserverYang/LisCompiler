@@ -206,7 +206,10 @@ public:
     void visit(HIRArrayLiteral *node)
     {
         printCommon(node);
-        os << " array_literal[" << node->elements.size() << "]";
+        if (node->isRepeat)
+            os << " array_repeat[" << node->repeatCount << "]";
+        else
+            os << " array_literal[" << node->elements.size() << "]";
     }
 
     void visit(HIRStructInit *node)

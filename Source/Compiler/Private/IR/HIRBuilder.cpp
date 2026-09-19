@@ -1063,6 +1063,8 @@ void HIRBuilder::visit(ArrayLiteral *node)
     auto result = std::make_unique<HIRArrayLiteral>();
     result->position = node->position;
     result->length = node->length;
+    result->isRepeat = node->isRepeat;
+    result->repeatCount = node->repeatCount;
 
     for (auto &e : node->elements)
     {

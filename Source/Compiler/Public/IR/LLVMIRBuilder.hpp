@@ -149,6 +149,18 @@ private:
     // ── Statement variants ───────────────────────────────────────────────────
 
     void lowerAssign(FunctionState &fs, const MIRStmtAssign &s);
+
+    /// Array literal -> destination, element by element (a store loop for the
+    /// `[v; N]` repeat form). Avoids materialising the whole `[N x T]` as an SSA
+    /// aggregate, which is quadratic in N (see lowerAssign).
+    void emitArrayInto(FunctionState &fs, const MIRPlace &dest, const MIRRValueArrayInit &init);
+
+    /// The place behind a copy/move operand; null for a constant operand.
+    static const MIRPlace *operandPlaceOf(const MIROperand &op);
+
+    /// Pointer to a place, or null for a LOCAL whose alloca is absent (the void
+    /// return slot) — the same guard storePlace() applies.
+    llvm::Value *placePtrOrNull(FunctionState &fs, const MIRPlace &p);
     void lowerCall(FunctionState &fs, const MIRStmtCall &s, std::optional<llvm::BasicBlock *> normalDest = std::nullopt, std::optional<llvm::BasicBlock *> unwindDest = std::nullopt);
     void lowerDrop(FunctionState &fs, const MIRStmtDrop &s);
 

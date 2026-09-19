@@ -147,7 +147,8 @@ inline MIRRValueArrayInit copy(const MIRRValueArrayInit &a)
 {
     return {
         .elements = copy(a.elements),
-        .type = copy(a.type)};
+        .type = copy(a.type),
+        .repeatCount = a.repeatCount};
 }
 
 inline MIRRValue copy(const MIRRValue &rv)

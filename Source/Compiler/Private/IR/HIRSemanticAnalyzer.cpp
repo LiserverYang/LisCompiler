@@ -5494,9 +5494,30 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
     if (!elemTy)
     {
         // `[]` — no element type to infer from, and `[T; 0]` is rejected too.
-        log(*node, "empty array literal has no element type; write an explicit `[T; N]` with N > 0.");
+        log(*node, node->isRepeat
+                       ? "array repeat element has no value to copy (its type is 'never')."
+                       : "empty array literal has no element type; write an explicit `[T; N]` with N > 0.");
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
+    }
+
+    // `[v; N]`: N is a compile-time literal (the parser enforces that) and obeys
+    // exactly the size rules of the `[T; N]` TYPE, so `[v; 0]` and `[v; 2000000]`
+    // are rejected the same way `[i32; 0]` / `[i32; 2000000]` are.
+    if (node->isRepeat)
+    {
+        if (node->repeatCount <= 0)
+        {
+            log(*node, "array repeat count must be a positive integer (got " + std::to_string(node->repeatCount) + ").");
+            node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+            return;
+        }
+        if ((size_t)node->repeatCount > MAX_ARRAY_ELEMENTS)
+        {
+            log(*node, "array repeat count " + std::to_string(node->repeatCount) + " exceeds the limit of " + std::to_string(MAX_ARRAY_ELEMENTS) + " elements.");
+            node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+            return;
+        }
     }
 
     if (isReferenceType(elemTy) || elemTy->getKind() == Type::Kind::Pointer)
@@ -5511,7 +5532,8 @@ void HIRSemanticAnalyzer::visit(HIRArrayLiteral *node)
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
-    node->type = context->typeContext->getArray(elemTy, node->elements.size());
+    node->type = context->typeContext->getArray(
+        elemTy, node->isRepeat ? (size_t)node->repeatCount : node->elements.size());
 }
 
 // ---------------------------------------------------------------------------

@@ -327,8 +327,123 @@ void LLVMIRBuilder::lowerStatement(FunctionState &fs, const MIRStatement &stmt)
 // MIRStmtAssign
 // ─────────────────────────────────────────────────────────────────────────────
 
+const MIRPlace *LLVMIRBuilder::operandPlaceOf(const MIROperand &op)
+{
+    if (auto *c = std::get_if<MIRCopy>(&op)) return &c->place;
+    if (auto *m = std::get_if<MIRMove>(&op)) return &m->place;
+    return nullptr;
+}
+
+llvm::Value *LLVMIRBuilder::placePtrOrNull(FunctionState &fs, const MIRPlace &p)
+{
+    if (p.base != PlaceBase::Global
+        && (p.index >= fs.allocas.size() || fs.allocas[p.index] == nullptr))
+        return nullptr;
+    return lowerPlaceAsPtr(fs, p);
+}
+
+void LLVMIRBuilder::emitArrayInto(FunctionState &fs,
+    const MIRPlace &dest,
+    const MIRRValueArrayInit &init)
+{
+    auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(init.type));
+    llvm::Value *dst = placePtrOrNull(fs, dest);
+    if (!dst) return;
+
+    llvm::Type *i64Ty = llvm::Type::getInt64Ty(ctx_);
+    llvm::Value *zero = llvm::ConstantInt::get(i64Ty, 0);
+
+    // The plain literal: one store per element (`[a, b, c]`).
+    if (init.repeatCount == 0)
+    {
+        for (size_t i = 0; i < init.elements.size(); ++i)
+        {
+            llvm::Value *v = lowerOperand(fs, init.elements[i]);
+            llvm::Value *slot = builder_->CreateInBoundsGEP(
+                arrTy, dst, {zero, llvm::ConstantInt::get(i64Ty, i)});
+            builder_->CreateStore(v, slot);
+        }
+        return;
+    }
+
+    llvm::Value *elem = init.elements.empty()
+                            ? llvm::UndefValue::get(arrTy->getElementType())
+                            : lowerOperand(fs, init.elements[0]);
+
+    if (init.repeatCount == 1)
+    {
+        builder_->CreateStore(elem, builder_->CreateInBoundsGEP(arrTy, dst, {zero, zero}));
+        return;
+    }
+
+    llvm::Value *n = llvm::ConstantInt::get(i64Ty, init.repeatCount);
+    llvm::Value *one = llvm::ConstantInt::get(i64Ty, 1);
+
+    llvm::BasicBlock *head = builder_->GetInsertBlock();
+    llvm::BasicBlock *condBB = llvm::BasicBlock::Create(ctx_, "arr.rep.cond", fs.fn);
+    llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx_, "arr.rep.body", fs.fn);
+    llvm::BasicBlock *doneBB = llvm::BasicBlock::Create(ctx_, "arr.rep.done", fs.fn);
+    builder_->CreateBr(condBB);
+
+    builder_->SetInsertPoint(condBB);
+    llvm::PHINode *idx = builder_->CreatePHI(i64Ty, 2, "arr.rep.i");
+    idx->addIncoming(zero, head);
+    builder_->CreateCondBr(builder_->CreateICmpUGE(idx, n, "arr.rep.cmp"), doneBB, bodyBB);
+
+    builder_->SetInsertPoint(bodyBB);
+    builder_->CreateStore(elem, builder_->CreateInBoundsGEP(arrTy, dst, {zero, idx}));
+    idx->addIncoming(builder_->CreateAdd(idx, one, "arr.rep.next"), bodyBB);
+    builder_->CreateBr(condBB);
+
+    // Leave the insertion point in the done block: the remaining MIR statements
+    // of this block are emitted here.
+    builder_->SetInsertPoint(doneBB);
+}
+
 void LLVMIRBuilder::lowerAssign(FunctionState &fs, const MIRStmtAssign &s)
 {
+    // ── Array initialisation: write the elements straight into the destination.
+    // Building an [N x T] SSA aggregate and then storing it turns every element
+    // into an SSA node, and the cost is QUADRATIC in N: measured on the same
+    // machine, `let a = [0; 20000]` took ~35 s through the aggregate path and
+    // the pre-existing element-by-element literal of the same size took ~356 s.
+    // Arrays are POD by construction (their element type must be Copy and may
+    // not be a reference or a raw pointer), so element stores are always
+    // equivalent — and `[v; N]` then never materialises more than ONE element
+    // value, whatever N is.
+    if (auto *arr = std::get_if<MIRRValueArrayInit>(&s.rhs))
+    {
+        emitArrayInto(fs, s.lhs, *arr);
+        return;
+    }
+
+    // ── Whole-array copy. `let a = [v; N]` lowers to `temp = <construct>` then
+    // `a = copy(temp)`, i.e. a load + store of the WHOLE [N x T] aggregate — the
+    // same quadratic blow-up, reached through the copy instead of the init. An
+    // array is POD, so the copy is a memcpy.
+    if (s.lhs.type && s.lhs.type->getKind() == Type::Kind::Array)
+    {
+        if (auto *use = std::get_if<MIRRValueUse>(&s.rhs))
+        {
+            if (const MIRPlace *src = operandPlaceOf(use->operand))
+            {
+                if (src->type && src->type->equals(s.lhs.type))
+                {
+                    llvm::Value *dstPtr = placePtrOrNull(fs, s.lhs);
+                    llvm::Value *srcPtr = dstPtr ? placePtrOrNull(fs, *src) : nullptr;
+                    if (srcPtr)
+                    {
+                        auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(s.lhs.type));
+                        uint64_t bytes = context->module->getDataLayout().getTypeAllocSize(arrTy);
+                        builder_->CreateMemCpy(dstPtr, llvm::MaybeAlign(4), srcPtr,
+                            llvm::MaybeAlign(4), bytes);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     llvm::Value *rhs = lowerRValue(fs, s.rhs);
     storePlace(fs, s.lhs, rhs);
 }
@@ -768,6 +883,49 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
         else if constexpr (std::is_same_v<T, MIRRValueArrayInit>)
         {
             auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(r.type));
+
+            // `[v; N]` — ONE operand replicated `repeatCount` times. Lowered as a
+            // store loop rather than N insertvalue nodes: N may be as large as
+            // MAX_ARRAY_ELEMENTS (1 << 20), and a million-link SSA chain would
+            // blow up both compile time and memory. (`N == 1` stays a single
+            // insert.) The loop leaves the insertion point in the done block, so
+            // the following MIR statements are emitted after the load.
+            if (r.repeatCount > 0)
+            {
+                llvm::Value *elem = r.elements.empty()
+                                        ? llvm::UndefValue::get(arrTy->getElementType())
+                                        : lowerOperand(fs, r.elements[0]);
+                if (r.repeatCount == 1)
+                    return builder_->CreateInsertValue(llvm::UndefValue::get(arrTy), elem, {0});
+
+                llvm::Type *i64Ty = llvm::Type::getInt64Ty(ctx_);
+                llvm::Value *n = llvm::ConstantInt::get(i64Ty, r.repeatCount);
+                llvm::Value *zero = llvm::ConstantInt::get(i64Ty, 0);
+                llvm::Value *one = llvm::ConstantInt::get(i64Ty, 1);
+
+                llvm::AllocaInst *slot = emitEntryAlloca(fs.fn, arrTy, "arr.rep");
+
+                llvm::BasicBlock *head = builder_->GetInsertBlock();
+                llvm::BasicBlock *condBB = llvm::BasicBlock::Create(ctx_, "arr.rep.cond", fs.fn);
+                llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx_, "arr.rep.body", fs.fn);
+                llvm::BasicBlock *doneBB = llvm::BasicBlock::Create(ctx_, "arr.rep.done", fs.fn);
+                builder_->CreateBr(condBB);
+
+                builder_->SetInsertPoint(condBB);
+                llvm::PHINode *idx = builder_->CreatePHI(i64Ty, 2, "arr.rep.i");
+                idx->addIncoming(zero, head);
+                builder_->CreateCondBr(
+                    builder_->CreateICmpUGE(idx, n, "arr.rep.cmp"), doneBB, bodyBB);
+
+                builder_->SetInsertPoint(bodyBB);
+                builder_->CreateStore(elem, builder_->CreateInBoundsGEP(arrTy, slot, {zero, idx}));
+                idx->addIncoming(builder_->CreateAdd(idx, one, "arr.rep.next"), bodyBB);
+                builder_->CreateBr(condBB);
+
+                builder_->SetInsertPoint(doneBB);
+                return builder_->CreateLoad(arrTy, slot, "arr.rep.val");
+            }
+
             llvm::Value *agg = llvm::UndefValue::get(arrTy);
             for (size_t i = 0; i < r.elements.size(); ++i)
             {

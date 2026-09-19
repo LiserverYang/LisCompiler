@@ -424,7 +424,10 @@ void ASTPrinter::visit(IndexAccess *node)
 void ASTPrinter::visit(ArrayLiteral *node)
 {
     printCommon(node);
-    os << " array_literal[" << node->elements.size() << "]";
+    if (node->isRepeat)
+        os << " array_repeat[" << node->repeatCount << "]";
+    else
+        os << " array_literal[" << node->elements.size() << "]";
 }
 
 void ASTPrinter::visit(BinaryOp *node)

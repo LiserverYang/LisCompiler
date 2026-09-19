@@ -2014,14 +2014,30 @@ MIRPlace MIRBuilder::buildIndexAccess(HIRIndexAccess *ia)
 MIRPlace MIRBuilder::buildArrayLiteral(HIRArrayLiteral *al)
 {
     std::vector<MIROperand> elements;
-    elements.reserve(al->elements.size());
-    for (auto &e : al->elements)
-        elements.push_back(exprToOperand(e.get()));
+    size_t repeatCount = 0;
+
+    if (al->isRepeat)
+    {
+        // `[v; N]`: evaluate the element ONCE (its side effects must not be
+        // repeated N times) and let the backend replicate the operand. N can be
+        // as large as MAX_ARRAY_ELEMENTS, so materializing N operands here is
+        // not an option.
+        repeatCount = (size_t)al->repeatCount;
+        if (!al->elements.empty())
+            elements.push_back(exprToOperand(al->elements[0].get()));
+    }
+    else
+    {
+        elements.reserve(al->elements.size());
+        for (auto &e : al->elements)
+            elements.push_back(exprToOperand(e.get()));
+    }
 
     MIRPlace tmp = makeTempPlace(al->type);
     emitAssign(tmp, MIRRValueArrayInit{
                         .elements = std::move(elements),
                         .type = al->type,
+                        .repeatCount = repeatCount,
                     });
     return tmp;
 }

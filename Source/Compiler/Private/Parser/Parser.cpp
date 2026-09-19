@@ -1553,17 +1553,45 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return expr;
     }
 
-    // Array literal `[a, b, c]`.
+    // Array literal `[a, b, c]` or the repeat form `[v; N]`.
     if (match(TokenCode::LBRACKET))
     {
         auto literal = std::make_unique<ArrayLiteral>();
         recorder.bindNode(literal.get());
         if (!check(TokenCode::RBRACKET))
         {
-            do
+            literal->elements.push_back(parseExpression());
+            if (match(TokenCode::SEMI))
             {
-                literal->elements.push_back(parseExpression());
-            } while (match(TokenCode::COMMA));
+                // `[v; N]`: v is evaluated ONCE and the value is copied N times.
+                // N is an integer literal, exactly like the `[T; N]` TYPE. The
+                // overflow protection mirrors parseType: std::stoll would throw
+                // std::out_of_range on `[0; 99999999999999999999]` and terminate
+                // the process, so clamp to a sentinel the size check rejects.
+                literal->isRepeat = true;
+                if (currentToken().code == TokenCode::INT_LITERAL)
+                {
+                    try
+                    {
+                        literal->repeatCount = std::stoll(currentToken().value);
+                    }
+                    catch (const std::exception &)
+                    {
+                        literal->repeatCount = INT64_MAX; // sentinel > MAX_ARRAY_ELEMENTS
+                    }
+                    advance();
+                }
+                else
+                {
+                    logError(currentToken(), "array repeat count must be an integer literal", E_ExpectType);
+                    advance();
+                }
+            }
+            else
+            {
+                while (match(TokenCode::COMMA))
+                    literal->elements.push_back(parseExpression());
+            }
         }
         consume(TokenCode::RBRACKET, "expected ']' after array literal", E_ExpectedKeyword);
         return literal;
