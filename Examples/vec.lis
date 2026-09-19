@@ -9,7 +9,10 @@
 //     v[1] = 9;                      // IndexMut::set — an out-of-bounds write aborts
 //     let last = v.pop();            // Option<i32>
 //     match v.get(99) { ... }        // the checked accessor: none, never aborts
-//     for e in v { ... }             // consumes the Vec (Iterator<T>)
+//     for e in v { ... }             // LENDS the Vec: e is &T, the Vec survives
+//     for e in move v { ... }        // consumes the Vec (Iterator<T>)
+//     v[i] += 1;                     // compound assignment (the place is evaluated once)
+//     let x = v.get(i) else 0;       // let ... else: the payload, or a fallback
 //
 // Elements may own resources (String, another Vec, a struct with a Drop impl):
 // the container destroys the elements it still owns -- clear() and the Drop impl
@@ -52,15 +55,14 @@ impl Scores
         ret Scores { marks: Vec<i32>::new(), bonus: bonus };
     }
 
-    // The buffer is private to Vec, so walking it goes through len() + `v[i]`
-    // (the operators from the Index trait) rather than a raw pointer.
+    // The buffer is private to Vec, so walking it goes through a lending loop
+    // (`for m in self.marks` hands out &i32) rather than a raw pointer. A
+    // `while i < len()` loop over `v[i]` is the other option.
     fn total(self: &Scores) -> i32
     {
         let mut s = 0;
-        let mut i = 0;
-        while i < self.marks.len() {
-            s = s + self.marks[i];
-            i = i + 1;
+        for m in self.marks {
+            s = s + *m;
         }
         ret s + self.bonus;
     }
@@ -107,13 +109,13 @@ fn main() -> i32
         None => { ret 10; }
     }
 
-    // 5. As a struct field, and a for-loop over a Vec.
+    // 5. As a struct field, and a CONSUMING for-loop over a Vec.
     let mut scores = Scores::new(5);
     scores.marks.push(10);
     scores.marks.push(20);
-    if scores.total() != 35 { ret 11; }
+    if scores.total() != 35 { ret 11; }   // total() walks the field with a lending loop
     let mut seen = 0;
-    for m in scores.marks {   // consumes the field (Vec implements Iterator<T>)
+    for m in move scores.marks {   // `move`: consumes the field (Vec implements Iterator<T>)
         seen = seen + m;
     }
     if seen != 30 { ret 12; }
@@ -159,6 +161,32 @@ fn main() -> i32
         if tracked.len() != 1 { ret 23; }
     }
     if drops != 4 { ret 24; }
+
+    // 9. The 2026-09-19 additions: a lending loop, compound assignment and
+    //    let ... else. `for e in v` borrows v (e is &i32) instead of draining
+    //    it, so the Vec is still there afterwards -- and still growable.
+    {
+        let mut w = Vec<i32>::new();
+        w.push(1);
+        w.push(2);
+        w.push(3);
+        let mut total = 0;
+        for e in w {
+            total += *e;
+        }
+        if total != 6 { ret 25; }
+        if w.len() != 3 { ret 26; }
+        w[0] += 10;
+        if w[0] != 11 { ret 27; }
+        w.push(4);
+        if w.len() != 4 { ret 28; }
+
+        // get() returns Option<i32>: else is the fallback for the miss path.
+        let first = w.get(0) else 0 - 1;
+        if first != 11 { ret 29; }
+        let missing = w.get(99) else 0 - 1;
+        if missing != 0 - 1 { ret 30; }
+    }
 
     ret 0;
 }
