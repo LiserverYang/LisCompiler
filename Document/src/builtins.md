@@ -20,6 +20,34 @@
 注意：`abort()` **不会刷新 stdio**，所以 `panic` 之前打印到 stdout 的内容会丢失；panic 的
 可观测输出只有 stderr。
 
+## 断言 assert
+
+| 函数 | 签名 | 行为 |
+|---|---|---|
+| `assert(cond: bool)` | `-> void` | `cond` 为假时向 **stderr** 写 `文件:行: assertion failed: ` 后 `abort()` |
+| `assert(cond: bool, msg: &i8)` | `-> void` | 同上，消息追加在冒号后 |
+
+与 `panic` 的关键差别：`assert` 返回 **void**，条件成立时**继续执行**（不会把后续语句判成不可达），
+所以它可以当作测试断言用。失败路径与 `panic` 完全一致（stderr + `abort()`，不刷新 stdio），
+并且**带上源码位置**——这是 `panic` 没有的。参数个数只接受 1 或 2 个；条件必须是 `bool`，
+消息必须是 `&i8`。
+
+```lis
+assert(str_len(line) > 0, "empty input");
+```
+
+## C 字符串比较 str_len / str_cmp
+
+| 函数 | 签名 | 行为 |
+|---|---|---|
+| `str_len(s: &i8) -> i32` | libc `strlen` | C 串长度（不含结尾 NUL） |
+| `str_cmp(a: &i8, b: &i8) -> i32` | libc `strcmp` | `< 0` / `0` / `> 0`，与 libc 一致 |
+
+`&i8` 是本语言的 C 串写法（`print_str`、`panic`、`String::from_lit` 都收它），所以长度与内容
+比较就挂在它上面；在没有这两个内建之前，`strlen` 是保留名（标准库专用），用户想拿长度只能先
+`String::from_lit` 复制一份。两个字符串字面量之间的 `==` / `!=` 会下降为 `str_cmp(a, b) == 0`
+（见[表达式](./expression.md)），无需显式调用。
+
 ## 输出 print
 
 | 函数 | 签名 | 输出 |

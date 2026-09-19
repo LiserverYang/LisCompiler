@@ -201,6 +201,29 @@ array_expression = "[" expression_list "]"
 数组字面量：所有元素必须同类型、Copy 且非引用；空字面量 `[]` 被拒绝（无元素类型可推断）。
 数组本身是 Move 类型。详见[类型系统](./types.md)。
 
+**重复字面量 `[v; N]`**（2026-09-19）：`v` **只求值一次**，得到的值被复制 N 份。
+元素必须 Copy，`N` 必须是十进制整数字面量（与 `[T; N]` 类型一致），`1 <= N <= 1<<20`；
+`[v; 0]` 与 `[T; 0]` 一样被拒绝。`[f(); 3]` 只会调用 `f` 一次（副作用不重复）。
+
+## 解引用表达式 `*p`
+
+<grammar>
+unary_expression = "*" unary_expression | primary_expression postfix*
+</grammar>
+
+一元 `*` 解引用一个**引用**（`&T` / `&mut T`），结果是**位置**而不是值：
+
+- 读：`let x = *p;`——pointee 是 Copy 类型时为拷贝读；**非 Copy 时是移动**，报 E3017
+  （与「从借用里移出字段」同一条规则）。
+- 写：`*p = v;`——只允许 `&mut T`（写穿 `&T` 报「cannot assign through a shared reference」）。
+  这是 `&mut T` 出参的写法；覆盖时旧的 pointee 值会被析构（与 Rust 一致）。
+- `p.f` 与 `(*p).f` 等价（成员访问本来就会自动解引用）。
+- **裸指针不能 `*p`**：`*T` / `*mut T` 的解引用仍只在标准库内通过 `__deref` / `__deref_mut`
+  （E3001/E3013/E3014）。
+- 优先级：前缀 `*` 比后缀链松、比二元运算符紧——`*p.f` 是 `*(p.f)`，`*p + 1` 是 `(*p) + 1`。
+- `*p` **不参与借用检查**（`extractRootAndPath` 不认识它），与「复杂索引/解引用链保守」的既有
+  边界一致（见[借用检查](./borrow.md)）。
+
 ## 索引表达式
 
 <grammar>

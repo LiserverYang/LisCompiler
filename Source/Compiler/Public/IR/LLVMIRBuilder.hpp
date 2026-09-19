@@ -155,6 +155,9 @@ private:
     /// aggregate, which is quadratic in N (see lowerAssign).
     void emitArrayInto(FunctionState &fs, const MIRPlace &dest, const MIRRValueArrayInit &init);
 
+    /// The same lowering against an already-computed destination pointer.
+    void emitArrayIntoPtr(FunctionState &fs, llvm::Value *dst, const MIRRValueArrayInit &init);
+
     /// The place behind a copy/move operand; null for a constant operand.
     static const MIRPlace *operandPlaceOf(const MIROperand &op);
 

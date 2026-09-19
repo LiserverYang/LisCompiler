@@ -346,9 +346,17 @@ void LLVMIRBuilder::emitArrayInto(FunctionState &fs,
     const MIRPlace &dest,
     const MIRRValueArrayInit &init)
 {
+    if (llvm::Value *dst = placePtrOrNull(fs, dest))
+        emitArrayIntoPtr(fs, dst, init);
+}
+
+/// See emitArrayInto — same lowering, but against a ready-made pointer (the
+/// fallback in lowerRValue materialises the value in a scratch alloca).
+void LLVMIRBuilder::emitArrayIntoPtr(FunctionState &fs,
+    llvm::Value *dst,
+    const MIRRValueArrayInit &init)
+{
     auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(init.type));
-    llvm::Value *dst = placePtrOrNull(fs, dest);
-    if (!dst) return;
 
     llvm::Type *i64Ty = llvm::Type::getInt64Ty(ctx_);
     llvm::Value *zero = llvm::ConstantInt::get(i64Ty, 0);
@@ -898,57 +906,16 @@ llvm::Value *LLVMIRBuilder::lowerRValue(FunctionState &fs, const MIRRValue &rv)
         }
         else if constexpr (std::is_same_v<T, MIRRValueArrayInit>)
         {
+            // NOT the normal path: lowerAssign() stores an array literal element
+            // by element STRAIGHT into its destination (see emitArrayInto) —
+            // building the [N x T] aggregate here is what made large arrays
+            // quadratic in N. This only runs if an array rvalue ever reaches a
+            // non-assign context, so materialise it in a scratch slot (one shared
+            // lowering, no second copy of the store loop).
             auto *arrTy = llvm::cast<llvm::ArrayType>(toLLVMType(r.type));
-
-            // `[v; N]` — ONE operand replicated `repeatCount` times. Lowered as a
-            // store loop rather than N insertvalue nodes: N may be as large as
-            // MAX_ARRAY_ELEMENTS (1 << 20), and a million-link SSA chain would
-            // blow up both compile time and memory. (`N == 1` stays a single
-            // insert.) The loop leaves the insertion point in the done block, so
-            // the following MIR statements are emitted after the load.
-            if (r.repeatCount > 0)
-            {
-                llvm::Value *elem = r.elements.empty()
-                                        ? llvm::UndefValue::get(arrTy->getElementType())
-                                        : lowerOperand(fs, r.elements[0]);
-                if (r.repeatCount == 1)
-                    return builder_->CreateInsertValue(llvm::UndefValue::get(arrTy), elem, {0});
-
-                llvm::Type *i64Ty = llvm::Type::getInt64Ty(ctx_);
-                llvm::Value *n = llvm::ConstantInt::get(i64Ty, r.repeatCount);
-                llvm::Value *zero = llvm::ConstantInt::get(i64Ty, 0);
-                llvm::Value *one = llvm::ConstantInt::get(i64Ty, 1);
-
-                llvm::AllocaInst *slot = emitEntryAlloca(fs.fn, arrTy, "arr.rep");
-
-                llvm::BasicBlock *head = builder_->GetInsertBlock();
-                llvm::BasicBlock *condBB = llvm::BasicBlock::Create(ctx_, "arr.rep.cond", fs.fn);
-                llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx_, "arr.rep.body", fs.fn);
-                llvm::BasicBlock *doneBB = llvm::BasicBlock::Create(ctx_, "arr.rep.done", fs.fn);
-                builder_->CreateBr(condBB);
-
-                builder_->SetInsertPoint(condBB);
-                llvm::PHINode *idx = builder_->CreatePHI(i64Ty, 2, "arr.rep.i");
-                idx->addIncoming(zero, head);
-                builder_->CreateCondBr(
-                    builder_->CreateICmpUGE(idx, n, "arr.rep.cmp"), doneBB, bodyBB);
-
-                builder_->SetInsertPoint(bodyBB);
-                builder_->CreateStore(elem, builder_->CreateInBoundsGEP(arrTy, slot, {zero, idx}));
-                idx->addIncoming(builder_->CreateAdd(idx, one, "arr.rep.next"), bodyBB);
-                builder_->CreateBr(condBB);
-
-                builder_->SetInsertPoint(doneBB);
-                return builder_->CreateLoad(arrTy, slot, "arr.rep.val");
-            }
-
-            llvm::Value *agg = llvm::UndefValue::get(arrTy);
-            for (size_t i = 0; i < r.elements.size(); ++i)
-            {
-                llvm::Value *fval = lowerOperand(fs, r.elements[i]);
-                agg = builder_->CreateInsertValue(agg, fval, {i});
-            }
-            return agg;
+            llvm::AllocaInst *slot = emitEntryAlloca(fs.fn, arrTy, "arr.tmp");
+            emitArrayIntoPtr(fs, slot, r);
+            return builder_->CreateLoad(arrTy, slot, "arr.tmp.val");
         }
 
         llvm_unreachable("unhandled MIRRValue variant"); },
