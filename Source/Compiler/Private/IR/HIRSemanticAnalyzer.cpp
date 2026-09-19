@@ -2688,36 +2688,6 @@ bool HIRSemanticAnalyzer::structHasRefFields(const std::shared_ptr<Type> &ty)
         if (isReferenceType(f.type)) return true;
     return false;
 }
-// ---------------------------------------------------------------------------
-// Move semantics of consuming `source` (whole variable or field path).
-// ---------------------------------------------------------------------------
-bool HIRSemanticAnalyzer::tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Type> &paramTy, HIRNode &errNode)
-{
-    auto paramRef = std::dynamic_pointer_cast<ReferenceType>(paramTy);
-    if (!paramRef || !arg || !arg->type)
-        return false;
-    // Only references reborrow. A raw pointer is Copy and is not tracked by the
-    // borrow checker at all, so there is nothing to register for it.
-    if (!isReferenceType(arg->type))
-        return false;
-    std::string root;
-    std::vector<std::string> path;
-    if (!extractRootAndPath(arg, root, path))
-        return false; // a temporary value: nothing to reuse, a move is fine
-    if (!SymbolTable::getInstance().lookupSymbol(root))
-        return false;
-    // Register the temporary borrow against the argument's own root, exactly as
-    // the method-receiver path does: the callee's access ends when the call
-    // returns, so the borrow dies with the call and the binding stays usable.
-    // (Like the rest of the borrow checker this is deliberately permissive: a
-    // conflict routed through a *different* alias of the same referent is missed
-    // rather than falsely rejected.)
-    // A TWO-PHASE reservation: the callee has not started using the referent
-    // while the remaining arguments are still being evaluated, so a sibling
-    // argument may still READ it (`f(&mut x, x.n)`).
-    registerBorrow(root, path, paramRef->isMutableRef(), /*isPromoted=*/false, errNode, /*isTwoPhase=*/true);
-    return true;
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // checkCallArgs — the shared argument type-check for every call form
@@ -2755,188 +2725,6 @@ void HIRSemanticAnalyzer::checkCallArgs(
         else if (!typesCompatible(paramTy, args[i]->type))
             log(*args[i], "argument type mismatch.");
 
-        // A by-value non-Copy argument consumes its source (`foo(p)` moves p); a
-        // reference argument to a reference parameter is reborrowed instead.
-        if (!tryReborrowArg(args[i].get(), paramTy, call))
-            handleMoveSource(args[i].get(), call);
-    }
-}
-std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::moveOutContainers(HIRExpr *source)
-{
-    // Walk the member-access chain root-first: for `s.a.b` the chain is
-    // [s.a, s.a.b], so chain[i-1]->type is the type of the place chain[i]
-    // projects out of.
-    std::vector<HIRMemberAccess *> chain;
-    for (HIRExpr *cur = source; cur != nullptr;)
-    {
-        auto *ma = dynamic_cast<HIRMemberAccess *>(cur);
-        if (!ma)
-            break;
-        chain.push_back(ma);
-        cur = ma->object.get();
-    }
-    if (chain.empty())
-        return {};
-    std::reverse(chain.begin(), chain.end());
-
-    std::vector<std::shared_ptr<Type>> containers;
-    containers.push_back(chain[0]->object->type);
-    // `(*p).f`: the chain root is an explicit DEREF, so the place is reached
-    // through the reference `p`. The deref node itself carries the POINTEE type;
-    // push the reference type too, so referenceMovedOutOf() sees the borrow and
-    // a non-Copy field move is E3017 — the same rule `p.f` already gets from the
-    // root binding's reference type.
-    if (auto *d = dynamic_cast<HIRDeref *>(chain[0]->object.get()))
-        if (d->operand->type) containers.push_back(d->operand->type);
-    for (size_t i = 0; i + 1 < chain.size(); ++i)
-        containers.push_back(chain[i]->type);
-    return containers;
-}
-
-std::shared_ptr<ReferenceType> HIRSemanticAnalyzer::referenceMovedOutOf(HIRExpr *source)
-{
-    for (const auto &ty : moveOutContainers(source))
-        if (auto ref = std::dynamic_pointer_cast<ReferenceType>(ty))
-            return ref;
-    return nullptr;
-}
-
-std::shared_ptr<CustomType> HIRSemanticAnalyzer::dropTypePartiallyMovedBy(HIRExpr *source)
-{
-    for (const auto &ty : moveOutContainers(source))
-    {
-        // Look THROUGH references: `r.a` where `r: &mut P` is rejected as a move
-        // out of a borrow (referenceMovedOutOf) before this rule is consulted,
-        // but `r.a.b` must still see the type behind `r.a` when that field is
-        // itself a reference.
-        std::shared_ptr<Type> base = ty;
-        while (auto ref = std::dynamic_pointer_cast<ReferenceType>(base))
-            base = ref->getBaseType();
-        auto ct = std::dynamic_pointer_cast<CustomType>(base);
-        if (ct && ct->implementsTrait("Drop"))
-            return ct;
-    }
-    return nullptr;
-}
-
-void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
-{
-    // The move/ownership rules are re-implemented on the MIR CFG (see the flag).
-    if (mirBorrowCheck_) return;
-
-    // A source whose analysis FAILED has no type, so it is not a move of
-    // anything: the real error was already reported, and the bookkeeping below
-    // would only manufacture follow-on diagnostics. `let x = s.nope;` used to
-    // mark the path `s.nope` as moved, so the next `s.nope` reported "use of
-    // moved value" on top of "struct 'S' has no field 'nope'".
-    if (!source || !source->type)
-        return;
-
-    // Borrow-check: moving a place that is currently borrowed would leave the
-    // borrow dangling — reject it. Only genuinely non-Copy sources are moved;
-    // a Copy source is a read (handled by the NameRef/MemberAccess read check
-    // with NLL liveness).
-    std::string root;
-    std::vector<std::string> path;
-    if (resolvePlace(source, root, path)
-        && source->type && !source->type->isCopyable())
-        checkBorrowUse(root, path, BorrowUseKind::Move, errNode);
-
-    // Whole-variable use.
-    if (auto *nameRef = dynamic_cast<HIRNameRef *>(source))
-    {
-        auto *sym = SymbolTable::getInstance().lookupSymbol(nameRef->name);
-        if (!sym) return;
-        // A whole-value use after ANY field moved out is a double-free
-        // (the receiver's whole-struct drop would also drop the moved field).
-        if (!sym->movedFields.empty())
-        {
-            log(errNode, "use of moved value: '" + nameRef->name + "' (partially moved)", E_UseOfMovedValue);
-            return;
-        }
-        if (sym->state == VarState::Moved)
-            log(errNode, "use of moved value: '" + nameRef->name + "'", E_UseOfMovedValue);
-        if (sym->type && !sym->type->isCopyable())
-            sym->state = VarState::Moved;
-        return;
-    }
-
-    // Whole-value read THROUGH a deref: `let x = *p;`. A Copy pointee is an
-    // ordinary read (the branch above does its bookkeeping); a non-Copy one
-    // would hand the referent's value to the receiver while its owner still
-    // releases it — the same E3017 as moving a field out of a borrow.
-    if (auto *d = dynamic_cast<HIRDeref *>(source))
-    {
-        if (d->type && !d->type->isCopyable())
-            log(errNode,
-                "cannot move out of a reference: '*p' only borrows the value, so the referent still owns it.",
-                E_MoveOutOfReference);
-        return;
-    }
-
-    // Partial (field) move: `let x = p.a` where a is non-Copy.
-    if (auto *ma = dynamic_cast<HIRMemberAccess *>(source))
-    {
-        std::string root;
-        std::vector<std::string> path;
-        if (!extractRootAndPath(ma, root, path)) return;
-        auto *sym = SymbolTable::getInstance().lookupSymbol(root);
-        if (!sym) return;
-
-        if (sym->state == VarState::Moved)
-        {
-            log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'", E_UseOfMovedValue);
-            return;
-        }
-        // Copy fields never move (mirrors MIR's isCopyType). A copy is a read:
-        // nothing is left half-initialized, so the Drop rule below cannot
-        // apply to it either (Rust allows `let n = p.count;` on a Drop type).
-        if (ma->type && ma->type->isCopyable()) return;
-
-        // E0507: a field cannot be moved out of a place we only BORROW. The
-        // borrow owns nothing, so the value would be handed to the receiver
-        // while the referent keeps releasing it — two owners of one buffer.
-        // Measured before this rule: `let x = r.s;` with `r: &mut P` and
-        // `s: String` corrupted the heap (0xC0000374) on exit.
-        if (auto refTy = referenceMovedOutOf(source))
-        {
-            log(*ma,
-                "cannot move out of '" + root + "." + joinPath(path)
-                    + "': it is behind the reference '" + refTy->toString()
-                    + "', so the value is only borrowed here and the referent still owns it.",
-                E_MoveOutOfReference);
-            return;
-        }
-
-        // E0509: a non-Copy field may not leave a value whose type implements
-        // Drop. The destructor releases that type's fields as a whole, so the
-        // partially-initialized value it would be handed is not a value it can
-        // legally touch — and the field cannot be released twice. Rust rejects
-        // the same move; whole-value moves are unaffected (nothing is left
-        // behind).
-        if (auto dropOwner = dropTypePartiallyMovedBy(source))
-        {
-            log(*ma,
-                "cannot move out of '" + displayName(dropOwner->getName())
-                    + "': the type implements Drop, so its fields are released together by its own destructor.",
-                E_MoveOutOfDropType);
-            return;
-        }
-
-        // Reject re-reading a moved field or an ancestor of it.
-        for (const auto &existing : sym->movedFields)
-        {
-            bool existingIsPrefix = existing.size() <= path.size()
-                                    && std::equal(existing.begin(), existing.end(), path.begin());
-            bool pathIsPrefix = path.size() <= existing.size()
-                                && std::equal(path.begin(), path.end(), existing.begin());
-            if (existingIsPrefix || pathIsPrefix)
-            {
-                log(errNode, "use of moved value: '" + root + "." + joinPath(path) + "'", E_UseOfMovedValue);
-                return;
-            }
-        }
-        sym->movedFields.push_back(path);
     }
 }
 
@@ -3032,9 +2820,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         {
             log(*node, "global variable initializer must be a literal (not '" + (initType ? initType->toString() : std::string("?")) + "').");
         }
-
-        // Move semantics check (whole-variable or field-path move source).
-        handleMoveSource(node->init.value().get(), *node);
 
         // Borrow promotion: `let r = &p` binds the borrow to the variable r, so
         // it survives the statement. Under NLL its liveness runs to r's last use;
@@ -3346,9 +3131,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         }
     }
 
-    // Move semantics (whole-variable or field-path move source).
-    handleMoveSource(node->value.get(), *node);
-
     // The assignment target is reinitialized — it owns a fresh value again, so
     // a prior move-out must not poison later reads (mirrors the MIR-side
     // movedLocals_.erase in MIRBuilder::buildAssign).
@@ -3448,9 +3230,6 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
         return;
     }
 
-    // Matching an owned enum consumes it (a whole-value move) — Rust semantics.
-    handleMoveSource(node->scrutinee.get(), *node);
-
     const auto &variants = enumTy->getVariants();
 
     // The match's bindings die with the match; put them in a dedicated scope.
@@ -3533,7 +3312,6 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
         {
             hasValueArm = true;
             analyzeExpr(arm.tailValue.get());
-            handleMoveSource(arm.tailValue.get(), *node);
             auto tailTy = arm.tailValue->type;
             // A DIVERGING arm (`None => panic("...")`) produces no value, so it
             // must not fix the match's type — `match o { Some(v) => v, None =>
@@ -3728,8 +3506,6 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
                 node->value.value()->type = retTy;
             }
         }
-        // A by-value non-Copy return consumes the source (`ret p` moves p).
-        handleMoveSource(node->value.value().get(), *node);
     }
 
     if (functionInfo.declaredReturnType && !typesCompatible(functionInfo.declaredReturnType, retTy))
@@ -3748,16 +3524,6 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
 void HIRSemanticAnalyzer::visit(HIRExprStmt *node)
 {
     analyzeExpr(node->expr.get());
-
-    // A discarded expression statement CONSUMES its value: `p.a;` releases the
-    // field right away and `d;` drops the whole value (MIR's buildExprStmt
-    // lowers exactly that). Without the move bookkeeping here the value looked
-    // untouched to every later check, so
-    //     p.s; let y = p.s;        // s: String
-    // compiled and moved a buffer that had already been freed (double free),
-    // and a partial move out of a Drop type written in this form skipped the
-    // E0509 check entirely.
-    handleMoveSource(node->expr.get(), *node);
 
     // `panic("...");` (or any call returning the uninhabited type) never returns,
     // so the rest of this statement sequence is unreachable.
@@ -3911,9 +3677,9 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
     }
 
     // Borrow-check: a Copy read of a whole variable conflicts with active &mut
-    // borrows. Non-Copy uses are moves and are checked at the consuming sites
-    // (handleMoveSource). Also close the read-after-move gap in non-consuming
-    // positions (e.g. `if x == 0` after `let y = x;`).
+    // borrows. Non-Copy uses are moves and are checked at the consuming sites.
+    // Also close the read-after-move gap in non-consuming positions (e.g. `if x
+    // == 0` after `let y = x;`).
     if (!mirBorrowCheck_)
     {
         if (sym->type && sym->type->isCopyable())
@@ -4299,16 +4065,7 @@ void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
         }
     }
     if (operatorResolved)
-    {
-        // By-value `self`/`other` consume both operands (mirrors call args). An
-        // operand the resolver wrapped in a HIRRef is only BORROWED by the call
-        // (that is what makes `a == b` on a non-Copy type possible at all).
-        if (!dynamic_cast<HIRRef *>(node->left.get()))
-            handleMoveSource(node->left.get(), *node);
-        if (!dynamic_cast<HIRRef *>(node->right.get()))
-            handleMoveSource(node->right.get(), *node);
         return;
-    }
 
     switch (node->opKind)
     {
@@ -5417,9 +5174,6 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         {
             if (node->object->type && !typesCompatible(selfParamTy, node->object->type))
                 log(*node, "receiver type mismatch for by-value self method.");
-            // By-value self consumes the receiver (`x.drop()` moves x).
-            HIRExpr *obj = node->object.get();
-            handleMoveSource(obj, *node);
             node->args.insert(node->args.begin(), std::move(node->object));
         }
 
@@ -6330,10 +6084,6 @@ void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
             log(*node->args[i], "payload type mismatch for variant '" + node->variantName + "': expected '" + variant->payloadTypes[i]->toString() + "', got '" + node->args[i]->type->toString() + "'.");
     }
 
-    // Non-Copy payload args are moved into the enum value.
-    for (auto &arg : node->args)
-        handleMoveSource(arg.get(), *node);
-
     node->type = finalEnumTy;
 }
 
@@ -6484,9 +6234,6 @@ void HIRSemanticAnalyzer::visit(HIRTry *node)
         return;
     }
 
-    // `?` CONSUMES the Result: on the error path its payload is moved into the
-    // value that is returned, and on the ok path the payload is moved out.
-    handleMoveSource(node->expr.get(), *node);
     node->type = okPayloadTy;
 }
 

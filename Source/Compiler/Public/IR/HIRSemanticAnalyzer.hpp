@@ -314,11 +314,6 @@ private:
     /** Dispatch a method call on a generic param receiver via its trait bounds. */
     void dispatchGenericParamMethod(HIRCall *node, std::shared_ptr<GenericParamType> gp);
 
-    /** Analyze the move semantics of consuming `source` (a whole variable or a
-     *  field path). Rejects whole-value and field use-after-move and records
-     *  partial (field) moves on the root symbol. */
-    void handleMoveSource(HIRExpr *source, HIRNode &errNode);
-
     /** True when the current context may touch a PRIVATE field of `type`: we are
      *  inside a method of that very type (inherent impl or trait impl, static or
      *  not — the declaring type is what matters, not which impl block introduced
@@ -330,51 +325,19 @@ private:
     /** Report a private-field access (E3015) unless it is legal here. */
     void checkFieldAccess(const CustomType::Field &field, const std::shared_ptr<CustomType> &type, HIRNode &errNode);
 
-    /** Implicit reborrow for a reference argument. Returns true when `arg` is a
-     *  reference-typed PLACE passed to a REFERENCE parameter: the callee borrows
-     *  the referent for the duration of the call (a temporary borrow, exactly
-     *  like a method receiver) and the argument is NOT moved — otherwise
-     *  forwarding a `&mut T` would consume it. Returns false for by-value
-     *  parameters and non-place arguments, where the normal copy/move rules
-     *  apply. */
-    bool tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Type> &paramTy, HIRNode &errNode);
-
     /** Type-check a call's arguments against its parameter types — the one
      *  place every call form shares, so the rules cannot drift between a free
      *  function, an instance method, a static method and a trait method:
      *    - analyse the argument (its type is what the check needs),
      *    - typesCompatible() rather than equals(), so a `&mut T` argument
      *      satisfies a `&T` parameter,
-     *    - a REFERENCE argument to a REFERENCE parameter is reborrowed and the
-     *      caller keeps it; anything else follows the by-value copy/move rules
-     *      and the source is consumed (handleMoveSource).
+     *    - a REFERENCE argument to a REFERENCE parameter is left for the MIR
+     *      borrow checker, which registers the temporary reborrow.
      *  `paramOffset` is 1 for a method call (params[0] is the receiver, which
      *  is not an argument) and 0 for a free function or static method. When
      *  `explainUninferredGeneric` is set, a context-free generic value
      *  (`f(Option::None)` with an `Option<i32>` parameter) is explained as an
      *  inference failure instead of a bare mismatch. */
-    /** Every place a move out of the member-access chain `source` would take a
-     *  field OUT of: the receiver of the first projection, then each
-     *  intermediate projection (`s.a.b` → the types of `s` and of `s.a`). Empty
-     *  when `source` is not a field access. A move leaves all of them behind,
-     *  which is what the two rules below test. */
-    std::vector<std::shared_ptr<Type>> moveOutContainers(HIRExpr *source);
-
-    /** Rust's E0507 as a language decision (2026-09-15): a field cannot be moved
-     *  out of a place the function only BORROWS. A borrow owns nothing, so the
-     *  value would go to the receiver while the referent keeps releasing it —
-     *  two owners of one buffer. Returns the reference the move would go
-     *  through, or nullptr. (Reading a Copy field through a reference is a copy,
-     *  not a move, and never reaches this.) */
-    std::shared_ptr<ReferenceType> referenceMovedOutOf(HIRExpr *source);
-
-    /** Rust's E0509 as a language decision (2026-09-15): a non-Copy field may
-     *  not be moved OUT of a value whose type implements Drop, because that
-     *  leaves the value partially initialized while its own destructor owns all
-     *  of its fields. Returns the type that would be left behind, or nullptr.
-     *  Whole-value moves leave nothing behind and stay legal. */
-    std::shared_ptr<CustomType> dropTypePartiallyMovedBy(HIRExpr *source);
-
     void checkCallArgs(const std::vector<std::unique_ptr<HIRExpr>> &args,
         const std::vector<std::shared_ptr<Type>> &params,
         size_t paramOffset,
