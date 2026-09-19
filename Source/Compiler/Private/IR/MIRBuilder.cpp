@@ -1370,13 +1370,31 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
 
     BasicBlockId doneId = newBlock("match_done");
 
+    // Is EVERY tag covered? Either a wildcard arm exists, or the variant arms
+    // name every variant. The last arm of an exhaustive match is entered
+    // UNCONDITIONALLY: its "tag does not match" edge is dead code, and leaving
+    // it in creates a CFG path on which that arm never runs — the value it
+    // writes into the match's result slot then stays uninitialized on that path
+    // and the join reads it (MIRBorrowCheck flagged exactly this as "use of
+    // uninitialized value", and the backend would have loaded garbage).
+    size_t coveredVariants = 0;
+    {
+        std::vector<std::string> seen;
+        for (const auto &a : match->arms)
+            if (!a.isWildcard && std::find(seen.begin(), seen.end(), a.variantName) == seen.end())
+                seen.push_back(a.variantName);
+        coveredVariants = seen.size();
+    }
+    const bool exhaustive = coveredVariants >= variants.size();
+
     for (size_t armIdx = 0; armIdx < match->arms.size(); ++armIdx)
     {
         auto &arm = match->arms[armIdx];
         bool isLast = (armIdx + 1 == match->arms.size());
         BasicBlockId nextId = doneId;
+        const bool enterUnconditionally = arm.isWildcard || (isLast && exhaustive);
 
-        if (!arm.isWildcard)
+        if (!enterUnconditionally)
         {
             // Discriminant check: `if __m.__tag == variantIndex`.
             int64_t vi = -1;

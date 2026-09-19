@@ -109,6 +109,12 @@ struct LocalState
     /// Paths moved out on SOME path (the UNION rule at a join): a may-analysis,
     /// which is what a use-after-move diagnostic needs.
     std::vector<MovePath> moved;
+    /// Paths CONSUMED by a drop (`d;` discards a value, a scope-end drop releases
+    /// one). A read or a move over either set is use-after-move, but only `moved`
+    /// blocks an ASSIGNMENT: dropping the old value and immediately writing a new
+    /// one is how every re-assignment is lowered (`x = S { .. };`), while a plain
+    /// assignment over a MOVED binding stays E3005 (single owner, no revival).
+    std::vector<MovePath> dropped;
 };
 
 struct State
@@ -125,6 +131,8 @@ bool sameState(const State &a, const State &b)
         if (a.locals[i].maybeInit != b.locals[i].maybeInit)
             return false;
         if (!samePaths(a.locals[i].moved, b.locals[i].moved))
+            return false;
+        if (!samePaths(a.locals[i].dropped, b.locals[i].dropped))
             return false;
     }
     return true;
@@ -338,6 +346,9 @@ private:
     bool moveByAssignment(const MIRStatement &stmt, MIRPlace &source) const;
     /// Mark the destination of an assignment as owned again.
     void definePlace(const MIRPlace &place, State &st);
+    /// Record that a place was consumed (a drop releases it) without reporting
+    /// anything: the run-time drop flags cover the conditional cases.
+    void markMoved(const MIRPlace &place, State &st);
 
     std::string displayName(const MIRPlace &place) const;
 
@@ -478,9 +489,14 @@ State FunctionChecker::joinPredecessors(size_t block) const
     }
     for (size_t p : preds)
         for (size_t i = 0; i < body_.locals.size(); ++i)
+        {
             for (const auto &movedPath : out_[p].locals[i].moved)
                 if (!hasPath(st.locals[i].moved, movedPath))
                     st.locals[i].moved.push_back(movedPath);
+            for (const auto &dropPath : out_[p].locals[i].dropped)
+                if (!hasPath(st.locals[i].dropped, dropPath))
+                    st.locals[i].dropped.push_back(dropPath);
+        }
     return st;
 }
 
@@ -627,7 +643,16 @@ void FunctionChecker::transferStmt(const MIRStatement &stmt, State &st, bool rep
     if (auto *drop = std::get_if<MIRStmtDrop>(&stmt))
     {
         checkAccess(drop->place, AccessKind::Read);
-        checkReadable(drop->place, st, report);
+        // A drop RELEASES the value, so the place is moved out afterwards: that
+        // is what makes a DISCARDED expression statement (`d;`) a move —
+        // `d; let e = d;` must report use-after-move.
+        //
+        // It never REPORTS use-after-move itself: MIRBuilder guards a drop of a
+        // conditionally moved value with run-time drop flags
+        // (`if c == 1 { let b = a; } ... drop(a)` is legal and drops nothing when
+        // the branch did not run). It also never reports E3011 — the same flags
+        // decide whether there is anything to release.
+        markMoved(drop->place, st);
         return;
     }
     // MIRStmtNop: nothing to track.
@@ -747,7 +772,7 @@ void FunctionChecker::checkReadable(const MIRPlace &place, const State &st, bool
     // moved binding (the HIR checker reports this at the name reference, whatever
     // the surrounding projection is). A merely PARTIALLY moved value is not a
     // read error — the sibling fields are still owned.
-    if (hasPath(ls.moved, MovePath{}))
+    if (hasPath(ls.moved, MovePath{}) || hasPath(ls.dropped, MovePath{}))
         logAt(place, "use of moved value: '" + body_.locals[info.root].name + "'", E_UseOfMovedValue);
 }
 
@@ -757,12 +782,19 @@ void FunctionChecker::checkAssignTarget(const MIRPlace &place, const State &st, 
     // body is legal even though the previous iteration moved r out (the HIR
     // checker resets the binding on a var-decl for the same reason). A plain
     // assignment over a moved binding stays E3005 — single owner, no revival.
+    //
+    // Neither rule is about COMPILER TEMPS: the single-owner story is about user
+    // bindings, and MIRBuilder re-initialises a temp at every use site (the callee
+    // name temp in a loop body is assigned, dropped at the block end and assigned
+    // again on the next iteration).
     if (isDeclaration)
         return;
 
     const PlaceInfo info = describePlace(place);
     if (!info.isLocal || info.throughDeref || info.root >= st.locals.size())
         return;
+    if (body_.locals[info.root].isTemp)
+        return; // a compiler temp is not a user binding (see above)
     const LocalState &ls = st.locals[info.root];
     const std::string rootName = body_.locals[info.root].name;
 
@@ -825,12 +857,15 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
         for (const MovePath &p : ls.moved)
             if (!p.empty())
                 anyFieldMoved = true;
+        for (const MovePath &p : ls.dropped)
+            if (!p.empty())
+                anyFieldMoved = true;
         if (anyFieldMoved)
         {
             logAt(place, "use of moved value: '" + rootName + "' (partially moved)", E_UseOfMovedValue);
             return;
         }
-        if (hasPath(ls.moved, MovePath{}))
+        if (hasPath(ls.moved, MovePath{}) || hasPath(ls.dropped, MovePath{}))
         {
             logAt(place, "use of moved value: '" + rootName + "'", E_UseOfMovedValue);
             return;
@@ -839,7 +874,7 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
         return;
     }
 
-    if (hasPath(ls.moved, MovePath{}))
+    if (hasPath(ls.moved, MovePath{}) || hasPath(ls.dropped, MovePath{}))
     {
         logAt(place, "use of moved value: '" + rootName + "." + joinPath(info.path) + "'", E_UseOfMovedValue);
         return;
@@ -871,6 +906,14 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
     }
 
     for (const MovePath &existing : ls.moved)
+    {
+        if (pathsOverlap(existing, info.path))
+        {
+            logAt(place, "use of moved value: '" + rootName + "." + joinPath(info.path) + "'", E_UseOfMovedValue);
+            return;
+        }
+    }
+    for (const MovePath &existing : ls.dropped)
     {
         if (pathsOverlap(existing, info.path))
         {
@@ -918,7 +961,9 @@ void FunctionChecker::checkBorrowOfMoved(const MIRPlace &place, const State &st)
     if (!info.isLocal || info.root >= st.locals.size())
         return;
     const LocalState &ls = st.locals[info.root];
-    for (const MovePath &moved : ls.moved)
+    std::vector<MovePath> consumed = ls.moved;
+    consumed.insert(consumed.end(), ls.dropped.begin(), ls.dropped.end());
+    for (const MovePath &moved : consumed)
     {
         if (pathsOverlap(moved, info.path))
         {
@@ -927,6 +972,16 @@ void FunctionChecker::checkBorrowOfMoved(const MIRPlace &place, const State &st)
             return;
         }
     }
+}
+
+void FunctionChecker::markMoved(const MIRPlace &place, State &st)
+{
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal || info.throughDeref || info.root >= st.locals.size())
+        return;
+    LocalState &ls = st.locals[info.root];
+    if (!hasPath(ls.moved, info.path) && !hasPath(ls.dropped, info.path))
+        ls.dropped.push_back(info.path);
 }
 
 void FunctionChecker::definePlace(const MIRPlace &place, State &st)
@@ -943,6 +998,11 @@ void FunctionChecker::definePlace(const MIRPlace &place, State &st)
         if (!pathsOverlap(p, info.path))
             kept.push_back(p);
     ls.moved = std::move(kept);
+    std::vector<MovePath> keptDropped;
+    for (const MovePath &p : ls.dropped)
+        if (!pathsOverlap(p, info.path))
+            keptDropped.push_back(p);
+    ls.dropped = std::move(keptDropped);
 }
 
 // ─── borrow checking ────────────────────────────────────────────────────────
@@ -1141,7 +1201,13 @@ void FunctionChecker::collectBorrowSites()
             if (!dest.isLocal || dest.throughDeref || !dest.path.empty())
                 continue;
 
-            const bool twoPhase = callArgLocals_.count(dest.root) > 0;
+            // A RESERVATION is a temporary taken for a call (a receiver or a
+            // reference argument) — never a `let r = &mut x;` BINDING, which is a
+            // promoted borrow that lasts as long as r does. Only a temp can be a
+            // reservation; marking a binding relaxed reads through its &mut
+            // borrow (`let r = &mut v; let x = v[0]; r.push(2);` must be rejected).
+            const bool twoPhase = body_.locals[dest.root].isTemp
+                                  && callArgLocals_.count(dest.root) > 0;
             std::vector<size_t> ids;
             const PlaceInfo rinfo = describePlace(ref->place);
             if (rinfo.throughDeref)
