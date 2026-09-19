@@ -277,9 +277,29 @@ protected:
     /// (module-path, content); files are written under a fresh temp dir that is
     /// prepended to Context::searchPaths, so `impt foo.bar;` finds foo/bar.lis.
     /// The stdlib is still preloaded into the root module (as compile() does).
+    /// When `diagnostics` is non-null the Logger's output is captured into it,
+    /// which is how a test asserts on WHICH FILE a diagnostic names.
     bool compileMulti(const std::string &source,
         const std::vector<std::pair<std::string, std::string>> &modules,
         std::string *diagnostics = nullptr)
+    {
+        if (!diagnostics)
+            return compileMultiImpl(source, modules);
+        fflush(stdout);
+        int saved = dup(_fileno(stdout));
+        FILE *f = freopen(diagPath.string().c_str(), "w", stdout);
+        (void)f;
+        bool ok = compileMultiImpl(source, modules);
+        fflush(stdout);
+        dup2(saved, _fileno(stdout));
+        close(saved);
+        std::ifstream fi(diagPath);
+        diagnostics->assign((std::istreambuf_iterator<char>(fi)), std::istreambuf_iterator<char>());
+        return ok;
+    }
+
+    bool compileMultiImpl(const std::string &source,
+        const std::vector<std::pair<std::string, std::string>> &modules)
     {
         auto context = std::make_shared<Context>();
         context->args->setArg("o", "2");
@@ -367,7 +387,6 @@ protected:
         Emitter emitter(context, opts);
         emitter.run();
         fs::remove_all(modDir);
-        (void)diagnostics;
         lastCompile_ = context;
         return true;
     }

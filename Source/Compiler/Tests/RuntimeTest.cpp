@@ -1021,6 +1021,30 @@ TEST_F(RuntimeTest, ModuleQualifiedEnumVariant)
     EXPECT_EQ(linkAndRun(), 7);
 }
 
+TEST_F(RuntimeTest, BorrowErrorInModuleNamesTheModuleFile)
+{
+    // A MIR-level borrow diagnostic must name the ITEM's file, not the main file:
+    // MIRFunction carries the source file of the top-level item it was lowered
+    // from (Context::stmtAttributions) and MIRBorrowCheck reports against it.
+    // Before that, an error inside a module claimed to be in test.lis.
+    std::string diag;
+    bool ok = compileMulti(
+        "impt badmod;\nfn main() -> i32 { ret badmod::bad(); }",
+        {{"badmod", "struct S { pub v: i32 }\n"
+                    "fn bad() -> i32 {\n"
+                    "    let mut x = S { v: 1 };\n"
+                    "    let r = &mut x;\n"
+                    "    x.v = 5;\n"
+                    "    ret r.v;\n"
+                    "}\n"}},
+        &diag);
+    EXPECT_FALSE(ok) << "writing a field through a live &mut borrow must be rejected";
+    EXPECT_NE(diag.find("badmod.lis"), std::string::npos)
+        << "the diagnostic must name the module file, got:\n"
+        << diag;
+    EXPECT_NE(diag.find("E4003"), std::string::npos) << diag;
+}
+
 TEST_F(RuntimeTest, ModuleCrossReference)
 {
     // Module a calls into module b (both imported by the main file).
