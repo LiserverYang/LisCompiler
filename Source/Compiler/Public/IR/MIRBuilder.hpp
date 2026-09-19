@@ -84,6 +84,21 @@ private:
 
     /** Maps user variable name → local index inside the current function. */
     std::unordered_map<std::string, size_t> varMap_;
+    /// A snapshot of varMap_ per open block / match arm. A binding declared in
+    /// an inner scope must NOT stay visible after it: a match arm binding `r`
+    /// shadowing an outer `r` used to leave the OUTER name pointing at the arm's
+    /// local, so `let r = match s { Circle(r) => r, ... }; ret r;` read a local
+    /// that the other arm never assigned (MIRBorrowCheck reported it as "use of
+    /// uninitialized value"; the backend would have loaded garbage).
+    std::vector<std::unordered_map<std::string, size_t>> varMapStack_;
+    void pushVarScope() { varMapStack_.push_back(varMap_); }
+    void popVarScope()
+    {
+        if (varMapStack_.empty())
+            return;
+        varMap_ = std::move(varMapStack_.back());
+        varMapStack_.pop_back();
+    }
 
     /**
      * Stack of "owned local" vectors, one per lexical block currently being

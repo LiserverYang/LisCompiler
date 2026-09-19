@@ -149,6 +149,7 @@ struct PlaceInfo
     /// index is not comparable across places.
     std::string globalName;
     MovePath path;          // projections up to the first Deref
+    MovePath tail;          // projections AFTER the first Deref
     bool throughDeref = false;
     bool derefIsLast = false;
     size_t derefAt = 0;     // index of the first Deref projection
@@ -174,15 +175,13 @@ PlaceInfo describePlace(const MIRPlace &place)
             }
             continue;
         }
-        if (!info.throughDeref)
-        {
-            if (p.kind == ProjectionKind::Field)
-                info.path.push_back(p.field);
-            else if (p.hasConstIndex)
-                info.path.push_back("[" + std::to_string(p.constIndex) + "]");
-            else
-                info.path.push_back("[*]"); // an unknown index may alias ANY element
-        }
+        MovePath &into = info.throughDeref ? info.tail : info.path;
+        if (p.kind == ProjectionKind::Field)
+            into.push_back(p.field);
+        else if (p.hasConstIndex)
+            into.push_back("[" + std::to_string(p.constIndex) + "]");
+        else
+            into.push_back("[*]"); // an unknown index may alias ANY element
     }
     return info;
 }
@@ -335,6 +334,17 @@ private:
     void checkAssignTarget(const MIRPlace &place, const State &st, bool report, bool isDeclaration);
     /// A MOVE source: the full ownership rule set (E3005/E3016/E3017).
     void checkMove(const MIRPlace &place, State &st, bool report);
+    /// Moving something out of a REFERENCE is E3017 (the `*p` wording when the
+    /// whole referent leaves, "behind the reference" for one of its fields).
+    /// Returns true when the caller must stop (reported, or a raw pointer, which
+    /// the stdlib uses precisely to move values in and out).
+    bool referenceMoveForbidden(const MIRPlace &place, const PlaceInfo &info, bool report);
+    /// E0509: the field's owner implements Drop, so its fields are released
+    /// together by its destructor. Returns true when it reported.
+    bool dropOwnerForbidden(const MIRPlace &place, const PlaceInfo &info, bool report);
+    /// Type rules for a DISCARDED value (`p.a;`): dropping it is a move out of
+    /// the owner, so the same E3017/E0507/E0509 rules apply.
+    void checkDiscardedPlace(const MIRPlace &place, bool report);
     /// Borrowing a binding that was moved out of (E4005).
     void checkBorrowOfMoved(const MIRPlace &place, const State &st);
     /// A whole local holding a `&mut T`. The type is NOT Copy, so an assignment
@@ -652,6 +662,7 @@ void FunctionChecker::transferStmt(const MIRStatement &stmt, State &st, bool rep
         // (`if c == 1 { let b = a; } ... drop(a)` is legal and drops nothing when
         // the branch did not run). It also never reports E3011 — the same flags
         // decide whether there is anything to release.
+        checkDiscardedPlace(drop->place, report);
         markMoved(drop->place, st);
         return;
     }
@@ -825,23 +836,7 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
 
     if (info.throughDeref)
     {
-        // A RAW pointer is not a borrow: moving a value out through `*mut T` is
-        // exactly what the stdlib heap containers do (`self.data[self.len]`).
-        if (!derefIsReference(info, place))
-            return;
-        if (info.derefIsLast || info.path.empty())
-        {
-            logAt(place,
-                "cannot move out of a reference: '*p' only borrows the value, so the referent still owns it.",
-                E_MoveOutOfReference);
-            return;
-        }
-        const std::shared_ptr<Type> base = typeAfter(body_.locals[info.root].type, place, info.path.size());
-        const std::string refName = base ? base->toString() : std::string("&T");
-        logAt(place,
-            "cannot move out of '" + displayName(place) + "': it is behind the reference '" + refName
-                + "', so the value is only borrowed here and the referent still owns it.",
-            E_MoveOutOfReference);
+        referenceMoveForbidden(place, info, report);
         return;
     }
 
@@ -880,30 +875,8 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
         return;
     }
 
-    // E0509: a field cannot leave a value whose type implements Drop — the
-    // destructor releases that type's fields as a whole. The owner is the type
-    // the LAST projection reads out of.
-    const size_t ownerUpTo = place.projections.empty()
-                                 ? 0
-                                 : (place.projections.back().kind == ProjectionKind::Field
-                                           && place.projections.size() >= 1
-                                       ? place.projections.size() - 1
-                                       : place.projections.size());
-    std::shared_ptr<Type> owner = typeAfter(body_.locals[info.root].type, place, ownerUpTo);
-    while (owner && owner->getKind() == Type::Kind::Reference)
-        owner = std::static_pointer_cast<ReferenceType>(owner)->getBaseType();
-    if (owner && owner->getKind() == Type::Kind::Custom)
-    {
-        auto custom = std::static_pointer_cast<CustomType>(owner);
-        if (custom->implementsTrait("Drop"))
-        {
-            logAt(place,
-                "cannot move out of '" + custom->getName()
-                    + "': the type implements Drop, so its fields are released together by its own destructor.",
-                E_MoveOutOfDropType);
-            return;
-        }
-    }
+    if (dropOwnerForbidden(place, info, report))
+        return;
 
     for (const MovePath &existing : ls.moved)
     {
@@ -972,6 +945,75 @@ void FunctionChecker::checkBorrowOfMoved(const MIRPlace &place, const State &st)
             return;
         }
     }
+}
+
+bool FunctionChecker::referenceMoveForbidden(const MIRPlace &place, const PlaceInfo &info, bool report)
+{
+    // A RAW pointer is not a borrow: moving a value out through `*mut T` is
+    // exactly what the stdlib heap containers do (`self.data[self.len]`).
+    if (!derefIsReference(info, place))
+        return true;
+    // A projection AFTER the deref means a FIELD of the referent is being moved
+    // out (`r.s`), which HIR reports as "behind the reference"; moving the whole
+    // referent (`*p`) is the other wording.
+    if (info.tail.empty())
+    {
+        logAt(place,
+            "cannot move out of a reference: '*p' only borrows the value, so the referent still owns it.",
+            E_MoveOutOfReference);
+        return true;
+    }
+    const std::shared_ptr<Type> base = typeAfter(body_.locals[info.root].type, place, info.derefAt);
+    const std::string refName = base ? base->toString() : std::string("&T");
+    logAt(place,
+        "cannot move out of '" + body_.locals[info.root].name + "." + joinPath(info.tail)
+            + "': it is behind the reference '" + refName
+            + "', so the value is only borrowed here and the referent still owns it.",
+        E_MoveOutOfReference);
+    return true;
+}
+
+bool FunctionChecker::dropOwnerForbidden(const MIRPlace &place, const PlaceInfo &info, bool report)
+{
+    // E0509: a field cannot leave a value whose type implements Drop — the
+    // destructor releases that type's fields as a whole. The owner is the type
+    // the LAST field projection reads out of.
+    const size_t ownerUpTo = place.projections.empty()
+                                 ? 0
+                                 : (place.projections.back().kind == ProjectionKind::Field
+                                       ? place.projections.size() - 1
+                                       : place.projections.size());
+    std::shared_ptr<Type> owner = typeAfter(body_.locals[info.root].type, place, ownerUpTo);
+    while (owner && owner->getKind() == Type::Kind::Reference)
+        owner = std::static_pointer_cast<ReferenceType>(owner)->getBaseType();
+    if (!owner || owner->getKind() != Type::Kind::Custom)
+        return false;
+    auto custom = std::static_pointer_cast<CustomType>(owner);
+    if (!custom->implementsTrait("Drop"))
+        return false;
+    logAt(place,
+        "cannot move out of '" + custom->getName()
+            + "': the type implements Drop, so its fields are released together by its own destructor.",
+        E_MoveOutOfDropType);
+    return true;
+}
+
+void FunctionChecker::checkDiscardedPlace(const MIRPlace &place, bool report)
+{
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal || info.root >= body_.locals.size())
+        return;
+    const bool nonCopy = place.type && !place.type->isCopyable()
+                         && place.type->getKind() != Type::Kind::Function;
+    if (!nonCopy)
+        return;
+    // A write through a reference drops the OVERWRITTEN value first (`*out = v`),
+    // which is not a discarded expression and must not be read as a move out of
+    // the referent — so the reference rules stay with real moves (checkMove).
+    if (info.throughDeref)
+        return;
+    if (!info.path.empty())
+        (void)dropOwnerForbidden(place, info, report);
 }
 
 void FunctionChecker::markMoved(const MIRPlace &place, State &st)

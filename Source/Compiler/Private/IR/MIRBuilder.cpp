@@ -930,8 +930,11 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
 void MIRBuilder::buildBlock(HIRBlock *block)
 {
     // Open a fresh owned-local list for this block. Nested blocks push their
-    // own list, so each scope only drops what it declared.
+    // own list, so each scope only drops what it declared. The NAME scope is
+    // saved with it: a binding declared here must not stay visible after the
+    // block (it shadows any outer binding of the same name).
     ownedLocalsStack_.emplace_back();
+    pushVarScope();
 
     bool terminatedEarly = false;
 
@@ -967,6 +970,7 @@ void MIRBuilder::buildBlock(HIRBlock *block)
     }
 
     ownedLocalsStack_.pop_back();
+    popVarScope();
 }
 
 void MIRBuilder::buildStmt(HIRStmt *stmt)
@@ -1443,6 +1447,7 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
         // scrutinee, so its drop is skipped).
         size_t armFrameBase = ownedLocalsStack_.size();
         ownedLocalsStack_.emplace_back();
+        pushVarScope();
         for (size_t i = 0; i < arm.bindings.size(); ++i)
         {
             const std::string &name = arm.bindings[i].first;
@@ -1524,6 +1529,7 @@ MIRPlace MIRBuilder::buildMatch(HIRMatch *match)
             sealBlock(curBB_, MIRTermGoto{.target = doneId});
         }
         ownedLocalsStack_.pop_back();
+        popVarScope();
 
         if (isLast || arm.isWildcard)
             switchTo(doneId);
