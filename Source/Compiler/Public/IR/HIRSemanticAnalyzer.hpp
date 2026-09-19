@@ -477,6 +477,18 @@ private:
      *  when the type does not implement the trait. */
     bool resolveIndexMethod(HIRIndexAccess *node, const std::shared_ptr<CustomType> &ct, bool forWrite);
 
+    /** Verify every constraint an `impl` put on its generic parameters against
+     *  the instantiation a call site is using (`subst` maps the method's
+     *  parameter names to the receiver/class instantiation's arguments).
+     *  `impl<T: Copy> Index<T> for Vec<T>` indexed as `Vec<String>` is rejected
+     *  here — the element would otherwise be handed out BY VALUE while the
+     *  container still owned it (a double drop). Reports the first violation and
+     *  returns false. MUST run before the signature is substituted:
+     *  substituteType() rebuilds the FunctionType and drops its genericParams. */
+    bool checkMethodGenericBounds(const std::shared_ptr<FunctionType> &fnType,
+        const std::unordered_map<std::string, std::shared_ptr<Type>> &subst,
+        HIRNode &errNode, const std::string &owner);
+
     /** Bind one binary-operator operand to the trait method's parameter type.
      *
      * A parameter may be the operand's type directly, or a REFERENCE to it: the

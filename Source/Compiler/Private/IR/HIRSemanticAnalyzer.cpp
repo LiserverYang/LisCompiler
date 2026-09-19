@@ -1896,8 +1896,24 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
         }
         // The impl's own generic params (e.g. X in `impl<X> Iterator<X> for Range<X>`)
         // are also in scope when resolving the trait/struct generic args below.
+        //
+        // Their BOUNDS are resolved here, exactly like a function's or a struct's
+        // (see visit(HIRFunction)/buildStructType): an impl may RE-declare the
+        // struct's parameter to constrain it (`impl<T: Copy> Index<T> for Vec<T>`),
+        // and the T its methods see must carry that bound — otherwise a body
+        // reading an element is classified as a MOVE (E3017) and the call site has
+        // nothing to check, so the bound was silently ignored.
         for (auto &gp : node->gParams)
+        {
+            std::vector<std::shared_ptr<TraitType>> traits;
+            auto cIt = node->unsolveConstraints.find(gp->getParamName());
+            if (cIt != node->unsolveConstraints.end())
+                for (auto &con : cIt->second)
+                    if (auto trait = resolveTraitConstraint(con, *node, /*silent=*/suppressTypeErrors_))
+                        traits.push_back(trait);
+            gp->updateContraints(std::move(traits));
             structGParams[gp->getParamName()] = gp;
+        }
         // NOTE: selfTypeForMethods stays as baseStruct (the generic definition).
         // `self` inside methods has type Box (with T referring to structGParams).
         // At call sites, the Method branch in visit(HIRCall) substitutes T -> concrete.
@@ -2255,6 +2271,14 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
         for (auto &gp : structTy->getGenericParams())
         {
             auto gpTy = std::static_pointer_cast<GenericParamType>(gp);
+            // A parameter the impl RE-declared with bounds is the one in scope
+            // (visit(HIRImpl) put it into structGParams), and its bound is what a
+            // call site must satisfy — the method's signature must carry THAT
+            // param, not the struct's unconstrained one. This is what makes
+            // `impl<T: Copy> Index<T> for Vec<T>` checkable at all.
+            if (auto scopeIt = structGParams.find(gpTy->getParamName()); scopeIt != structGParams.end())
+                if (!scopeIt->second->getConstraints().empty())
+                    gpTy = scopeIt->second;
             bool present = false;
             for (const auto &existing : genericParams)
                 if (existing->getParamName() == gpTy->getParamName())
@@ -5007,6 +5031,35 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
         return true;
     }
 
+    // `__drop(x)` releases the value at a PLACE right now — the container-side
+    // counterpart of the scope-end drop glue, and the only way a standard
+    // library collection can run its ELEMENTS' destructors (a Vec owns an
+    // arbitrary number of them behind one raw pointer). It CONSUMES the place:
+    // MIR lowers it to the ordinary MIRStmtDrop, whose bookkeeping (a local's
+    // run-time drop flags, the partial-move decomposition, the dynamic case) is
+    // exactly the scope-end path, so a later scope-end drop skips it.
+    if (name == "__drop")
+    {
+        if (node->args.size() != 1)
+            log(*node, "builtin '__drop' expects 1 argument, got " + std::to_string(node->args.size()) + ".");
+        if (!node->args.empty())
+        {
+            analyzeExpr(node->args[0].get());
+            // Only a place can be dropped: `__drop(1 + 2)` has nothing to
+            // release. (A place that is itself behind a failed sub-expression
+            // already reported its own error, so stay quiet about it here.)
+            std::string droot;
+            std::vector<std::string> dpath;
+            if (node->args[0]->type && !resolvePlace(node->args[0].get(), droot, dpath))
+                log(*node->args[0], "builtin '__drop' expects a place (a variable, a field, an index or a dereference), which is what it releases.");
+        }
+
+        node->type = voidTy;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = voidTy;
+        return true;
+    }
+
     // The pointer parameters below are deliberately TYPE-AGNOSTIC: at the LLVM
     // level they are all opaque `ptr`, and libc neither knows nor cares about
     // the pointee. A container therefore frees/copies a `*mut T` buffer with the
@@ -5565,6 +5618,14 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 auto gp = std::static_pointer_cast<GenericParamType>(gps[i]);
                 structSubst[gp->getParamName()] = gas[i];
             }
+            // An impl-level bound (`impl<T: Copy> Foo<T> { fn bar(self) }`) is a
+            // property of THIS instantiation, and the substitution below is what
+            // erases the evidence — so check it here.
+            if (!checkMethodGenericBounds(newTy, structSubst, *node, customTy->getOriginName() + "::" + node->methodName))
+            {
+                node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+                return;
+            }
             newTy = std::static_pointer_cast<FunctionType>(substituteType(newTy, structSubst));
         }
 
@@ -5823,6 +5884,13 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 auto gp = std::static_pointer_cast<GenericParamType>(gps[i]);
                 structSubst[gp->getParamName()] = gas[i];
             }
+            // Same impl-level bound check as the Method branch (and before the
+            // substitution, which drops the generic params).
+            if (!checkMethodGenericBounds(funcType, structSubst, *node, customTy->getOriginName() + "::" + node->methodName))
+            {
+                node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+                return;
+            }
             funcType = std::static_pointer_cast<FunctionType>(substituteType(funcType, structSubst));
         }
 
@@ -5957,6 +6025,47 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
 // resolveOperatorMethod and built the same way (symbol under the ORIGIN name +
 // struct-argument substitution), so indexing and the binary operators share one
 // mental model.
+// An impl's bounds are checked at the CALL SITE, not by conformance: implTrait
+// is registered per TYPE (with the struct's parameter inside, later substituted
+// per instantiation), so `Vec<String>` still "implements" Index — the bound on
+// the impl's re-declared T is what says that instantiation may not use it.
+bool HIRSemanticAnalyzer::checkMethodGenericBounds(
+    const std::shared_ptr<FunctionType> &fnType,
+    const std::unordered_map<std::string, std::shared_ptr<Type>> &subst,
+    HIRNode &errNode, const std::string &owner)
+{
+    if (!fnType) return true;
+
+    for (const auto &gpRaw : fnType->getGenericParams())
+    {
+        auto gp = std::dynamic_pointer_cast<GenericParamType>(gpRaw);
+        if (!gp || gp->getConstraints().empty()) continue;
+
+        // Not instantiated at this call site (the parameter is still generic,
+        // e.g. a method of a generic function's body): its own caller checks it.
+        auto it = subst.find(gp->getParamName());
+        if (it == subst.end() || !it->second) continue;
+        const std::shared_ptr<Type> &arg = it->second;
+
+        for (const auto &constraint : gp->getConstraints())
+        {
+            bool satisfied = false;
+            for (const auto &impl : arg->implTrait)
+                if (impl->equals(constraint))
+                {
+                    satisfied = true;
+                    break;
+                }
+            if (satisfied) continue;
+
+            log(errNode, "type '" + arg->toString() + "' does not implement trait '"
+                             + displayName(constraint->getName()) + "' required by '" + owner + "'.");
+            return false;
+        }
+    }
+    return true;
+}
+
 bool HIRSemanticAnalyzer::resolveIndexMethod(HIRIndexAccess *node,
     const std::shared_ptr<CustomType> &ct,
     bool forWrite)
@@ -5988,6 +6097,19 @@ bool HIRSemanticAnalyzer::resolveIndexMethod(HIRIndexAccess *node,
         const auto &gas = ct->getGenericArgs();
         for (size_t i = 0; i < gps.size() && i < gas.size(); ++i)
             structSubst[std::static_pointer_cast<GenericParamType>(gps[i])->getParamName()] = gas[i];
+
+        // The impl's own bounds first (and BEFORE the substitution, which drops
+        // the generic params): `impl<T: Copy> Index<T> for Vec<T>` must not be
+        // usable on `Vec<String>` — the trait hands the element out BY VALUE, so
+        // a non-Copy element would be moved out while the container still owned
+        // it (a double drop at teardown).
+        if (!checkMethodGenericBounds(newTy, structSubst, *node, symName))
+        {
+            log(*node, "indexing '" + ct->toString()
+                           + "' is only allowed for Copy elements: the index operator returns the element by value. Use at_ref/at_mut (they lend a reference) or a move-out method (pop/remove) instead.");
+            return true; // reported; do not also emit the "not indexable" error
+        }
+
         newTy = std::static_pointer_cast<FunctionType>(substituteType(newTy, structSubst));
     }
 

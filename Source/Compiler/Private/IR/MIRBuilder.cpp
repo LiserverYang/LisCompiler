@@ -1958,6 +1958,21 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
             return nr->name == "__sizeof";
         return false;
     }();
+
+    // `__drop(x)` is not a call either: it releases the value at the argument's
+    // PLACE. emitDrop() is the same entry the scope-end sweep uses, so a local
+    // gets its run-time drop flag cleared (no second drop later), a partially
+    // moved aggregate is decomposed, and an index/deref place becomes a plain
+    // MIRStmtDrop — no load, no call, nothing to codegen beyond the drop glue.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(call->callee.get()))
+    {
+        if (nr->name == "__drop")
+        {
+            if (!call->args.empty())
+                emitDrop(buildExpr(call->args[0].get()));
+            return makeTempPlace(context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID));
+        }
+    }
     std::vector<MIROperand> args;
     args.reserve(call->args.size());
     for (auto &arg : call->args)
