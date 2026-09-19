@@ -37,6 +37,8 @@
   数组越界仍用 libc `abort()`。
 - **引用模式匹配**（`match &opt`）：未实现。
 - **返回借用追踪**：`to_cstr` 返回的借用编译器不追踪，调用方负责 owner 存活。
+  `Vec::at_ref`/`at_mut`（2026-09-19）是同一类妥协，而且风险更大——**扩容会 `__free` 旧缓冲**，
+  拿到引用之后再 `push` 就是 use-after-free（由调用方保证）。
 - **堆的表示与边界**：**已实现**（2026-09-15）。堆缓冲是真正的裸指针类型 `*mut i8`
   （`String.data`），堆原语 `__alloc`/`__free`/`__memcpy`/`__strlen` 与裸指针索引、
   `__deref`/`__deref_mut` **只能在标准库内使用**（E3013/E3014），
@@ -97,11 +99,14 @@
    - 注意：**移动语义本身已完整实现**（移动后使用 E3005、部分移动、借用冲突 E4004），
      未实现的只是 `move` **关键字**这一书写形式（`let move x = ...`，目前全局声明的 `move` 标志解析后无效果）。
 4. ~~**Vec/堆集合**：基于 String 的裸指针堆机制扩展。~~ **已完成 2026-09-19**
-   （`Source/Std/vec.lis`：`Vec<T: Copy>` + `Index`/`IndexMut` trait + `impl Drop`；
+   （`Source/Std/vec.lis`：`Vec<T>` + `Index`/`IndexMut` trait + `impl Drop`；
    配套编译器改动：`__sizeof`、带类型的 `__alloc<T>`、用户类型的下标运算符）。
    剩下的部分：
-   - **非 Copy 元素**（`Vec<String>`）：需要逐元素析构（drop 现在只释放缓冲），
-     因此 `T: Copy` 约束暂时保留；非 Copy 数组元素同理。
+   - ~~**非 Copy 元素**（`Vec<String>`）~~：**已完成 2026-09-19**——`Vec<T>` 去掉 `T: Copy`，
+     stdlib-only 内建 `__drop(x)` 在标准库内析构一个位置上的值，`clear`/`Drop` 逐元素析构、
+     `at_ref`/`at_mut` 出借元素、`for` 靠游标记录已移出前缀以免二次析构；按值交出元素的
+     `v[i]`/`get` 改成条件实现 `impl<T: Copy> ...`（impl 上的泛型约束此前解析后被丢弃，
+     现在在调用点检查）。**非 Copy 数组元素**（`[String; 2]`）仍未做，数组继续要求元素 Copy。
    - `with_capacity` / `reserve` / `iter()`：扩容需要元素大小，而 `__sizeof` 要一个 T 的值
      （泛型体里没有），所以现在只能由 `push`/`insert` 的实参把大小带进来。
    - `Vec::new()` 仍要写类型实参（`Vec<i32>::new()`）：本语言不做期望类型推断，

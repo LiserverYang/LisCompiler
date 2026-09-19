@@ -20,22 +20,23 @@ lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，通过引�
 
 | 能力 | 状态 |
 |------|------|
-| 类型系统 | struct、enum（fat tagged union + `match`）、泛型（单态化）、trait 与约束、引用 `&T`/`&mut T`、函数指针、数组 `[T; N]`、String 堆字符串、**Vec<T> 堆数组（2026-09-19）** |
+| 类型系统 | struct、enum（fat tagged union + `match`）、泛型（单态化）、trait 与约束、引用 `&T`/`&mut T`、函数指针、数组 `[T; N]`、String 堆字符串、**Vec<T> 堆数组（2026-09-19，元素可为任意类型）** |
 | 安全模型 | move 语义、borrow checker（NLL + 字段级精度）、悬垂引用检测（E4007）、drop glue（RAII，tag-aware）、数组越界运行时检查（abort）、**定值分析（未初始化读取是编译错误）**、**字段可见性 `pub` 强制（E3015）**、**`&mut T` 非 Copy + 隐式重借用** |
 | 堆 | **裸指针类型 `*T`/`*mut T`**；堆原语与裸指针操作**只在标准库内可用**（E3013/E3014），`String.data` 是 `*mut i8`，用户代码只能走带检查的 stdlib API（String / **Vec<T>**） |
 | 运算符 | 12 个运算符 trait 重载，泛型算子（`fn sum<T: Add>` 对 struct 与原语分流），**后缀 `?` 错误传播** |
 | 错误处理 | **`Result<T, E>` + `?`（2026-09-13）**：`unwrap`/`expect`/`unwrap_or`/`is_ok`/`is_err`；`panic` + `never`（2026-09-12） |
-| 标准库 | 8 个模块（drop/option/result/iterator/math/string/chars/**vec**），**显式 `impt` 导入**；`Vec<T>` 带 `Index`/`IndexMut` trait（用户类型也能 `v[i]`） |
+| 标准库 | 8 个模块（drop/option/result/iterator/math/string/chars/**vec**），**显式 `impt` 导入**；`Vec<T>` 带 `Index`/`IndexMut` trait（用户类型也能 `v[i]`），**非 Copy 元素**由 `at_ref`/`at_mut`/移动式 API 处理、容器逐元素析构 |
 | **模块系统** | **2026-08-13 完成**：`impt lib.nums;` / `impt math as m;` / `impt math { max };`，模块隔离命名空间、循环导入检测、搜索路径（lstdlib 优先 → `-I` → 主文件目录） |
 | 内置 | print/read/堆（`__alloc` 系）/`to_string_*`/`assert`/`str_len`/`str_cmp`；`#[i_know]` 属性放行窄化 cast |
 | 诊断 | GCC 风格带源码上下文的错误（E1xxx 词法 ~ E6xxx 错误传播），解析错误可恢复 |
-| 测试 | **1246 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片，全量约 18 s）；14 个 Examples 输出为回归基线（borrow 55/iterator 23/match 8/result 42/vec 0/…） |
+| 测试 | **1258 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片，全量约 18 s）；14 个 Examples 输出为回归基线（borrow 55/iterator 23/match 8/result 42/vec 0/…） |
 
 **已完成**：panic/`never`（2026-09-12）→ `Result<T, E>` + 后缀 `?` 错误传播 +
 编译期定值分析（2026-09-13）→ **堆安全化**（2026-09-15：裸指针类型、堆原语/裸指针操作
 仅限标准库、`&mut T` 独占语义、字段可见性强制）→ **Vec<T> 堆集合**（2026-09-19：`Index`/`IndexMut`
-trait、`__sizeof`、带类型的 `__alloc<T>`）。**下一步**（详见 `Document/src/limitations.md`）：
-Vec 的非 Copy 元素/with_capacity → `move` 关键字 → extern/FFI → 其余一元运算符（`-`/`!`/`~`）。
+trait、`__sizeof`、带类型的 `__alloc<T>`）→ **非 Copy 元素**（2026-09-19：`__drop` 逐元素析构、
+`at_ref`/`at_mut`、条件实现 `impl<T: Copy>`）。**下一步**（详见 `Document/src/limitations.md`）：
+Vec 的 with_capacity/reserve/iter → `move` 关键字 → extern/FFI → 其余一元运算符（`-`/`!`/`~`）。
 
 ## lis compiler 编译器
 
@@ -86,7 +87,7 @@ python build.py --llvm-position F:/LLVM/ --build-type Debug --enable-tests --thr
 - IR：最大的文件夹，HIR/MIR/LLVM IR 的定义与构建器、语义分析、泛型单态化
 - Analysiser：类型、符号表、作用域
 - Argparser：自研命令行参数解析器
-- Tests：1246 个 gtest（词法/语法/借用/运行时端到端），测试源分 4 个 TU 并行编译、测试按物理核分片并行跑
+- Tests：1258 个 gtest（词法/语法/借用/运行时端到端），测试源分 4 个 TU 并行编译、测试按物理核分片并行跑
 
 这个项目的模块化做的很清晰，你看一眼文件夹的名字就会知道这个模块在干什么，
 建议你从 `./Source/Compiler/Private/Core/CompilePipeline.cpp` 这个文件入手，会知道

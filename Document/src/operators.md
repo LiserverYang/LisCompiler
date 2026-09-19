@@ -84,7 +84,10 @@ trait IndexMut<T> { fn set(self: &mut Self, i: i32, v: T); }  // v[i] = x — �
 
 - 索引必须是 `i32`；`at` 的接收者是 `&Self`，`set` 必须是 `&mut Self`（写要独占）。
 - 两个 trait 都返回/接收**元素的值**，不返回 `&T`：返回借用需要编译器追踪借用存活期，
-  而返回借用目前不追踪（见[已知限制](./limitations.md)）。
+  而返回借用目前不追踪（见[已知限制](./limitations.md)）。**因此实现者得自己保证元素是 Copy**
+  （`Vec` 写成 `impl<T: Copy> Index<T> for Vec<T>`：把元素按值交出去时容器不能再拥有它）。
+  impl 上写的泛型约束是**调用点检查**的：`Vec<String>[0]` 报
+  `type 'string$String' does not implement trait 'Copy' required by 'vec$Vec::at'`。
 - **数组与裸指针不走这两个 trait**：数组的 `a[i]` 仍是内建投影（带越界检查），
   `*T` 的 `p[i]` 仍是 stdlib 专用的裸地址运算。用户类型没实现 trait 时，
   `v[i]` 报 "type 'X' is not indexable; implement the 'Index<T>' trait"。
