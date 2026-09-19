@@ -1214,3 +1214,226 @@ TEST_F(RuntimeTest, JitTrivialModule)
     int code = RunModuleInJit(std::move(mod), std::move(ctx), nullptr, nullptr);
     EXPECT_EQ(code, 42);
 }
+
+
+// ── Vec: the standard library's growable array ────────────────────────────────
+//
+// vec.lis defines `struct Vec<T: Copy>` (a raw buffer + len/cap) and implements
+// Index/IndexMut for it, so `v[i]` and `v[i] = x` work with no import beyond the
+// type: `impt vec { Vec };` is enough. Growing doubles (0 → 4 → 8 → ...) and the
+// buffer is released by the Drop impl. Elements must be Copy — a `Vec<String>`
+// is rejected at compile time rather than leaking its elements.
+//
+// The construction spelling is `Vec<i32>::new()`: this language has no
+// expected-type inference, so a bare `Vec::new()` cannot learn T from the
+// variable's annotation (the same rule that makes `let x: Option<i32> =
+// Option::None;` an error — see VecNewWithoutTypeArgsRejected below).
+
+TEST_F(RuntimeTest, VecPushAndIndexSum)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(1); v.push(2); v.push(3);\n"
+              "    ret v[0] + v[1] + v[2]; }",
+        6);
+}
+
+TEST_F(RuntimeTest, VecGrowsByDoubling)
+{
+    // 1000 elements through the doubling growth path, then read every one back
+    // through `v[i]` (Index::at).
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    let mut i = 0;\n"
+              "    while i < 1000 { v.push(i); i = i + 1; }\n"
+              "    if v.len() != 1000 { ret 1; }\n"
+              "    if v.cap() < 1000 { ret 2; }\n"
+              "    if v.is_empty() { ret 3; }\n"
+              "    let mut s = 0; let mut j = 0;\n"
+              "    while j < 1000 { s = s + v[j]; j = j + 1; }\n"
+              "    ret s - 499500; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecIndexMutWritesElements)
+{
+    // `v[0] = x` lowers to IndexMut::set; the read on the right-hand side of the
+    // second write must not collide with it (the receiver of a read is checked,
+    // not borrowed).
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(1); v.push(2); v.push(3);\n"
+              "    v[0] = 50;\n"
+              "    v[2] = v[0] + 1;\n"
+              "    ret v[0] + v[1] + v[2] - 103; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecForLoopIteratesInOrder)
+{
+    // `for e in v` consumes the Vec (it implements Iterator<T> via next()).
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    let mut i = 0;\n"
+              "    while i < 5 { v.push(i * 2); i = i + 1; }\n"
+              "    let mut s = 0;\n"
+              "    for e in v { s = s + e; }\n"
+              "    ret s - 20; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecPopReturnsOptionUntilEmpty)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(4); v.push(5);\n"
+              "    let mut s = 0;\n"
+              "    let mut go = true;\n"
+              "    while go {\n"
+              "        match v.pop() { Some(x) => { s = s + x; }, None => { go = false; } }\n"
+              "    }\n"
+              "    if v.len() != 0 { ret 1; }\n"
+              "    ret s - 9; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecInsertRemoveAndCheckedGet)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(1); v.push(2); v.push(3);\n"
+              "    v.insert(1, 9);\n"
+              "    if v.len() != 4 { ret 1; }\n"
+              "    if v[0] != 1 || v[1] != 9 || v[2] != 2 || v[3] != 3 { ret 2; }\n"
+              "    let mut rv = 0;\n"
+              "    match v.remove(1) { Some(x) => { rv = x; }, None => { } }\n"
+              "    if rv != 9 { ret 3; }\n"
+              "    if v.len() != 3 { ret 4; }\n"
+              "    if v[0] != 1 || v[1] != 2 || v[2] != 3 { ret 5; }\n"
+              "    match v.remove(99) { Some(x) => { ret 6; }, None => { } }\n"
+              "    match v.get(99) { Some(x) => { ret 7; }, None => { } }\n"
+              "    let mut gv = 0;\n"
+              "    match v.get(2) { Some(x) => { gv = x; }, None => { ret 8; } }\n"
+              "    ret gv - 3; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecClearResetsLengthAndKeepsCapacity)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(7); v.push(8);\n"
+              "    let c = v.cap();\n"
+              "    v.clear();\n"
+              "    if v.len() != 0 { ret 1; }\n"
+              "    if v.is_empty() == false { ret 2; }\n"
+              "    if v.cap() != c { ret 3; }\n"
+              "    v.push(9);\n"
+              "    ret v[0] - 9; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecAsStructField)
+{
+    expectRun("impt vec { Vec };\n"
+              "struct Bag { pub items: Vec<i32>, pub name: i32 }\n"
+              "fn main() -> i32 {\n"
+              "    let mut b = Bag { items: Vec<i32>::new(), name: 7 };\n"
+              "    b.items.push(5); b.items.push(6);\n"
+              "    b.items[0] = 15;\n"
+              "    if b.items.len() != 2 { ret 1; }\n"
+              "    ret b.items[0] + b.items[1] + b.name - 28; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecReturnedFromFunctionAndMoved)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn make(n: i32) -> Vec<i32> { let mut v = Vec<i32>::new();\n"
+              "    let mut i = 0; while i < n { v.push(i); i = i + 1; } ret v; }\n"
+              "fn main() -> i32 { let a = make(4); let b = a;\n"
+              "    ret b[0] + b[3] - 3; }",
+        0);
+}
+
+TEST_F(RuntimeTest, VecIndexOutOfBoundsAborts)
+{
+    // `v[i]` is the aborting accessor (like an array); `get` is the checked one.
+    expectPanic("impt vec { Vec };\n"
+                "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1); ret v[3]; }",
+        "Vec index out of bounds");
+}
+
+TEST_F(RuntimeTest, VecSetOutOfBoundsAborts)
+{
+    expectPanic("impt vec { Vec };\n"
+                "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1); v[5] = 2; ret 0; }",
+        "Vec::set index out of bounds");
+}
+
+TEST_F(RuntimeTest, VecOfNonCopyElementRejected)
+{
+    // Dropping a Vec frees the buffer only, so a non-Copy element would leak
+    // whatever it owns: rejected up front by the `T: Copy` bound.
+    expectCompileFail("impt vec { Vec };\nimpt string { String };\n"
+                      "fn main() -> i32 { let mut v = Vec<String>::new();\n"
+                      "    v.push(String::from_lit(\"x\")); ret 0; }",
+        "does not implement trait");
+}
+
+TEST_F(RuntimeTest, VecIndexReadThroughMutBorrowRejected)
+{
+    // The receiver of a READ is checked against the live borrows (it does not
+    // create one), so reading an element through an active `&mut` is rejected.
+    expectCompileFail("impt vec { Vec };\n"
+                      "fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);\n"
+                      "    let r = &mut v;\n"
+                      "    let x = v[0];\n"
+                      "    r.push(2);\n"
+                      "    ret x; }",
+        "borrowed as mutable");
+}
+
+TEST_F(RuntimeTest, VecMoveLeavesSourceUnusable)
+{
+    expectCompileFail("impt vec { Vec };\n"
+                      "fn main() -> i32 { let mut a = Vec<i32>::new(); a.push(1);\n"
+                      "    let b = a;\n"
+                      "    ret a.len() + b.len(); }",
+        "use of moved value");
+}
+
+TEST_F(RuntimeTest, VecNewWithoutTypeArgsRejected)
+{
+    // No expected-type inference: the annotation on the left cannot tell
+    // `Vec::new()` what T is (same rule as `Option::None`), so the turbofish
+    // spelling is required.
+    expectCompileFail("impt vec { Vec };\n"
+                      "fn main() -> i32 { let mut v: Vec<i32> = Vec::new(); v.push(1); ret v[0] - 1; }",
+        "failed to infer generic static method params");
+}
+
+TEST_F(RuntimeTest, VecAcrossModules)
+{
+    // A module that returns a Vec, takes `&mut Vec<i32>` and reads one back.
+    ASSERT_TRUE(compileMulti(
+        "impt vec { Vec };\nimpt store { make, add_one, total };\n"
+        "fn main() -> i32 { let mut v = make(3); add_one(&mut v);\n"
+        "    if v.len() != 4 { ret 1; }\n"
+        "    if v[3] != 1 { ret 2; }\n"
+        "    ret total(&v) - 4; }",
+        {{"store", "impt vec { Vec };\n"
+                   "fn make(n: i32) -> Vec<i32> { let mut v = Vec<i32>::new();\n"
+                   "    let mut i = 0; while i < n { v.push(i); i = i + 1; } ret v; }\n"
+                   "fn add_one(v: &mut Vec<i32>) { v.push(v[0] + 1); }\n"
+                   "fn total(v: &Vec<i32>) -> i32 { let mut s = 0; let mut i = 0;\n"
+                   "    while i < v.len() { s = s + v[i]; i = i + 1; } ret s; }"}}));
+    EXPECT_EQ(linkAndRun(), 0);
+}
+
+TEST_F(RuntimeTest, ExampleVec)
+{
+    // The Vec walkthrough: push/index/set/pop/get/insert/remove, a Vec field,
+    // a for-loop over one, and clear (exit code 0 = every check held).
+    expectExample("vec", 0);
+}
