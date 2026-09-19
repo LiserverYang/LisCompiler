@@ -1721,7 +1721,14 @@ MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
     // implementing the operator trait. Lower to a call of the trait method.
     if (!bin->operatorMethodName.empty())
     {
-        MIRPlace dest = makeTempPlace(bin->type);
+        // The result temp carries the CALLEE's return type: for an operator
+        // method that is bin->type, but a string comparison ('&'i8 == &i8''
+        // lowered to str_cmp) calls an i32-returning helper and then produces a
+        // bool from it.
+        std::shared_ptr<Type> calleeRet = bin->operatorMethodType
+                                              ? bin->operatorMethodType->getReturnType()
+                                              : bin->type;
+        MIRPlace dest = makeTempPlace(calleeRet);
 
         // Callee name operand (mirrors buildCall's direct-call path: the place
         // holds the fully-qualified name as a string const; lowerCall resolves
@@ -1745,6 +1752,24 @@ MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
             // instantiations (which have no `add` method).
             .genericOpFallback = convertBinOp(bin->opKind),
         });
+
+        // `&i8 == &i8` / `!=`: the helper returns strcmp's ordering, so the bool
+        // the OPERATOR yields is `str_cmp(a, b) == 0` (or `!= 0`).
+        if (bin->isStrCompare)
+        {
+            auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+            MIRPlace boolTmp = makeTempPlace(bin->type);
+            emitAssign(boolTmp, MIRRValueBinaryOp{
+                                    .op = convertBinOp(bin->opKind),
+                                    .left = placeToOperand(dest),
+                                    .right = MIROperand{MIRConst{.kind = MIRConst::Kind::Int,
+                                                                    .value = (int64_t)0,
+                                                                    .type = i32Ty}},
+                                    .type = bin->type,
+                                });
+            return boolTmp;
+        }
+
         return dest;
     }
 
@@ -1927,6 +1952,53 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         MIRPlace p = buildExpr(call->callee.get());
         return placeToOperand(p);
     }();
+
+    // ── Builtin `assert` ────────────────────────────────────────────────────
+    // Not a call: a conditional divergence. The condition branches to a fail
+    // block that writes `file:line: assertion failed: <msg>` to stderr and
+    // aborts, while the fall-through continues in a fresh block. `assert_fail`
+    // is a synthesized backend entry (LLVMIRBuilder intercepts it by name,
+    // exactly like panic).
+    if (funcName == "assert")
+    {
+        auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        auto i8PtrTy = context->typeContext->getReference(
+            context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+
+        // The condition itself may have diverged (`assert(panic("x"))`), which
+        // sealed this block: nothing to assert, everything after is dead. This
+        // is the same invariant emit() enforces.
+        if (std::holds_alternative<MIRTermDiverge>(currentBlock().terminator))
+            return makeTempPlace(voidTy);
+
+        MIROperand cond = args.empty()
+                              ? MIROperand{MIRConst{.kind = MIRConst::Kind::Bool, .value = true, .type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL)}}
+                              : std::move(args[0]);
+        MIROperand msg = args.size() > 1
+                             ? std::move(args[1])
+                             : MIROperand{MIRConst{.kind = MIRConst::Kind::String, .value = "", .type = i8PtrTy}};
+
+        // "<file>:<line>" — a compile-time constant the backend prints verbatim.
+        std::string loc = currentItemFilePath_.empty() ? context->filePath : currentItemFilePath_;
+        if (call->position.line > 0)
+            loc += ":" + std::to_string(call->position.line);
+
+        BasicBlockId okId = newBlock("assert_ok");
+        BasicBlockId failId = newBlock("assert_fail");
+        sealBlock(curBB_, MIRTermBranch{.cond = std::move(cond), .thenBlock = okId, .elseBlock = failId});
+
+        switchTo(failId);
+        emit(MIRStmtCall{
+            .dest = std::nullopt,
+            .callee = MIROperand{MIRConst{.kind = MIRConst::Kind::String, .value = "assert_fail", .type = i8PtrTy}},
+            .funcName = "assert_fail",
+            .args = {MIROperand{MIRConst{.kind = MIRConst::Kind::String, .value = loc, .type = i8PtrTy}},
+                std::move(msg)}});
+        sealBlock(curBB_, MIRTermDiverge{});
+
+        switchTo(okId);
+        return makeTempPlace(voidTy);
+    }
 
     // 3. Create the result temp (void calls also create a unit-type temp so
     //    the code above can always return a MIRPlace).

@@ -1814,3 +1814,93 @@ TEST_F(RuntimeTest, DerefNonReferenceRejected)
     expectCompileFail("fn main() -> i32 { let x = 5; let y = *x; ret y; }",
         "requires a reference");
 }
+
+// ── builtin assert ────────────────────────────────────────────────────────────
+// `assert(cond)` / `assert(cond, msg)` writes "<file>:<line>: assertion failed:
+// <msg>" to stderr and aborts, exactly like panic. It RETURNS when the condition
+// holds (void, not never), so the statements after it stay reachable — which is
+// what makes it usable as the assertion of a Lis test suite.
+
+TEST_F(RuntimeTest, AssertPassesAndExecutionContinues)
+{
+    expectRun("fn main() -> i32 { assert(1 + 1 == 2); ret 7; }", 7);
+}
+
+TEST_F(RuntimeTest, AssertChecksEveryIteration)
+{
+    expectRun("fn main() -> i32 { let mut i = 0; while i < 3 { assert(i < 3); i = i + 1; } ret i; }",
+        3);
+}
+
+TEST_F(RuntimeTest, AssertKeepsFollowingStatementsReachable)
+{
+    // assert is VOID, not `never`: the `ret 5` after it must still run.
+    expectRun("fn f(c: bool) -> i32 { assert(c); ret 5; } fn main() -> i32 { ret f(true); }", 5);
+}
+
+TEST_F(RuntimeTest, AssertFailureAbortsWithLocation)
+{
+    // The fragment includes the colon after the location, so it only matches the
+    // "test.lis:<line>: assertion failed:" shape.
+    expectPanic("fn main() -> i32 { assert(false); ret 7; }", ": assertion failed:");
+}
+
+TEST_F(RuntimeTest, AssertFailurePrintsTheMessage)
+{
+    expectPanic("fn main() -> i32 { assert(2 > 3, \"boom\"); ret 0; }", "assertion failed: boom");
+}
+
+TEST_F(RuntimeTest, AssertNonBoolConditionRejected)
+{
+    expectCompileFail("fn main() -> i32 { assert(1); ret 0; }", "expects a 'bool' condition");
+}
+
+TEST_F(RuntimeTest, AssertArityRejected)
+{
+    expectCompileFail("fn main() -> i32 { assert(); ret 0; }", "expects 1 or 2 arguments");
+}
+
+// ── `&i8` is a C string: content equality and length ──────────────────────────
+// `&i8` is how this language spells a C string (print_str / panic /
+// String::from_lit all take one), so `==` on two of them compares the TEXT.
+// Before this it was a compile error, and comparing an input line against a
+// literal meant copying it into a String first.
+
+TEST_F(RuntimeTest, StringLiteralEqualityComparesContent)
+{
+    expectRun("fn main() -> i32 { if \"abc\" == \"abc\" { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, StringLiteralInequalityComparesContent)
+{
+    expectRun("fn main() -> i32 { if \"abc\" == \"abd\" { ret 1; } ret 0; }", 0);
+    expectRun("fn main() -> i32 { if \"abc\" != \"abd\" { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, ReadLineComparesEqualByContentNotAddress)
+{
+    // read_line returns the compiler's own buffer, so the two `&i8` values have
+    // different addresses; only a content comparison can make this true.
+    expectOutputWithInput("fn main() -> i32 { let line = read_line();"
+                          " if line == \"hi\" { print_str(\"same\"); } else { print_str(\"diff\"); } ret 0; }",
+        "hi\n", "same", 0);
+}
+
+TEST_F(RuntimeTest, StrLenBuiltin)
+{
+    expectRun("fn main() -> i32 { ret str_len(\"hello\"); }", 5);
+}
+
+TEST_F(RuntimeTest, StrCmpBuiltinOrdersByContent)
+{
+    expectRun("fn main() -> i32 { if str_cmp(\"a\", \"b\") < 0 { ret 1; } ret 0; }", 1);
+    expectRun("fn main() -> i32 { if str_cmp(\"b\", \"b\") == 0 { ret 1; } ret 0; }", 1);
+}
+
+TEST_F(RuntimeTest, StringRelationalOperatorsStillRejected)
+{
+    // Only == / != are defined for a C string; ordering stays an error (str_cmp
+    // is the explicit spelling).
+    expectCompileFail("fn main() -> i32 { if \"a\" < \"b\" { ret 1; } ret 0; }",
+        "cannot be applied to type");
+}

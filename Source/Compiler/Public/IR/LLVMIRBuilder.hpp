@@ -223,6 +223,9 @@ private:
     llvm::Function *getOrDeclareFree();
     llvm::Function *getOrDeclareMemcpy();
     llvm::Function *getOrDeclareStrlen();
+    /// int strcmp(const char* a, const char* b) — the `str_cmp` builtin and the
+    /// lowering of `&i8 == &i8` (content comparison, not addresses).
+    llvm::Function *getOrDeclareStrcmp();
     void emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
     bool isHeapBuiltin(const std::string &name);
 
@@ -255,6 +258,18 @@ private:
     /// sealed with MIRTermDiverge, so the terminator emits `unreachable`).
     void emitPanicCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
     bool isPanicBuiltin(const std::string &name);
+
+    /// The block a failed `assert` branches to: writes `"<file>:<line>: assertion
+    /// failed: <msg>"` to stderr and aborts. `args[0]` is the location string,
+    /// `args[1]` the user message (both i8*). Never returns — the MIR block is
+    /// sealed with MIRTermDiverge by MIRBuilder.
+    void emitAssertFailCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    bool isAssertFailBuiltin(const std::string &name);
+
+    /// Builtin C-string helpers: `str_len` -> libc strlen, `str_cmp` -> libc
+    /// strcmp. `str_eq` (the `&i8 == &i8` lowering) is strcmp(a, b) == 0.
+    bool isStrBuiltin(const std::string &name);
+    void emitStrBuiltinCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
 
     /// Get-or-declare an external libc function. If `name` already exists in
     /// the module but with a DIFFERENT type, report an internal error (a user

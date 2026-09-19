@@ -165,6 +165,13 @@ public:
     std::shared_ptr<FunctionType> operatorMethodType;      // instantiated signature
     std::string operatorMethodName;                        // "<Struct>::add" (mono-ready)
     std::vector<std::shared_ptr<Type>> operatorStructArgs; // struct generic args
+
+    /// `&i8 == &i8` / `!=` — CONTENT comparison. `&i8` is the language's C string
+    /// (print_str / panic / String::from_lit all take one), so two of them
+    /// compare as text, not as addresses. Lowered as `str_cmp(a, b) == 0`:
+    /// operatorMethodName/Type carry that call, and this flag tells MIRBuilder
+    /// the callee returns i32 while the OPERATOR yields bool.
+    bool isStrCompare = false;
     /// The operator's source symbol (for diagnostics), e.g. "<".
     const char *opToString() const
     {

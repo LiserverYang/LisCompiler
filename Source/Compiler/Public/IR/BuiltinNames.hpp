@@ -36,6 +36,8 @@ enum class BuiltinCategory
     Ptr,       // __deref / __deref_mut  (raw pointer → reference)
     ToString,  // to_string_i32/i64/f64/bool/char
     Panic,     // panic
+    Assert,    // assert (and the synthesized assert_fail backend entry)
+    Str,       // str_len / str_cmp (C-string helpers over &i8)
     NotBuiltin // any other name
 };
 
@@ -80,12 +82,29 @@ inline BuiltinCategory classifyBuiltin(const std::string &name)
     static const std::unordered_set<std::string> panic = {
         "panic",
     };
+    // `assert` is mapped to a conditional divergence by the MIR builder, and
+    // `assert_fail` is the block it branches to — the backend entry that writes
+    // the location + message and aborts. Both are reserved so a user function
+    // cannot collide with (or impersonate) them.
+    static const std::unordered_set<std::string> assertNames = {
+        "assert",
+        "assert_fail",
+    };
+    // C-string helpers over `&i8`. `str_len` is `strlen` and `str_cmp` is
+    // `strcmp`; `&i8` is how this language spells a C string (print_str, panic,
+    // String::from_lit all take one), and `==` on two of them lower to str_cmp.
+    static const std::unordered_set<std::string> str = {
+        "str_len",
+        "str_cmp",
+    };
     if (print.count(name)) return BuiltinCategory::Print;
     if (input.count(name)) return BuiltinCategory::Input;
     if (heap.count(name)) return BuiltinCategory::Heap;
     if (ptr.count(name)) return BuiltinCategory::Ptr;
     if (toString.count(name)) return BuiltinCategory::ToString;
     if (panic.count(name)) return BuiltinCategory::Panic;
+    if (assertNames.count(name)) return BuiltinCategory::Assert;
+    if (str.count(name)) return BuiltinCategory::Str;
     return BuiltinCategory::NotBuiltin;
 }
 
@@ -100,6 +119,7 @@ inline bool isReservedFunctionName(const std::string &name)
         "free",
         "memcpy",
         "strlen",
+        "strcmp",
         "sprintf",
         "printf",
         "fgets",

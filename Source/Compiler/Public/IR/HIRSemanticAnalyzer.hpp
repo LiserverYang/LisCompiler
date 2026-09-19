@@ -390,6 +390,16 @@ private:
      *  MIRTermDiverge so everything after it is unreachable. */
     bool handlePanicBuiltin(HIRCall *node, const std::string &name);
 
+    /** Builtin `assert(cond)` / `assert(cond, msg)`. Unlike panic it RETURNS
+     *  (void) when the condition holds, so it must not mark the sequence
+     *  unreachable; the failure path is built by MIRBuilder (branch → the
+     *  synthesized `assert_fail` call → abort). */
+    bool handleAssertBuiltin(HIRCall *node, const std::string &name);
+
+    /** Builtin C-string helpers: `str_len(s: &i8) -> i32` and
+     *  `str_cmp(a: &i8, b: &i8) -> i32` (libc strlen/strcmp semantics). */
+    bool handleStrBuiltin(HIRCall *node, const std::string &name);
+
     /** True if `ty` is the `never` primitive (the return type of `panic`). A
      *  `never`-typed expression coerces to ANY expected type — it produces no
      *  value, so nothing about the expected type is violated. Central place

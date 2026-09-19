@@ -4189,6 +4189,35 @@ void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
     analyzeExpr(node->left.get());
     analyzeExpr(node->right.get());
 
+    // ── `&i8 == &i8` / `!=`: CONTENT comparison ──────────────────────────────
+    // `&i8` is how this language spells a C string, so comparing two of them
+    // compares the text. It has to be recognised before the general operator
+    // rules: a reference is not a valid operand for them, and `&i8 == &i8` used
+    // to be rejected with "operator '==' cannot be applied to type '&i8'".
+    // Lowered as `str_cmp(a, b) == 0` (see MIRBuilder::buildBinaryOp).
+    if (node->opKind == HIRBinaryOp::OpKind::Eq || node->opKind == HIRBinaryOp::OpKind::Ne)
+    {
+        auto isCStr = [](const std::shared_ptr<Type> &ty)
+        {
+            auto ref = std::dynamic_pointer_cast<ReferenceType>(ty);
+            if (!ref) return false;
+            auto base = std::dynamic_pointer_cast<PrimitiveType>(ref->getBaseType());
+            return base && base->getPrimKind() == PrimitiveType::PrimKind::I8;
+        };
+        if (isCStr(node->left->type) && isCStr(node->right->type))
+        {
+            auto i8PtrTy = context->typeContext->getReference(
+                context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+            node->isStrCompare = true;
+            node->operatorMethodName = "str_cmp";
+            node->operatorMethodType = context->typeContext->getFunction(
+                {i8PtrTy, i8PtrTy},
+                context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32));
+            node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+            return;
+        }
+    }
+
     if (node->left->type && node->right->type && !node->left->type->equals(node->right->type))
         log(*node, "operands of binary operator must have the same type.");
 
@@ -4881,6 +4910,78 @@ bool HIRSemanticAnalyzer::handlePanicBuiltin(HIRCall *node, const std::string &n
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Builtin `assert(cond)` / `assert(cond, msg)`.
+//
+// It writes `file:line: assertion failed: <msg>` to stderr and aborts — the
+// same fatal path as `panic`, which is what makes it usable as the assertion of
+// a test suite (there was no way to assert anything without it). The return type
+// is VOID, not never: control flow continues when the condition holds, so the
+// statements after an assert stay reachable.
+bool HIRSemanticAnalyzer::handleAssertBuiltin(HIRCall *node, const std::string &name)
+{
+    if (name != "assert")
+        return false; // not the assert builtin
+
+    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
+    auto i8PtrTy = context->typeContext->getReference(
+        context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    if (node->args.empty() || node->args.size() > 2)
+        log(*node, "builtin 'assert' expects 1 or 2 arguments (a condition, and an optional message), got "
+                       + std::to_string(node->args.size()) + ".");
+
+    for (size_t i = 0; i < node->args.size(); ++i)
+    {
+        analyzeExpr(node->args[i].get());
+        if (i == 0 && node->args[i]->type && !typesCompatible(boolTy, node->args[i]->type))
+            log(*node->args[i], "builtin 'assert' expects a 'bool' condition, got '"
+                                    + node->args[i]->type->toString() + "'.");
+        if (i == 1 && node->args[i]->type && !typesCompatible(i8PtrTy, node->args[i]->type))
+            log(*node->args[i], "builtin 'assert' expects the message to be a '&i8' (a string literal), got '"
+                                    + node->args[i]->type->toString() + "'.");
+    }
+
+    node->type = voidTy;
+    // A non-null type so MIR's buildNameRef/makeTempPlace is safe.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = voidTy;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Builtin C-string helpers over `&i8` (the language's C-string spelling):
+// `str_len` = libc strlen, `str_cmp` = libc strcmp (negative / 0 / positive).
+bool HIRSemanticAnalyzer::handleStrBuiltin(HIRCall *node, const std::string &name)
+{
+    if (name != "str_len" && name != "str_cmp")
+        return false; // not a string builtin
+
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto i8PtrTy = context->typeContext->getReference(
+        context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+
+    const size_t expected = (name == "str_len") ? 1 : 2;
+    if (node->args.size() != expected)
+        log(*node, "builtin '" + name + "' expects " + std::to_string(expected)
+                       + " argument(s), got " + std::to_string(node->args.size()) + ".");
+
+    for (auto &arg : node->args)
+    {
+        analyzeExpr(arg.get());
+        if (arg->type && !typesCompatible(i8PtrTy, arg->type))
+            log(*arg, "builtin '" + name + "' expects a '&i8' argument (a C string), got '"
+                          + arg->type->toString() + "'.");
+    }
+
+    node->type = i32Ty;
+    // A non-null type so MIR's buildNameRef/makeTempPlace is safe.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = i32Ty;
+    return true;
+}
+
 void HIRSemanticAnalyzer::visit(HIRCall *node)
 {
     // Idempotency: once a call is resolved, re-analysis is a no-op. This
@@ -4924,6 +5025,12 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 return;
             case BuiltinCategory::Panic:
                 handlePanicBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::Assert:
+                handleAssertBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::Str:
+                handleStrBuiltin(node, nr->name);
                 return;
             case BuiltinCategory::NotBuiltin:
                 break;

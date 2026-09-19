@@ -507,6 +507,22 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         return;
     }
 
+    // The fail block of an `assert` (see MIRBuilder::buildCall): print
+    // `file:line: assertion failed: <msg>` and abort. The block ends with
+    // MIRTermDiverge, so nothing follows.
+    if (isAssertFailBuiltin(s.funcName))
+    {
+        emitAssertFailCall(fs, s, args);
+        return;
+    }
+
+    // Builtin C-string helpers (`str_len` / `str_cmp`) lower to libc.
+    if (isStrBuiltin(s.funcName))
+    {
+        emitStrBuiltinCall(fs, s, args);
+        return;
+    }
+
     // Resolve the callee.
     llvm::Function *callee = nullptr;
     llvm::Value *indirectPtr = nullptr;
@@ -1475,6 +1491,16 @@ llvm::Function *LLVMIRBuilder::getOrDeclareStrlen()
             /*isVarArg=*/false));
 }
 
+llvm::Function *LLVMIRBuilder::getOrDeclareStrcmp()
+{
+    // int strcmp(const char* a, const char* b)
+    return getOrDeclareLibcFunction("strcmp",
+        llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(ctx_),
+            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
+            /*isVarArg=*/false));
+}
+
 void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
 {
     if (s.funcName == "__alloc")
@@ -1506,6 +1532,42 @@ void LLVMIRBuilder::emitHeapCall(FunctionState &fs, const MIRStmtCall &s, const 
         if (s.dest.has_value())
             storePlace(fs, *s.dest, len32);
     }
+}
+
+// ── Builtin C-string helpers: str_len / str_cmp ──────────────────────────────
+//
+// `&i8` is this language's C-string spelling (print_str, panic,
+// String::from_lit/push_str/to_cstr all take or return one), so a length and a
+// content comparison belong on it: before this, `strlen` was a reserved stdlib
+// name and comparing two strings meant copying one into a String first.
+bool LLVMIRBuilder::isStrBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::Str;
+}
+
+void LLVMIRBuilder::emitStrBuiltinCall(FunctionState &fs,
+    const MIRStmtCall &s,
+    const std::vector<llvm::Value *> &args)
+{
+    llvm::Value *a = args.size() > 0 ? args[0] : nullptr;
+    llvm::Value *b = args.size() > 1 ? args[1] : a;
+
+    llvm::Value *result = nullptr;
+    if (s.funcName == "str_len")
+    {
+        llvm::Function *strlenFn = getOrDeclareStrlen();
+        llvm::Value *len = builder_->CreateCall(strlenFn->getFunctionType(), strlenFn, {a});
+        // size_t (i64) → i32: i32 is the language's index/length type.
+        result = builder_->CreateTrunc(len, llvm::Type::getInt32Ty(ctx_), "strlen");
+    }
+    else // str_cmp — libc strcmp semantics: < 0, 0, > 0
+    {
+        llvm::Function *strcmpFn = getOrDeclareStrcmp();
+        result = builder_->CreateCall(strcmpFn->getFunctionType(), strcmpFn, {a, b});
+    }
+
+    if (s.dest.has_value())
+        storePlace(fs, *s.dest, result);
 }
 
 // ── Builtin to_string: malloc + sprintf + strlen → String ────────────────────
@@ -1576,6 +1638,35 @@ void LLVMIRBuilder::emitPanicMessage(llvm::Value *msgPtr)
     llvm::Value *stream = getStderrFilePtr();
     llvm::Value *fmt = builder_->CreateGlobalStringPtr("panicked: %s\n", ".panicfmt");
     builder_->CreateCall(fprintfFn->getFunctionType(), fprintfFn, {stream, fmt, msgPtr});
+
+    llvm::Function *abortFn = getOrDeclareAbort();
+    builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
+}
+
+// ── Builtin assert: the fail block writes the location + message, then aborts ─
+
+bool LLVMIRBuilder::isAssertFailBuiltin(const std::string &name)
+{
+    return name == "assert_fail";
+}
+
+void LLVMIRBuilder::emitAssertFailCall(FunctionState &fs,
+    const MIRStmtCall &s,
+    const std::vector<llvm::Value *> &args)
+{
+    (void)fs;
+    (void)s;
+    // MIRBuilder always emits both operands; be defensive so malformed MIR
+    // cannot index out of bounds.
+    llvm::Value *loc = args.size() > 0 ? args[0]
+                                       : builder_->CreateGlobalStringPtr("<unknown>", ".assertloc");
+    llvm::Value *msg = args.size() > 1 ? args[1]
+                                       : builder_->CreateGlobalStringPtr("", ".assertmsg");
+
+    llvm::Function *fprintfFn = getOrDeclareFprintf();
+    llvm::Value *stream = getStderrFilePtr();
+    llvm::Value *fmt = builder_->CreateGlobalStringPtr("%s: assertion failed: %s\n", ".assertfmt");
+    builder_->CreateCall(fprintfFn->getFunctionType(), fprintfFn, {stream, fmt, loc, msg});
 
     llvm::Function *abortFn = getOrDeclareAbort();
     builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
