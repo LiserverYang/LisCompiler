@@ -131,9 +131,9 @@ protected:
         captureStdout();
         HIRSemanticAnalyzer sema(context);
         sema.visit(context->hirProgram.get());
-        // The MIR stages too: with LIS_BORROW_CHECK=mir the borrow / move /
-        // definite-assignment checks run on MIR, and this suite is the oracle
-        // for that implementation.
+        // The MIR stages too: the borrow / move / definite-assignment /
+        // dangling-return checks run on the MIR CFG, and this suite is their
+        // oracle.
         if (Logger::GetErrorCount() == 0)
         {
             MIRBuilder mir(context);
@@ -257,16 +257,8 @@ TEST_F(BorrowCheckerTest, MoveWhileDeadBorrowAllowed)
     // DECISION (2026-09-19): a move only conflicts with a borrow that is still
     // LIVE. `r` is never used again, so the borrow is over by the time x moves
     // and nothing can dangle — the MIR checker follows the reference's live
-    // range (true NLL; Rust accepts this too). The HIR checker holds one lexical
-    // borrow set and rejects every move of a borrowed place: "moves are not
-    // NLL-ed" was that approximation, not a language rule. Both implementations
-    // run against this suite while the checker is ported, so the expectation
-    // follows the active one.
-    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "cannot move out of 'x' because it is borrowed");
+    // range (true NLL; Rust accepts this too).
+    expectOk("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }");
 }
 
 TEST_F(BorrowCheckerTest, MutateThroughMutBorrow)
@@ -336,22 +328,14 @@ TEST_F(BorrowCheckerTest, NllMoveAfterHolderLastUseAllowed)
 {
     // DECISION (2026-09-19): the borrow ends at the holder's last use (`r.v`),
     // so the move afterwards is safe. See MoveWhileDeadBorrowAllowed.
-    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let v = r.v; let y = x; }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "cannot move out of 'x' because it is borrowed");
+    expectOk("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let v = r.v; let y = x; }");
 }
 
 TEST_F(BorrowCheckerTest, NllMoveOfUnusedBorrowAllowed)
 {
     // Same decision as MoveWhileDeadBorrowAllowed, with the reference never used
     // at all: nll liveness leaves the borrow live nowhere.
-    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "cannot move out of 'x' because it is borrowed");
+    expectOk("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let y = x; }");
 }
 
 TEST_F(BorrowCheckerTest, BorrowEndsAtBlockExit)
@@ -1309,16 +1293,8 @@ TEST_F(BorrowCheckerTest, MoveInOneBranchDoesNotPoisonTheOther)
     // with ONE global moved-state per binding, so the then-branch's move leaked
     // into the else-branch and this was rejected as "use of moved value": that
     // rejection was an artifact of the approximation, not a language rule.
-    //
-    // Both implementations run against this suite while the checker is being
-    // ported to MIR, so the expectation follows the active one; when the HIR
-    // implementation is deleted this becomes an unconditional expectOk.
-    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
-                      " if b { let y = x; ret 0; } else { let t = x.v; ret t; } }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "moved");
+    expectOk("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let b = true;"
+             " if b { let y = x; ret 0; } else { let t = x.v; ret t; } }");
 }
 
 TEST_F(BorrowCheckerTest, MoveInBranchThenUseAfterRejected)
@@ -1476,12 +1452,8 @@ TEST_F(BorrowCheckerTest, FieldBorrowThenWholeMoveAfterLastUse)
 {
     // A FIELD borrow is a borrow of (a part of) x, and it ends at the holder's
     // last use like any other (same decision as MoveWhileDeadBorrowAllowed).
-    const char *src = "struct S { pub v: i32 } fn main() { let x = S { v: 1 };"
-                      " let r = &x.v; let y = x; }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "borrowed");
+    expectOk("struct S { pub v: i32 } fn main() { let x = S { v: 1 };"
+             " let r = &x.v; let y = x; }");
 }
 
 TEST_F(BorrowCheckerTest, FieldMoveThenOtherFieldBorrow)
@@ -1924,15 +1896,11 @@ TEST_F(BorrowCheckerTest, NestedCallReborrowsDoNotOverlap)
     // statement-granularity conservatism as WriteAfterTheReservationReturned-
     // Allowed. (Two reborrows in a single CALL — f(s, s) — are still rejected:
     // there the reservations really do overlap.)
-    const char *src = "struct S { pub n: i32 }"
-                      " fn a(x: &mut S) -> i32 { ret x.n; }"
-                      " fn b(x: &mut S, v: i32) { x.n = v; }"
-                      " fn f(s: &mut S) { b(s, a(s)); }"
-                      " fn main() { let mut x = S { n: 0 }; f(&mut x); ret 0; }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "already borrowed");
+    expectOk("struct S { pub n: i32 }"
+             " fn a(x: &mut S) -> i32 { ret x.n; }"
+             " fn b(x: &mut S, v: i32) { x.n = v; }"
+             " fn f(s: &mut S) { b(s, a(s)); }"
+             " fn main() { let mut x = S { n: 0 }; f(&mut x); ret 0; }");
 }
 
 TEST_F(BorrowCheckerTest, WriteAfterTheReservationReturnedAllowed)
@@ -1940,16 +1908,9 @@ TEST_F(BorrowCheckerTest, WriteAfterTheReservationReturnedAllowed)
     // DECISION (2026-09-19): the reservation ends when the CALL returns. MIR has
     // linearized the source statement into '_t = &mut *s; _r = call take(_t);
     // s.n = _r;', so the write happens after the callee released the borrow —
-    // nothing aliases at that point (rustc accepts this shape too). The HIR
-    // checker keeps a reservation alive to the end of the SOURCE statement
-    // ('s.n = take(s)' is one assignment there), which is statement-granularity
-    // conservatism, not a language rule.
-    const char *src = "struct S { pub n: i32 }"
-                      " fn take(x: &mut S) -> i32 { ret x.n; }"
-                      " fn f(s: &mut S) { s.n = take(s); }"
-                      " fn main() { let mut x = S { n: 0 }; f(&mut x); ret 0; }";
-    if (MIRBorrowCheck::enabled())
-        expectOk(src);
-    else
-        expectError(src, "because it is borrowed");
+    // nothing aliases at that point (rustc accepts this shape too).
+    expectOk("struct S { pub n: i32 }"
+             " fn take(x: &mut S) -> i32 { ret x.n; }"
+             " fn f(s: &mut S) { s.n = take(s); }"
+             " fn main() { let mut x = S { n: 0 }; f(&mut x); ret 0; }");
 }

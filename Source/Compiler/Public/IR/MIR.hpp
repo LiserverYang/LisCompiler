@@ -339,6 +339,12 @@ struct MIRFunction
     std::string associatedStruct;
     std::optional<std::string> associatedTrait;
     std::vector<std::string> genericParams;
+
+    /// Source FILE of the top-level item this function was lowered from (from
+    /// Context::stmtAttributions), so a diagnostic against a module (stdlib)
+    /// function names its own file. Context::filePath is the main file by the
+    /// time the later passes run. Empty → fall back to Context::filePath.
+    std::string sourceFilePath;
 };
 
 struct MIRGlobal

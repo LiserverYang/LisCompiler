@@ -682,15 +682,24 @@ MIRProgram MIRBuilder::buildProgram(HIRProgram *prog)
                                    ? context->stmtAttributions[itemIndex].filePath
                                    : std::string();
 
+        // Stamp the item's source file into every function lowered from it, so
+        // the later passes (MIRBorrowCheck) report a module function against its
+        // own file, exactly like HIRSemanticAnalyzer does.
+        auto addFunction = [&](MIRFunction &&fn)
+        {
+            fn.sourceFilePath = currentItemFilePath_;
+            out.functions.push_back(std::make_shared<MIRFunction>(std::move(fn)));
+        };
+
         if (auto *fn = dynamic_cast<HIRFunction *>(raw))
         {
-            out.functions.push_back(std::make_shared<MIRFunction>(buildFunction(fn)));
+            addFunction(buildFunction(fn));
         }
         else if (auto *impl = dynamic_cast<HIRImpl *>(raw))
         {
             // Each impl method becomes its own MIRFunction.
             for (auto &method : impl->methods)
-                out.functions.push_back(std::make_shared<MIRFunction>(buildFunction(method.get())));
+                addFunction(buildFunction(method.get()));
         }
         else if (auto *decl = dynamic_cast<HIRVarDecl *>(raw))
         {

@@ -103,9 +103,9 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     passes.emplace_back(std::make_unique<HIRBuilder>(context));
     passes.emplace_back(std::make_unique<HIRSemanticAnalyzer>(context));
     passes.emplace_back(std::make_unique<MIRBuilder>(context));
-    // Borrow / move / definite-assignment checking on the MIR CFG. It is a
-    // no-op unless LIS_BORROW_CHECK=mir selects the MIR implementations (the
-    // HIR analyzer then skips its own versions of the same rules).
+    // Borrow / move / definite-assignment / dangling-return checking on the MIR
+    // CFG — the only implementation of those rules (the HIR analyzer keeps type
+    // checking, mutability and E3012).
     passes.emplace_back(std::make_unique<MIRBorrowCheck>(context));
     passes.emplace_back(std::make_unique<MIRMonomorphization>(context));
     passes.emplace_back(std::make_unique<LLVMIRBuilder>(context, *context->llvmContext, context->args->getArg("filePath")));

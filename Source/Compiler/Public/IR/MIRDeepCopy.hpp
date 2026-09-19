@@ -270,7 +270,8 @@ inline MIRFunction copy(const MIRFunction &func)
         .isStatic = copy(func.isStatic),
         .associatedStruct = copy(func.associatedStruct),
         .associatedTrait = copy(func.associatedTrait),
-        .genericParams = copy(func.genericParams)};
+        .genericParams = copy(func.genericParams),
+        .sourceFilePath = copy(func.sourceFilePath)};
 }
 
 inline MIRGlobal copy(const MIRGlobal &g)

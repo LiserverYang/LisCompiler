@@ -24,15 +24,16 @@
  * "a non-Copy binding needs an initializer" (E3012) — those are place/type
  * properties, not dataflow, and stay in HIRSemanticAnalyzer.
  *
- * SWITCH. The environment variable LIS_BORROW_CHECK=mir disables the HIR-side
- * implementations and enables this one; the default is still 'hir' while the
- * port is in progress. The 246 source-level BorrowCheckerTest cases and the
- * runtime suite are the differential oracle for the port: with the switch on, a
- * missed OR spurious diagnostic fails a test.
+ * This is the ONLY implementation of those checks (2026-09-19): the tree-based
+ * checker that used to live in HIRSemanticAnalyzer is gone, along with the
+ * LIS_BORROW_CHECK escape hatch. The 246 source-level BorrowCheckerTest cases
+ * and the runtime suite are its oracle: a missed OR spurious diagnostic fails a
+ * test.
  *
- * Known gap: diagnostics use Context::filePath (the main file). The HIR checker
- * attributes module items through Context::stmtAttributions; MIR does not carry
- * that yet, so an error inside a stdlib module would name the main file.
+ * Diagnostics name the ITEM's source file (MIRFunction::sourceFilePath, stamped
+ * by MIRBuilder from Context::stmtAttributions), like the HIR analyzer; the
+ * source TEXT still comes from Context::fileValue, which is the main file —
+ * HIRSemanticAnalyzer has the same limitation.
  */
 #pragma once
 
@@ -55,7 +56,4 @@ public:
      * program (run() exits, exactly like HIRSemanticAnalyzer::run).
      */
     void check();
-
-    /// True unless LIS_BORROW_CHECK=hir selected the HIR implementation.
-    static bool enabled();
 };

@@ -252,9 +252,8 @@ protected:
         // kill the whole test process. Mirror the sema handling above.
         context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
         if (Logger::GetErrorCount() > 0) return false;
-        // Borrow / move / definite-assignment checking on MIR: a no-op unless
-        // LIS_BORROW_CHECK=mir selects it (then HIRSemanticAnalyzer above has
-        // skipped its own implementations of the same rules).
+        // Borrow / move / definite-assignment / dangling-return checking on the
+        // MIR CFG — the only implementation of those rules.
         {
             MIRBorrowCheck borrowCheck(context);
             borrowCheck.check();
@@ -351,9 +350,8 @@ protected:
         // kill the whole test process. Mirror the sema handling above.
         context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
         if (Logger::GetErrorCount() > 0) return false;
-        // Borrow / move / definite-assignment checking on MIR: a no-op unless
-        // LIS_BORROW_CHECK=mir selects it (then HIRSemanticAnalyzer above has
-        // skipped its own implementations of the same rules).
+        // Borrow / move / definite-assignment / dangling-return checking on the
+        // MIR CFG — the only implementation of those rules.
         {
             MIRBorrowCheck borrowCheck(context);
             borrowCheck.check();

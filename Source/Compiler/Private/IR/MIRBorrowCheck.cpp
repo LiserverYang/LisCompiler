@@ -446,7 +446,9 @@ void FunctionChecker::logAt(const MIRPlace &place, const std::string &msg, size_
     if (std::getenv("LIS_MIR_DEBUG") != nullptr)
         std::cout << "  [dbg] in " << fn_.name << " / " << body_.funcName << ": " << msg << "\n";
     Logger::LogInfo info{};
-    info.codePath = context_->filePath;
+    // The ITEM's file (module items keep their own path), like the HIR analyzer;
+    // Context::filePath is the main file by the time this pass runs.
+    info.codePath = fn_.sourceFilePath.empty() ? context_->filePath : fn_.sourceFilePath;
     info.code = &context_->fileValue;
     info.col = place.pos.col;
     info.line = place.pos.line;
@@ -2087,18 +2089,6 @@ void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
 
 } // namespace
 
-bool MIRBorrowCheck::enabled()
-{
-    // Always true (2026-09-19): this pass OWNS the borrow / move /
-    // definite-assignment / dangling-return checks. The tree-based checker that
-    // used to live in HIRSemanticAnalyzer is gone, and so is the former
-    // LIS_BORROW_CHECK=hir escape hatch: the tree could not be sound (it ended a
-    // borrow at its holder's last use, so `for e in v { v.push(1); }` slipped
-    // through), which is exactly what the CFG-based live ranges fix. What stays
-    // in HIR is type checking, mutability (E3004/E4006) and E3012.
-    return true;
-}
-
 void MIRBorrowCheck::run()
 {
     check();
@@ -2125,8 +2115,6 @@ void MIRBorrowCheck::check()
     if (std::getenv("LIS_MIR_DEBUG") != nullptr)
         printMIRProgram(*context->mirProgram, std::cout);
 
-    if (!enabled())
-        return;
     for (const auto &fn : context->mirProgram->functions)
     {
         if (!fn)
