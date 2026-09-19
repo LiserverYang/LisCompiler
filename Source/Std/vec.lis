@@ -1,0 +1,216 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// vec.lis
+//
+// `Vec<T>` — a growable heap array. The buffer is a raw pointer (`*mut T`,
+// private), so all element access happens inside this module, where raw-pointer
+// indexing is legal (E3014 gates it to the standard library).
+//
+//     let mut v = Vec<i32>::new();   // T must be written out: this language has
+//                                    // no expected-type inference, so
+//                                    // `let v: Vec<i32> = Vec::new();` is an error
+//     v.push(1);
+//     v.push(2);
+//     let x = v[0];          // Index::at  — panics when out of bounds
+//     v[1] = 9;              // IndexMut::set
+//     let last = v.pop();    // Option<i32>
+//     for e in v { ... }     // consumes v (Vec implements Iterator<T>)
+//
+// ELEMENTS MUST BE `Copy` (the `T: Copy` bound below). A `Vec<String>` is
+// rejected at compile time instead of silently leaking its elements: dropping a
+// Vec only frees the buffer. Per-element destructors are the next step; when
+// they land, this bound goes away.
+//
+// There is no `with_capacity` / `reserve` yet: growing needs the element size,
+// and `__sizeof` takes a VALUE of the element type (a `push`/`insert` has one).
+//
+// Growth policy: start at 4 elements, then double. `new()` allocates 0 bytes
+// (`malloc(0)` is freeable), so an unused Vec costs nothing.
+
+impt math { Copy };
+impt drop { Drop };
+impt option { Option };
+impt iterator { Iterator };
+
+// ---------------------------------------------------------------------------
+// The index operator traits: `v[i]` reads through `Index`, `v[i] = x` writes
+// through `IndexMut`. A user type becomes indexable by implementing them.
+//
+// They return the ELEMENT, not a reference to it. Handing out `&T` would need
+// the compiler to track that the borrow must not outlive the buffer, and
+// returned borrows are not tracked yet — a dangling reference would be silent.
+// Reading is a copy, writing goes through the method; `&v[i]` borrows a
+// temporary COPY, not the element.
+// ---------------------------------------------------------------------------
+
+// `let x = v[i];` — the element at `i`. Out of bounds aborts, like an array.
+trait Index<T>
+{
+    fn at(self: &Self, i: i32) -> T;
+}
+
+// `v[i] = x;` — overwrite the element at `i`. Out of bounds aborts.
+trait IndexMut<T>
+{
+    fn set(self: &mut Self, i: i32, v: T);
+}
+
+// ---------------------------------------------------------------------------
+
+struct Vec<T: Copy>
+{
+    // Private: only this type's methods may touch the buffer, so its
+    // len/cap invariant cannot be broken from outside (E3015 enforces it).
+    data: *mut T,
+    len: i32,
+    cap: i32,
+    // Drive position for `next()` (the `for` loop calls it on the Vec itself,
+    // so the iterator state lives here). `new()` starts it at 0.
+    cursor: i32
+}
+
+impl Vec
+{
+    // An empty Vec. No allocation until the first push.
+    fn new() -> Vec
+    {
+        ret Vec { data: __alloc<T>(0), len: 0, cap: 0, cursor: 0 };
+    }
+
+    // Element count.
+    fn len(self: &Vec) -> i32
+    {
+        ret self.len;
+    }
+
+    // Allocated capacity, in elements.
+    fn cap(self: &Vec) -> i32
+    {
+        ret self.cap;
+    }
+
+    fn is_empty(self: &Vec) -> bool
+    {
+        ret self.len == 0;
+    }
+
+    // Drop the elements (a no-op for the caller: the buffer is kept).
+    fn clear(self: &mut Vec)
+    {
+        self.len = 0;
+        self.cursor = 0;
+    }
+
+    // Make room for one more element. `elem_bytes` comes from `__sizeof(v)` at
+    // the call site, which is why it is a parameter and not computed here (a
+    // generic body has no value of type T to ask about).
+    fn grow(self: &mut Vec, elem_bytes: i32)
+    {
+        let mut new_cap = self.cap * 2;
+        if new_cap == 0 { new_cap = 4; }
+        let nd = __alloc<T>(new_cap * elem_bytes);
+        __memcpy(nd, self.data, self.len * elem_bytes);
+        __free(self.data);
+        self.data = nd;
+        self.cap = new_cap;
+    }
+
+    // Append. Grows (doubling) when the buffer is full.
+    fn push(self: &mut Vec, v: T)
+    {
+        if self.len >= self.cap { self.grow(__sizeof(v)); }
+        self.data[self.len] = v;
+        self.len = self.len + 1;
+    }
+
+    // Remove and return the LAST element, or `none` when empty.
+    fn pop(self: &mut Vec) -> Option<T>
+    {
+        if self.len == 0 { ret Option::None; }
+        self.len = self.len - 1;
+        ret Option::Some(self.data[self.len]);
+    }
+
+    // The element at `i`, or `none` when out of bounds (the checked accessor;
+    // `v[i]` is the aborting one).
+    fn get(self: &Vec, i: i32) -> Option<T>
+    {
+        if i < 0 || i >= self.len { ret Option::None; }
+        ret Option::Some(self.data[i]);
+    }
+
+    // Remove the element at `i`, shifting the rest left. `none` when out of
+    // bounds.
+    fn remove(self: &mut Vec, i: i32) -> Option<T>
+    {
+        if i < 0 || i >= self.len { ret Option::None; }
+        let out = self.data[i];
+        let mut j = i;
+        while j + 1 < self.len {
+            self.data[j] = self.data[j + 1];
+            j = j + 1;
+        }
+        self.len = self.len - 1;
+        if self.cursor > self.len { self.cursor = self.len; }
+        ret Option::Some(out);
+    }
+
+    // Insert `v` at `i`, shifting the rest right. Aborts when `i` is out of
+    // bounds (`i == len` appends).
+    fn insert(self: &mut Vec, i: i32, v: T)
+    {
+        if i < 0 || i > self.len { panic("Vec::insert index out of bounds"); }
+        if self.len >= self.cap { self.grow(__sizeof(v)); }
+        let mut j = self.len;
+        while j > i {
+            self.data[j] = self.data[j - 1];
+            j = j - 1;
+        }
+        self.data[i] = v;
+        self.len = self.len + 1;
+    }
+}
+
+// `v[i]` — index out of bounds aborts (arrays behave the same way).
+impl Index<T> for Vec<T>
+{
+    fn at(self: &Self, i: i32) -> T
+    {
+        if i < 0 || i >= self.len { panic("Vec index out of bounds"); }
+        ret self.data[i];
+    }
+}
+
+// `v[i] = x` — index out of bounds aborts.
+impl IndexMut<T> for Vec<T>
+{
+    fn set(self: &mut Self, i: i32, v: T)
+    {
+        if i < 0 || i >= self.len { panic("Vec::set index out of bounds"); }
+        self.data[i] = v;
+    }
+}
+
+// `for e in v { ... }` — consumes the Vec (the loop moves it into its own
+// iterator local) and yields a COPY of each element, in order.
+impl Iterator<T> for Vec<T>
+{
+    fn next(self: &mut Self) -> Option<T>
+    {
+        if self.cursor >= self.len { ret Option::None; }
+        let v = self.data[self.cursor];
+        self.cursor = self.cursor + 1;
+        ret Option::Some(v);
+    }
+}
+
+// Freeing the buffer. Elements need no destructor: the `T: Copy` bound above
+// guarantees there is nothing to release per element.
+impl Drop for Vec
+{
+    fn drop(self)
+    {
+        __free(self.data);
+    }
+}

@@ -1,0 +1,110 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// vec.lis — the standard library's growable array, Vec<T>.
+//
+//     let mut v = Vec<i32>::new();   // no allocation until the first push
+//     v.push(1);  v.push(2);
+//     let x = v[0];                  // Index::at     — an out-of-bounds read aborts
+//     v[1] = 9;                      // IndexMut::set — an out-of-bounds write aborts
+//     let last = v.pop();            // Option<i32>
+//     match v.get(99) { ... }        // the checked accessor: none, never aborts
+//     for e in v { ... }             // consumes the Vec (Iterator<T>)
+//
+// Elements must be Copy: dropping a Vec frees the BUFFER, not the elements, so a
+// non-Copy element type is rejected at compile time instead of leaking. The
+// buffer grows by doubling (0 -> 4 -> 8 -> ...) and is released by the Drop impl.
+// Everything here COMPILES.
+
+impt vec { Vec };
+impt option { Option };
+
+// A Vec is an ordinary field: it is moved and dropped with the struct that owns
+// it, and the buffer goes away with the field.
+struct Scores
+{
+    pub marks: Vec<i32>,
+    pub bonus: i32
+}
+
+impl Scores
+{
+    fn new(bonus: i32) -> Scores
+    {
+        ret Scores { marks: Vec<i32>::new(), bonus: bonus };
+    }
+
+    // The buffer is private to Vec, so walking it goes through len() + `v[i]`
+    // (the operators from the Index trait) rather than a raw pointer.
+    fn total(self: &Scores) -> i32
+    {
+        let mut s = 0;
+        let mut i = 0;
+        while i < self.marks.len() {
+            s = s + self.marks[i];
+            i = i + 1;
+        }
+        ret s + self.bonus;
+    }
+}
+
+fn main() -> i32
+{
+    // 1. Build. push() grows the buffer when it is full.
+    let mut v = Vec<i32>::new();
+    let mut i = 0;
+    while i < 10 {
+        v.push(i * i);
+        i = i + 1;
+    }
+    if v.len() != 10 { ret 1; }
+    if v.is_empty() { ret 2; }
+
+    // 2. READ and WRITE through the index operator.
+    let mut sum = 0;
+    let mut j = 0;
+    while j < v.len() {
+        sum = sum + v[j];
+        j = j + 1;
+    }
+    if sum != 285 { ret 3; }   // 0 + 1 + 4 + ... + 81
+    v[0] = 100;
+    if v[0] != 100 { ret 4; }
+
+    // 3. get()/pop() return Option instead of aborting.
+    match v.get(99) {
+        Some(x) => { ret 5; },
+        None => { }
+    }
+    match v.pop() {
+        Some(x) => { if x != 81 { ret 6; } },
+        None => { ret 7; }
+    }
+
+    // 4. insert()/remove() keep the order; remove() of a bad index is none.
+    v.insert(0, 7);
+    if v[0] != 7 || v[1] != 100 { ret 8; }
+    match v.remove(0) {
+        Some(x) => { if x != 7 { ret 9; } },
+        None => { ret 10; }
+    }
+
+    // 5. As a struct field, and a for-loop over a Vec.
+    let mut scores = Scores::new(5);
+    scores.marks.push(10);
+    scores.marks.push(20);
+    if scores.total() != 35 { ret 11; }
+    let mut seen = 0;
+    for m in scores.marks {   // consumes the field (Vec implements Iterator<T>)
+        seen = seen + m;
+    }
+    if seen != 30 { ret 12; }
+
+    // 6. clear() empties the length and keeps the capacity.
+    let cap = v.cap();
+    v.clear();
+    if v.len() != 0 { ret 13; }
+    if v.cap() != cap { ret 14; }
+
+    ret 0;
+}
