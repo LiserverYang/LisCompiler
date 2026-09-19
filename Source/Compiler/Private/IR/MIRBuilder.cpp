@@ -178,7 +178,7 @@ void MIRBuilder::emit(MIRStatement stmt)
     currentBlock().stmts.push_back(std::move(stmt));
 }
 
-void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
+void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs, bool isDeclaration)
 {
     // A write to a whole root local re-arms ownership: the local now owns a
     // fresh value, so a later drop is valid again. This covers both explicit
@@ -224,7 +224,7 @@ void MIRBuilder::emitAssign(MIRPlace lhs, MIRRValue rhs)
         }
     }
 
-    emit(MIRStmtAssign{.lhs = std::move(lhs), .rhs = std::move(rhs)});
+    emit(MIRStmtAssign{.lhs = std::move(lhs), .rhs = std::move(rhs), .isDeclaration = isDeclaration});
 }
 
 void MIRBuilder::emitDrop(MIRPlace place)
@@ -1018,7 +1018,7 @@ void MIRBuilder::buildVarDecl(HIRVarDecl *decl)
 
         MIRPlace dest = localPlace(idx);
         MIRRValue rhs = MIRRValueUse{.operand = exprToOperand(decl->init->get())};
-        emitAssign(dest, std::move(rhs));
+        emitAssign(dest, std::move(rhs), /*isDeclaration=*/true);
     }
     // No initialiser → zero-init is codegen's responsibility.
 }
@@ -1093,13 +1093,13 @@ void MIRBuilder::buildLetElse(HIRVarDecl *decl, size_t localIdx)
         MIRPlace payload = scrutinee;
         payload.projections.push_back(Projection{ProjectionKind::Field, payloadSlot, 0});
         payload.type = payloadTy;
-        emitAssign(binding, MIRRValueUse{placeToOperand(std::move(payload))});
+        emitAssign(binding, MIRRValueUse{placeToOperand(std::move(payload))}, /*isDeclaration=*/true);
     }
     sealBlock(curBB_, MIRTermGoto{.target = joinId});
 
     // ── None/Err: the fallback value (or a diverging call) ──────────────────
     switchTo(fallbackId);
-    emitAssign(binding, MIRRValueUse{exprToOperand(decl->elseExpr.value().get())});
+    emitAssign(binding, MIRRValueUse{exprToOperand(decl->elseExpr.value().get())}, /*isDeclaration=*/true);
     if (!std::holds_alternative<MIRTermDiverge>(currentBlock().terminator))
         sealBlock(curBB_, MIRTermGoto{.target = joinId});
 

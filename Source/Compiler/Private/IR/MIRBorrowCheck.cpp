@@ -23,7 +23,11 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <map>
+#include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -174,6 +178,27 @@ std::shared_ptr<Type> typeAfter(const std::shared_ptr<Type> &base, const MIRPlac
     return cur;
 }
 
+/// How a place is USED — the conflict rules are a matrix over this and whether
+/// the existing borrow is exclusive (mirrors the HIR checker's BorrowUseKind).
+enum class AccessKind
+{
+    Read,         // a Copy read
+    Write,        // an assignment target
+    Move,         // a non-Copy operand consumed by value
+    BorrowShared, // taking &
+    BorrowMut,    // taking &mut
+};
+
+/// One borrow of a place, created by '&place' / '&mut place'.
+struct BorrowRecord
+{
+    MIRPlace place;              // what is borrowed (root local + its path)
+    bool isMut = false;
+    size_t holder = 0;           // the local that stores the reference VALUE
+    size_t parent = SIZE_MAX;    // the pointer this one was reborrowed through
+    bool twoPhase = false;       // a call receiver / reference argument
+};
+
 class FunctionChecker
 {
 public:
@@ -188,6 +213,31 @@ private:
 
     std::vector<std::vector<size_t>> preds_;
     std::vector<State> in_;
+
+    // ── borrow checking ─────────────────────────────────────────────────────
+    /// Every borrow in the function (created site by site in the pre-pass, so
+    /// the fixpoint never invents duplicates).
+    std::vector<BorrowRecord> borrows_;
+    /// (block, statement) -> the borrows that statement creates.
+    std::map<std::pair<size_t, size_t>, std::vector<size_t>> borrowSites_;
+    /// The borrow that put a reference value into a local (the alias table the
+    /// deref resolution reads). Flow-insensitive, exactly like the HIR one.
+    std::unordered_map<size_t, size_t> holderBorrow_;
+    /// holder local -> the pointer local it was reborrowed through.
+    std::unordered_map<size_t, size_t> parentOfHolder_;
+    /// Locals whose value is passed to a call (receiver / reference argument):
+    /// a borrow they hold is only RESERVED until the call runs (two-phase).
+    std::unordered_set<size_t> callArgLocals_;
+    /// Live locals after each statement (per block), for the borrow kill rule.
+    std::vector<std::vector<std::vector<char>>> liveAfter_;
+    std::vector<std::vector<char>> liveOut_;
+    /// The active-borrow set the transfer is currently working on: borrow id ->
+    /// the local that CURRENTLY carries the reference value. MIR materializes
+    /// '&x' into a temp and then copies the reference into the real binding
+    /// ('_5 = &x; r = copy _5;'), so the borrow has to follow the copies —
+    /// otherwise its live range ends at the copy and a write to x right after
+    /// 'let r = &x' looks legal.
+    std::map<size_t, size_t> *activeNow_ = nullptr;
     /// The state AFTER a block's statements. A successor joins its
     /// predecessors' OUT states — joining their IN states would lose every
     /// definition the predecessor block itself performed.
@@ -202,7 +252,7 @@ private:
     /// has not visited yet contributes nothing instead of 'uninitialized'.
     State topState() const;
     State joinPredecessors(size_t block) const;
-    State transfer(const MIRBasicBlock &block, const State &in, bool report);
+    State transfer(size_t blockIndex, const MIRBasicBlock &block, const State &in, bool report, std::map<size_t, size_t> *active);
 
     void transferStmt(const MIRStatement &stmt, State &st, bool report);
     void transferTerm(const MIRTerminator &term, State &st, bool report);
@@ -216,13 +266,59 @@ private:
     /// binding (so it is not an E3011), but it is still a read of the place:
     /// assigning over a MOVED binding is rejected (single owner, no revival),
     /// and writing a FIELD requires the binding to be initialized already.
-    void checkAssignTarget(const MIRPlace &place, const State &st, bool report);
+    void checkAssignTarget(const MIRPlace &place, const State &st, bool report, bool isDeclaration);
     /// A MOVE source: the full ownership rule set (E3005/E3016/E3017).
     void checkMove(const MIRPlace &place, State &st, bool report);
+    /// Borrowing a binding that was moved out of (E4005).
+    void checkBorrowOfMoved(const MIRPlace &place, const State &st);
+    /// A whole local holding a `&mut T`. The type is NOT Copy, so an assignment
+    /// RHS MOVES it — but MIRBuilder lowers every pointer-like operand as a
+    /// pointer copy (it owns nothing to hand over), so the ownership rule has to
+    /// be applied here rather than read off the operand kind.
+    bool isWholeMutReference(const MIRPlace &place) const;
+    /// The whole-local MIRCopy of an assignment RHS, if that is the shape.
+    bool moveByAssignment(const MIRStatement &stmt, MIRPlace &source) const;
     /// Mark the destination of an assignment as owned again.
     void definePlace(const MIRPlace &place, State &st);
 
     std::string displayName(const MIRPlace &place) const;
+
+    // ── borrow checking ─────────────────────────────────────────────────────
+
+    /// Number every borrow site once, build the alias/parent maps and mark the
+    /// two-phase (call-argument) reservations.
+    void collectBorrowSites();
+    /// Successor blocks of one block.
+    std::vector<size_t> successorsOf(size_t block) const;
+    /// Locals READ / WRITTEN by one statement (or terminator), as masks. A
+    /// place reads its base local (dereferencing a pointer loads it); only a
+    /// whole-local write defines one.
+    void collectStmtAccess(const MIRStatement &stmt, std::vector<char> &reads, std::vector<char> &writes) const;
+    void collectTermAccess(const MIRTerminator &term, std::vector<char> &reads, std::vector<char> &writes) const;
+    /// Backward liveness over the CFG, plus the per-statement live sets the
+    /// borrow kill rule needs.
+    void computeLiveness();
+    /// Add a record; returns its id.
+    size_t addBorrow(const MIRPlace &place, size_t holder, size_t parent, bool isMut, bool twoPhase);
+    /// A place denoting a whole local (no projections).
+    MIRPlace placeOfLocal(size_t index) const;
+    /// The pointer local and its parents (the borrows an access THROUGH the
+    /// reference is exempt from: they are what grants the access).
+    std::vector<size_t> exemptionChain(size_t holder) const;
+    /// What a reference local points at, when the alias table knows.
+    const MIRPlace *referentOf(size_t holder) const;
+    /// Check one use of a place against the active borrows.
+    void checkAccess(const MIRPlace &place, AccessKind kind);
+    void checkAccessRaw(const MIRPlace &target, AccessKind kind, const std::vector<size_t> &exempt, const MIRPlace &diagPlace);
+    /// Insert the borrows a statement creates, move them onto the destination of
+    /// a reference copy, and drop the ones whose current holder is dead (or
+    /// overwritten) — the transfer function of the borrow-set analysis.
+    void settleBorrows(size_t blockIndex, size_t stmtIndex, const MIRStatement &stmt, std::map<size_t, size_t> &active);
+    /// The whole local a statement copies/moves its value FROM (SIZE_MAX when the
+    /// statement is not a plain reference copy).
+    size_t copySourceOf(const MIRStatement &stmt) const;
+    size_t wholeLocalDefinedBy(const MIRStatement &stmt) const;
+    std::string borrowName(const MIRPlace &place) const;
 };
 
 void FunctionChecker::logAt(const MIRPlace &place, const std::string &msg, size_t errorId)
@@ -310,26 +406,13 @@ void FunctionChecker::run()
 
     preds_.assign(blockCount, {});
     for (size_t b = 0; b < blockCount; ++b)
-    {
-        std::vector<size_t> succs;
-        const MIRTerminator &term = body_.blocks[b].terminator;
-        if (auto *go = std::get_if<MIRTermGoto>(&term))
-            succs.push_back(go->target);
-        else if (auto *br = std::get_if<MIRTermBranch>(&term))
-        {
-            succs.push_back(br->thenBlock);
-            succs.push_back(br->elseBlock);
-        }
-        else if (auto *call = std::get_if<MIRTermCall>(&term))
-        {
-            succs.push_back(call->normalDest);
-            if (call->unwindDest.has_value())
-                succs.push_back(*call->unwindDest);
-        }
-        for (size_t s : succs)
-            if (s < blockCount)
-                preds_[s].push_back(b);
-    }
+        for (size_t s : successorsOf(b))
+            preds_[s].push_back(b);
+
+    // Borrowing needs the alias/two-phase tables and the live ranges of the
+    // locals that hold references; both are computed before any fixpoint runs.
+    collectBorrowSites();
+    computeLiveness();
 
     in_.assign(blockCount, topState());
     out_.assign(blockCount, topState());
@@ -344,7 +427,7 @@ void FunctionChecker::run()
         for (size_t b = 0; b < blockCount; ++b)
         {
             State next = (b == 0) ? entry : joinPredecessors(b);
-            State nextOut = transfer(body_.blocks[b], next, /*report=*/false);
+            State nextOut = transfer(b, body_.blocks[b], next, /*report=*/false, nullptr);
             if (!seen[b] || !sameState(in_[b], next) || !sameState(out_[b], nextOut))
             {
                 in_[b] = std::move(next);
@@ -355,22 +438,73 @@ void FunctionChecker::run()
         }
     }
 
+    // ── borrow-set fixpoint (no diagnostics) ─────────────────────────────────
+    // Which borrows are active at a point: created on a path reaching it and
+    // still live (the holder's live range). The join takes the UNION — "may be
+    // active" is what a conflict check needs.
+    std::vector<std::map<size_t, size_t>> borrowIn(blockCount), borrowOut(blockCount);
+    bool changedBorrows = true;
+    while (changedBorrows)
+    {
+        changedBorrows = false;
+        for (size_t b = 0; b < blockCount; ++b)
+        {
+            std::map<size_t, size_t> next;
+            for (size_t p : preds_[b])
+                next.insert(borrowOut[p].begin(), borrowOut[p].end());
+            std::map<size_t, size_t> nextOut = next;
+            State scratch = in_[b];
+            transfer(b, body_.blocks[b], scratch, /*report=*/false, &nextOut);
+            if (next != borrowIn[b] || nextOut != borrowOut[b])
+            {
+                borrowIn[b] = std::move(next);
+                borrowOut[b] = std::move(nextOut);
+                changedBorrows = true;
+            }
+        }
+    }
+
     // ── reporting walk ───────────────────────────────────────────────────────
     reporting_ = true;
     for (size_t b = 0; b < blockCount; ++b)
     {
         State st = in_[b];
-        transfer(body_.blocks[b], st, /*report=*/true);
+        std::map<size_t, size_t> active = borrowIn[b];
+        transfer(b, body_.blocks[b], st, /*report=*/true, &active);
     }
     reporting_ = false;
 }
 
-State FunctionChecker::transfer(const MIRBasicBlock &block, const State &in, bool report)
+State FunctionChecker::transfer(size_t blockIndex, const MIRBasicBlock &block, const State &in, bool report,
+    std::map<size_t, size_t> *active)
 {
     State st = in;
-    for (const MIRStatement &stmt : block.stmts)
-        transferStmt(stmt, st, report);
+    std::map<size_t, size_t> *saved = activeNow_;
+    activeNow_ = active;
+
+    for (size_t i = 0; i < block.stmts.size(); ++i)
+    {
+        transferStmt(block.stmts[i], st, report);
+        if (activeNow_)
+            settleBorrows(blockIndex, i, block.stmts[i], *activeNow_);
+    }
     transferTerm(block.terminator, st, report);
+    if (activeNow_)
+    {
+        // The terminator creates no borrows, but a holder can reach its last
+        // use here — which ends every borrow it held.
+        const std::vector<char> &liveOut = liveOut_[blockIndex];
+        for (auto it = activeNow_->begin(); it != activeNow_->end();)
+        {
+            const size_t holder = it->second;
+            if (holder >= liveOut.size() || !liveOut[holder])
+                it = activeNow_->erase(it);
+            else
+                ++it;
+        }
+    }
+
+    activeNow_ = saved;
     return st;
 }
 
@@ -378,8 +512,19 @@ void FunctionChecker::transferStmt(const MIRStatement &stmt, State &st, bool rep
 {
     if (auto *as = std::get_if<MIRStmtAssign>(&stmt))
     {
-        checkAssignTarget(as->lhs, st, report);
-        useRValue(as->rhs, st, report);
+        checkAssignTarget(as->lhs, st, report, as->isDeclaration);
+        checkAccess(as->lhs, AccessKind::Write);
+
+        // 'let b = a;' with a: &mut T MOVES the exclusive reference (the type is
+        // not Copy) even though the MIR operand is a pointer copy.
+        MIRPlace movedSource;
+        if (moveByAssignment(stmt, movedSource))
+        {
+            checkAccess(movedSource, AccessKind::Move);
+            checkMove(movedSource, st, report);
+        }
+        else
+            useRValue(as->rhs, st, report);
         definePlace(as->lhs, st);
         return;
     }
@@ -394,6 +539,7 @@ void FunctionChecker::transferStmt(const MIRStatement &stmt, State &st, bool rep
     }
     if (auto *drop = std::get_if<MIRStmtDrop>(&stmt))
     {
+        checkAccess(drop->place, AccessKind::Read);
         checkReadable(drop->place, st, report);
         return;
     }
@@ -449,8 +595,11 @@ void FunctionChecker::useRValue(const MIRRValue &rv, State &st, bool report)
     }
     if (auto *ref = std::get_if<MIRRValueRef>(&rv))
     {
-        // Taking a reference reads the place: borrowing an unassigned binding is
-        // E3011, and the borrow itself is checked by the borrow machinery.
+        // Taking a reference is an ACCESS (a second &mut, or a & while a &mut is
+        // live, is E4001/E4002), the place must not be moved out of (E4005), and
+        // borrowing an unassigned binding is E3011.
+        checkAccess(ref->place, ref->isMut ? AccessKind::BorrowMut : AccessKind::BorrowShared);
+        checkBorrowOfMoved(ref->place, st);
         checkReadable(ref->place, st, report);
         return;
     }
@@ -477,11 +626,15 @@ void FunctionChecker::useOperand(const MIROperand &op, State &st, bool report)
 {
     if (auto *cp = std::get_if<MIRCopy>(&op))
     {
+        checkAccess(cp->place, AccessKind::Read);
         checkReadable(cp->place, st, report);
         return;
     }
     if (auto *mv = std::get_if<MIRMove>(&op))
     {
+        // The borrow rules come first (HIR does the same: moving a borrowed
+        // place is E4004, before any ownership bookkeeping).
+        checkAccess(mv->place, AccessKind::Move);
         checkMove(mv->place, st, report);
         return;
     }
@@ -510,8 +663,15 @@ void FunctionChecker::checkReadable(const MIRPlace &place, const State &st, bool
         logAt(place, "use of moved value: '" + body_.locals[info.root].name + "'", E_UseOfMovedValue);
 }
 
-void FunctionChecker::checkAssignTarget(const MIRPlace &place, const State &st, bool report)
+void FunctionChecker::checkAssignTarget(const MIRPlace &place, const State &st, bool report, bool isDeclaration)
 {
+    // A DECLARATION RE-INITIALISES the binding: 'let r = &mut x;' inside a loop
+    // body is legal even though the previous iteration moved r out (the HIR
+    // checker resets the binding on a var-decl for the same reason). A plain
+    // assignment over a moved binding stays E3005 — single owner, no revival.
+    if (isDeclaration)
+        return;
+
     const PlaceInfo info = describePlace(place);
     if (!info.isLocal || info.throughDeref || info.root >= st.locals.size())
         return;
@@ -626,6 +786,54 @@ void FunctionChecker::checkMove(const MIRPlace &place, State &st, bool report)
     ls.moved.push_back(info.path);
 }
 
+bool FunctionChecker::isWholeMutReference(const MIRPlace &place) const
+{
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal || info.throughDeref || !info.path.empty())
+        return false;
+    // Only a USER binding carries the ownership rule. MIRBuilder materializes
+    // every '&mut place' into a temp and copies it into the real binding
+    // ('_5 = &mut x; r = copy _5;'); the temp-to-binding copy is the compiler's
+    // own plumbing, not the user's 'let t = r' — reading it as a move would mark
+    // the borrow temp moved and reject the very borrow it just created.
+    if (body_.locals[info.root].isTemp)
+        return false;
+    auto ref = std::dynamic_pointer_cast<ReferenceType>(place.type);
+    return ref != nullptr && ref->isMutableRef();
+}
+
+bool FunctionChecker::moveByAssignment(const MIRStatement &stmt, MIRPlace &source) const
+{
+    auto *as = std::get_if<MIRStmtAssign>(&stmt);
+    if (!as)
+        return false;
+    auto *use = std::get_if<MIRRValueUse>(&as->rhs);
+    if (!use)
+        return false;
+    auto *cp = std::get_if<MIRCopy>(&use->operand);
+    if (!cp || !isWholeMutReference(cp->place))
+        return false;
+    source = cp->place;
+    return true;
+}
+
+void FunctionChecker::checkBorrowOfMoved(const MIRPlace &place, const State &st)
+{
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal || info.root >= st.locals.size())
+        return;
+    const LocalState &ls = st.locals[info.root];
+    for (const MovePath &moved : ls.moved)
+    {
+        if (pathsOverlap(moved, info.path))
+        {
+            logAt(place, "cannot borrow moved value '" + body_.locals[info.root].name + "'",
+                E_CannotBorrowMovedValue);
+            return;
+        }
+    }
+}
+
 void FunctionChecker::definePlace(const MIRPlace &place, State &st)
 {
     const PlaceInfo info = describePlace(place);
@@ -640,6 +848,624 @@ void FunctionChecker::definePlace(const MIRPlace &place, State &st)
         if (!pathsOverlap(p, info.path))
             kept.push_back(p);
     ls.moved = std::move(kept);
+}
+
+// ─── borrow checking ────────────────────────────────────────────────────────
+//
+// A borrow is a record {place, isMut, holder}. Its LIVE RANGE is the range of the
+// local holding the reference value — exactly what the liveness pass computes.
+// That is the whole reason this checker runs on a CFG instead of walking a tree
+// with statement ordinals: "is this borrow still live HERE" is a dataflow fact.
+// An access conflicts when a live, overlapping borrow blocks it (the matrix below
+// is the HIR checker's), minus the borrows it is EXEMPT from: using a reference
+// is granted by the very borrows that produced it.
+
+size_t FunctionChecker::addBorrow(const MIRPlace &place, size_t holder, size_t parent, bool isMut, bool twoPhase)
+{
+    BorrowRecord rec;
+    rec.place = place;
+    rec.isMut = isMut;
+    rec.holder = holder;
+    rec.parent = parent;
+    rec.twoPhase = twoPhase;
+    borrows_.push_back(std::move(rec));
+    return borrows_.size() - 1;
+}
+
+MIRPlace FunctionChecker::placeOfLocal(size_t index) const
+{
+    MIRPlace place;
+    place.base = PlaceBase::Local;
+    place.index = index;
+    place.name = body_.locals[index].name;
+    place.type = body_.locals[index].type;
+    return place;
+}
+
+std::vector<size_t> FunctionChecker::exemptionChain(size_t holder) const
+{
+    std::vector<size_t> chain;
+    size_t cur = holder;
+    while (true)
+    {
+        chain.push_back(cur);
+        auto it = parentOfHolder_.find(cur);
+        if (it == parentOfHolder_.end() || it->second == SIZE_MAX || it->second == cur)
+            break;
+        cur = it->second;
+    }
+    return chain;
+}
+
+const MIRPlace *FunctionChecker::referentOf(size_t holder) const
+{
+    auto it = holderBorrow_.find(holder);
+    if (it == holderBorrow_.end())
+        return nullptr;
+    return &borrows_[it->second].place;
+}
+
+std::string FunctionChecker::borrowName(const MIRPlace &place) const
+{
+    return displayName(place);
+}
+
+size_t FunctionChecker::wholeLocalDefinedBy(const MIRStatement &stmt) const
+{
+    const MIRPlace *lhs = nullptr;
+    if (auto *as = std::get_if<MIRStmtAssign>(&stmt))
+        lhs = &as->lhs;
+    else if (auto *call = std::get_if<MIRStmtCall>(&stmt))
+    {
+        if (call->dest.has_value())
+            lhs = &*call->dest;
+    }
+    if (!lhs)
+        return SIZE_MAX;
+    const PlaceInfo info = describePlace(*lhs);
+    if (!info.isLocal || info.throughDeref || !info.path.empty())
+        return SIZE_MAX;
+    return info.root;
+}
+
+void FunctionChecker::collectBorrowSites()
+{
+    // A reference handed to a call is only RESERVED until the callee runs, so a
+    // sibling argument may still read the place (two-phase borrow). MIR has
+    // already linearized the arguments into temps, so "this holder is passed to a
+    // call" is a property of the local — and the reference may take a few COPIES
+    // on the way to the call ('_5 = &mut s; _6 = copy _5; call(_6)'), so the
+    // marking has to travel back along the copy chain.
+    auto noteCallArg = [&](const MIROperand &op)
+    {
+        const MIRPlace *place = nullptr;
+        if (auto *cp = std::get_if<MIRCopy>(&op))
+            place = &cp->place;
+        else if (auto *mv = std::get_if<MIRMove>(&op))
+            place = &mv->place;
+        if (!place)
+            return;
+        const PlaceInfo info = describePlace(*place);
+        if (info.isLocal && !info.throughDeref && info.path.empty())
+            callArgLocals_.insert(info.root);
+    };
+
+    // Pass 1: the call arguments and the reference-copy edges between locals.
+    std::vector<std::pair<size_t, size_t>> copyEdges;
+    for (size_t b = 0; b < body_.blocks.size(); ++b)
+    {
+        const MIRBasicBlock &block = body_.blocks[b];
+        for (const MIRStatement &stmt : block.stmts)
+        {
+            if (auto *call = std::get_if<MIRStmtCall>(&stmt))
+            {
+                noteCallArg(call->callee);
+                for (const MIROperand &arg : call->args)
+                    noteCallArg(arg);
+            }
+            const size_t copySource = copySourceOf(stmt);
+            if (copySource != SIZE_MAX)
+            {
+                auto *as = std::get_if<MIRStmtAssign>(&stmt);
+                const PlaceInfo dest = describePlace(as->lhs);
+                if (dest.isLocal && !dest.throughDeref && dest.path.empty())
+                    copyEdges.push_back({dest.root, copySource});
+            }
+        }
+        if (auto *termCall = std::get_if<MIRTermCall>(&block.terminator))
+        {
+            noteCallArg(termCall->call.callee);
+            for (const MIROperand &arg : termCall->call.args)
+                noteCallArg(arg);
+        }
+    }
+    bool grew = true;
+    while (grew)
+    {
+        grew = false;
+        for (const auto &edge : copyEdges)
+            if (callArgLocals_.count(edge.first) && !callArgLocals_.count(edge.second))
+            {
+                callArgLocals_.insert(edge.second);
+                grew = true;
+            }
+    }
+
+    // Pass 2: the borrow sites themselves, in source order (the alias table is
+    // built incrementally, exactly like the HIR checker's).
+    for (size_t b = 0; b < body_.blocks.size(); ++b)
+    {
+        const MIRBasicBlock &block = body_.blocks[b];
+        for (size_t i = 0; i < block.stmts.size(); ++i)
+        {
+            const MIRStatement &stmt = block.stmts[i];
+            auto *as = std::get_if<MIRStmtAssign>(&stmt);
+            if (!as)
+                continue;
+
+            // A reference copied into another binding keeps pointing at the same
+            // place, so '*r' must keep resolving through it (and the derivation
+            // chain must follow, or an access through the copy would be blocked by
+            // the very borrow that grants it).
+            const size_t copySource = copySourceOf(stmt);
+            const PlaceInfo copyDest = describePlace(as->lhs);
+            if (copySource != SIZE_MAX && copyDest.isLocal && !copyDest.throughDeref && copyDest.path.empty())
+            {
+                auto alias = holderBorrow_.find(copySource);
+                if (alias != holderBorrow_.end())
+                {
+                    holderBorrow_[copyDest.root] = alias->second;
+                    auto parent = parentOfHolder_.find(copySource);
+                    if (parent != parentOfHolder_.end())
+                        parentOfHolder_[copyDest.root] = parent->second;
+                }
+            }
+
+            auto *ref = std::get_if<MIRRValueRef>(&as->rhs);
+            if (!ref)
+                continue;
+
+            // Only a whole local can hold a tracked reference value.
+            const PlaceInfo dest = describePlace(as->lhs);
+            if (!dest.isLocal || dest.throughDeref || !dest.path.empty())
+                continue;
+
+            const bool twoPhase = callArgLocals_.count(dest.root) > 0;
+            std::vector<size_t> ids;
+            const PlaceInfo rinfo = describePlace(ref->place);
+            if (rinfo.throughDeref)
+            {
+                // '&mut *r' has two halves: the POINTER is frozen (a second
+                // reborrow while this one lives is a conflict) and the REFERENT is
+                // what the new reference borrows.
+                ids.push_back(addBorrow(placeOfLocal(rinfo.root), dest.root, SIZE_MAX, ref->isMut, twoPhase));
+                if (const MIRPlace *target = referentOf(rinfo.root))
+                {
+                    MIRPlace resolved = *target;
+                    bool seenDeref = false;
+                    for (const Projection &p : ref->place.projections)
+                    {
+                        if (p.kind == ProjectionKind::Deref)
+                        {
+                            seenDeref = true;
+                            continue;
+                        }
+                        if (seenDeref)
+                            resolved.projections.push_back(p);
+                    }
+                    ids.push_back(addBorrow(resolved, dest.root, rinfo.root, ref->isMut, twoPhase));
+                    parentOfHolder_[dest.root] = rinfo.root;
+                }
+            }
+            else
+                ids.push_back(addBorrow(ref->place, dest.root, SIZE_MAX, ref->isMut, twoPhase));
+
+            borrowSites_[{b, i}] = ids;
+            // The alias table remembers the REFERENT (the last record), so a
+            // reborrow of a reborrow still resolves to the original place.
+            holderBorrow_[dest.root] = ids.back();
+        }
+    }
+}
+
+std::vector<size_t> FunctionChecker::successorsOf(size_t block) const
+{
+    std::vector<size_t> succs;
+    const MIRTerminator &term = body_.blocks[block].terminator;
+    if (auto *go = std::get_if<MIRTermGoto>(&term))
+        succs.push_back(go->target);
+    else if (auto *br = std::get_if<MIRTermBranch>(&term))
+    {
+        succs.push_back(br->thenBlock);
+        succs.push_back(br->elseBlock);
+    }
+    else if (auto *call = std::get_if<MIRTermCall>(&term))
+    {
+        succs.push_back(call->normalDest);
+        if (call->unwindDest.has_value())
+            succs.push_back(*call->unwindDest);
+    }
+    std::vector<size_t> valid;
+    for (size_t s : succs)
+        if (s < body_.blocks.size())
+            valid.push_back(s);
+    return valid;
+}
+
+void FunctionChecker::collectStmtAccess(const MIRStatement &stmt, std::vector<char> &reads, std::vector<char> &writes) const
+{
+    const size_t localCount = body_.locals.size();
+    reads.assign(localCount, 0);
+    writes.assign(localCount, 0);
+
+    auto readPlace = [&](const MIRPlace &place)
+    {
+        const PlaceInfo info = describePlace(place);
+        if (info.isLocal && info.root < localCount)
+            reads[info.root] = 1;
+    };
+    auto readOperand = [&](const MIROperand &op)
+    {
+        if (auto *cp = std::get_if<MIRCopy>(&op))
+            readPlace(cp->place);
+        else if (auto *mv = std::get_if<MIRMove>(&op))
+            readPlace(mv->place);
+    };
+    auto readRValue = [&](const MIRRValue &rv)
+    {
+        if (auto *use = std::get_if<MIRRValueUse>(&rv))
+            readOperand(use->operand);
+        else if (auto *bin = std::get_if<MIRRValueBinaryOp>(&rv))
+        {
+            readOperand(bin->left);
+            readOperand(bin->right);
+        }
+        else if (auto *un = std::get_if<MIRRValueUnaryOp>(&rv))
+            readOperand(un->operand);
+        else if (auto *cast = std::get_if<MIRRValueCast>(&rv))
+            readOperand(cast->operand);
+        else if (auto *ref = std::get_if<MIRRValueRef>(&rv))
+            readPlace(ref->place);
+        else if (auto *addr = std::get_if<MIRRValueAddrOf>(&rv))
+            readPlace(addr->place);
+        else if (auto *si = std::get_if<MIRRValueStructInit>(&rv))
+        {
+            for (const auto &field : si->fields)
+                readOperand(field.second);
+        }
+        else if (auto *ai = std::get_if<MIRRValueArrayInit>(&rv))
+        {
+            for (const MIROperand &el : ai->elements)
+                readOperand(el);
+        }
+    };
+    auto writePlace = [&](const MIRPlace &place)
+    {
+        const PlaceInfo info = describePlace(place);
+        if (!info.isLocal || info.root >= localCount || info.throughDeref || !info.path.empty())
+            return;
+        writes[info.root] = 1;
+    };
+
+    if (auto *as = std::get_if<MIRStmtAssign>(&stmt))
+    {
+        // A field write still READS its root binding.
+        const PlaceInfo linfo = describePlace(as->lhs);
+        if (linfo.isLocal && (linfo.throughDeref || !linfo.path.empty()))
+            readPlace(as->lhs);
+        writePlace(as->lhs);
+        readRValue(as->rhs);
+        return;
+    }
+    if (auto *call = std::get_if<MIRStmtCall>(&stmt))
+    {
+        readOperand(call->callee);
+        for (const MIROperand &arg : call->args)
+            readOperand(arg);
+        if (call->dest.has_value())
+            writePlace(*call->dest);
+        return;
+    }
+    if (auto *drop = std::get_if<MIRStmtDrop>(&stmt))
+        readPlace(drop->place);
+}
+
+void FunctionChecker::collectTermAccess(const MIRTerminator &term, std::vector<char> &reads, std::vector<char> &writes) const
+{
+    const size_t localCount = body_.locals.size();
+    reads.assign(localCount, 0);
+    writes.assign(localCount, 0);
+    auto readOperand = [&](const MIROperand &op)
+    {
+        const MIRPlace *place = nullptr;
+        if (auto *cp = std::get_if<MIRCopy>(&op))
+            place = &cp->place;
+        else if (auto *mv = std::get_if<MIRMove>(&op))
+            place = &mv->place;
+        if (!place)
+            return;
+        const PlaceInfo info = describePlace(*place);
+        if (info.isLocal && info.root < localCount)
+            reads[info.root] = 1;
+    };
+
+    if (auto *br = std::get_if<MIRTermBranch>(&term))
+        readOperand(br->cond);
+    else if (auto *ret = std::get_if<MIRTermReturn>(&term))
+    {
+        if (ret->value.has_value())
+            readOperand(*ret->value);
+    }
+    else if (auto *call = std::get_if<MIRTermCall>(&term))
+    {
+        readOperand(call->call.callee);
+        for (const MIROperand &arg : call->call.args)
+            readOperand(arg);
+        if (call->call.dest.has_value())
+        {
+            const PlaceInfo info = describePlace(*call->call.dest);
+            if (info.isLocal && !info.throughDeref && info.path.empty())
+                writes[info.root] = 1;
+        }
+    }
+}
+
+void FunctionChecker::computeLiveness()
+{
+    const size_t blockCount = body_.blocks.size();
+    const size_t localCount = body_.locals.size();
+    liveOut_.assign(blockCount, std::vector<char>(localCount, 0));
+    liveAfter_.assign(blockCount, {});
+
+    std::vector<std::vector<char>> use(blockCount, std::vector<char>(localCount, 0));
+    std::vector<std::vector<char>> def(blockCount, std::vector<char>(localCount, 0));
+
+    // Upward-exposed uses per block: walk the block BACKWARDS and record a read
+    // only when no later statement in the block already defined the local.
+    for (size_t b = 0; b < blockCount; ++b)
+    {
+        const MIRBasicBlock &block = body_.blocks[b];
+        std::vector<char> r(localCount, 0), w(localCount, 0);
+
+        collectTermAccess(block.terminator, r, w);
+        for (size_t l = 0; l < localCount; ++l)
+        {
+            if (r[l] && !def[b][l])
+                use[b][l] = 1;
+            if (w[l])
+            {
+                def[b][l] = 1;
+                use[b][l] = 0;
+            }
+        }
+
+        for (size_t i = block.stmts.size(); i-- > 0;)
+        {
+            collectStmtAccess(block.stmts[i], r, w);
+            for (size_t l = 0; l < localCount; ++l)
+            {
+                if (r[l] && !def[b][l])
+                    use[b][l] = 1;
+                if (w[l])
+                {
+                    def[b][l] = 1;
+                    use[b][l] = 0;
+                }
+            }
+        }
+    }
+
+    // Backward fixpoint: liveOut = union of the successors' liveIn; a definition
+    // kills, an upward-exposed use generates.
+    std::vector<std::vector<char>> liveIn(blockCount, std::vector<char>(localCount, 0));
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (size_t b = blockCount; b-- > 0;)
+        {
+            std::vector<char> newOut(localCount, 0);
+            for (size_t s : successorsOf(b))
+                for (size_t l = 0; l < localCount; ++l)
+                    if (liveIn[s][l])
+                        newOut[l] = 1;
+            std::vector<char> newIn = use[b];
+            for (size_t l = 0; l < localCount; ++l)
+                if (newOut[l] && !def[b][l])
+                    newIn[l] = 1;
+            if (newIn != liveIn[b] || newOut != liveOut_[b])
+            {
+                liveIn[b] = std::move(newIn);
+                liveOut_[b] = std::move(newOut);
+                changed = true;
+            }
+        }
+    }
+
+    // Per-statement live sets: the borrow kill rule reads liveAfter_[b][i].
+    for (size_t b = 0; b < blockCount; ++b)
+    {
+        const MIRBasicBlock &block = body_.blocks[b];
+        liveAfter_[b].assign(block.stmts.size(), std::vector<char>(localCount, 0));
+        std::vector<char> cur = liveOut_[b];
+        for (size_t i = block.stmts.size(); i-- > 0;)
+        {
+            liveAfter_[b][i] = cur;
+            std::vector<char> r(localCount, 0), w(localCount, 0);
+            collectStmtAccess(block.stmts[i], r, w);
+            for (size_t l = 0; l < localCount; ++l)
+                if (w[l])
+                    cur[l] = 0;
+            for (size_t l = 0; l < localCount; ++l)
+                if (r[l])
+                    cur[l] = 1;
+        }
+    }
+}
+
+void FunctionChecker::checkAccessRaw(const MIRPlace &target, AccessKind kind,
+    const std::vector<size_t> &exempt, const MIRPlace &diagPlace)
+{
+    if (!activeNow_)
+        return;
+    const PlaceInfo tinfo = describePlace(target);
+    for (const auto &entry : *activeNow_)
+    {
+        const BorrowRecord &b = borrows_[entry.first];
+        const PlaceInfo binfo = describePlace(b.place);
+        if (binfo.root != tinfo.root || !pathsOverlap(binfo.path, tinfo.path))
+            continue;
+        // Using a reference is GRANTED by the borrows that produced it: they are
+        // what makes the access legal in the first place.
+        if (std::find(exempt.begin(), exempt.end(), entry.second) != exempt.end())
+            continue;
+
+        bool conflict = false;
+        switch (kind)
+        {
+        case AccessKind::BorrowMut: conflict = true; break;
+        case AccessKind::BorrowShared: conflict = b.isMut; break;
+        case AccessKind::Write: conflict = true; break;
+        case AccessKind::Move: conflict = true; break;
+        case AccessKind::Read: conflict = b.isMut; break;
+        }
+        // A reservation only relaxes what the callee has NOT touched yet: reads
+        // and shared borrows, never writes or moves.
+        if (conflict && b.twoPhase && b.isMut
+            && (kind == AccessKind::Read || kind == AccessKind::BorrowShared))
+            conflict = false;
+        if (!conflict)
+            continue;
+
+        const std::string name = displayName(diagPlace);
+        std::string msg;
+        size_t errorId = E_SemanticError;
+        switch (kind)
+        {
+        case AccessKind::BorrowMut:
+            msg = "cannot borrow '" + name + "' as mutable because it is already borrowed";
+            errorId = E_CannotBorrowMutWhileBorrowed;
+            break;
+        case AccessKind::BorrowShared:
+            msg = "cannot borrow '" + name + "' because it is already borrowed as mutable";
+            errorId = E_CannotBorrowWhileMutBorrowed;
+            break;
+        case AccessKind::Write:
+            msg = "cannot assign to '" + name + "' because it is borrowed";
+            errorId = E_CannotMutateWhileBorrowed;
+            break;
+        case AccessKind::Move:
+            msg = "cannot move out of '" + name + "' because it is borrowed";
+            errorId = E_CannotMoveWhileBorrowed;
+            break;
+        case AccessKind::Read:
+            msg = "cannot read '" + name + "' because it is borrowed as mutable";
+            errorId = E_CannotBorrowWhileMutBorrowed;
+            break;
+        }
+        logAt(diagPlace, msg, errorId);
+        return;
+    }
+}
+
+void FunctionChecker::checkAccess(const MIRPlace &place, AccessKind kind)
+{
+    if (!activeNow_)
+        return;
+    const PlaceInfo info = describePlace(place);
+    if (!info.isLocal)
+        return;
+
+    if (info.throughDeref)
+    {
+        // Going through '*r' USES r: writing through it, moving out of it or
+        // reborrowing it must find the pointer free ...
+        if (kind != AccessKind::Read)
+            checkAccessRaw(placeOfLocal(info.root), kind, {}, place);
+        // ... and the access lands on the REFERENT, exempt from this reference's
+        // own derivation chain.
+        if (const MIRPlace *target = referentOf(info.root))
+        {
+            MIRPlace resolved = *target;
+            bool seenDeref = false;
+            for (const Projection &p : place.projections)
+            {
+                if (p.kind == ProjectionKind::Deref)
+                {
+                    seenDeref = true;
+                    continue;
+                }
+                if (seenDeref)
+                    resolved.projections.push_back(p);
+            }
+            checkAccessRaw(resolved, kind, exemptionChain(info.root), place);
+        }
+        return;
+    }
+
+    checkAccessRaw(place, kind, {}, place);
+}
+
+size_t FunctionChecker::copySourceOf(const MIRStatement &stmt) const
+{
+    auto *as = std::get_if<MIRStmtAssign>(&stmt);
+    if (!as)
+        return SIZE_MAX;
+    auto *use = std::get_if<MIRRValueUse>(&as->rhs);
+    if (!use)
+        return SIZE_MAX;
+    const MIRPlace *src = nullptr;
+    if (auto *cp = std::get_if<MIRCopy>(&use->operand))
+        src = &cp->place;
+    else if (auto *mv = std::get_if<MIRMove>(&use->operand))
+        src = &mv->place;
+    if (!src)
+        return SIZE_MAX;
+    const PlaceInfo info = describePlace(*src);
+    if (!info.isLocal || info.throughDeref || !info.path.empty())
+        return SIZE_MAX;
+    return info.root;
+}
+
+void FunctionChecker::settleBorrows(size_t blockIndex, size_t stmtIndex, const MIRStatement &stmt, std::map<size_t, size_t> &active)
+{
+    auto site = borrowSites_.find({blockIndex, stmtIndex});
+    const bool creates = (site != borrowSites_.end());
+    const std::vector<char> &live = liveAfter_[blockIndex][stmtIndex];
+    const size_t redefined = wholeLocalDefinedBy(stmt);
+    const size_t copySource = copySourceOf(stmt);
+
+    // 1. Overwriting a local drops the borrow THAT local was carrying.
+    if (redefined != SIZE_MAX && redefined != copySource)
+        for (auto it = active.begin(); it != active.end();)
+        {
+            if (it->second == redefined)
+                it = active.erase(it);
+            else
+                ++it;
+        }
+
+    // 2. A reference COPY carries the borrow along: '_5 = &x; r = copy _5;'
+    //    means r holds the borrow now, so its live range follows r.
+    if (copySource != SIZE_MAX && redefined != SIZE_MAX)
+        for (auto &entry : active)
+            if (entry.second == copySource)
+                entry.second = redefined;
+
+    // 3. A borrow whose current holder is dead afterwards is over.
+    for (auto it = active.begin(); it != active.end();)
+    {
+        const size_t holder = it->second;
+        if (holder >= live.size() || !live[holder])
+            it = active.erase(it);
+        else
+            ++it;
+    }
+
+    // 4. A reference value created here becomes active AFTER this statement.
+    if (creates)
+        for (size_t id : site->second)
+            active[id] = borrows_[id].holder;
 }
 
 } // namespace

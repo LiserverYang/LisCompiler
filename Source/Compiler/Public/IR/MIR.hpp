@@ -192,6 +192,14 @@ struct MIRStmtAssign
 {
     MIRPlace lhs;  // where to write
     MIRRValue rhs; // what to compute
+
+    /// True for the write that INITIALISES a `let` binding. The language treats
+    /// a declaration differently from an assignment: `let r = &mut x;` resets the
+    /// binding (so it is legal inside a loop even though the previous iteration
+    /// moved r out), while a plain `r = ...;` over a moved binding is E3005
+    /// (single owner, no revival). MIR has one statement for both, so the flag is
+    /// what keeps the ownership rule checkable here (MIRBorrowCheck reads it).
+    bool isDeclaration = false;
 };
 
 struct MIRStmtCall

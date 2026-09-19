@@ -312,7 +312,9 @@ private:
 
     // ── statement emitters ────────────────────────────────────────────────────
     void emit(MIRStatement stmt);
-    void emitAssign(MIRPlace lhs, MIRRValue rhs);
+    /// `isDeclaration` marks the write that initialises a `let` binding (see
+    /// MIRStmtAssign::isDeclaration).
+    void emitAssign(MIRPlace lhs, MIRRValue rhs, bool isDeclaration = false);
     void emitDrop(MIRPlace place);
 
     /** Drop `place` but skip the moved-out sub-paths (relative to `place`).
