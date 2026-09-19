@@ -249,6 +249,11 @@ private:
     // ── expression builders ───────────────────────────────────────────────────
     // Every buildExpr* returns the MIRPlace that holds the result.
     MIRPlace buildExpr(HIRExpr *expr);
+
+    /// The dispatch body of buildExpr. Call it through buildExpr, which also
+    /// stamps the expression's source span onto the returned place (the borrow /
+    /// move / definite-assignment checking runs on MIR and reports at that span).
+    MIRPlace buildExprInner(HIRExpr *expr);
     MIRPlace buildLiteral(HIRLiteral *lit);
     MIRPlace buildNameRef(HIRNameRef *ref);
     MIRPlace buildBinaryOp(HIRBinaryOp *bin);

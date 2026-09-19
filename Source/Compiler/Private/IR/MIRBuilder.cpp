@@ -1745,7 +1745,25 @@ void MIRBuilder::dropOwnedLocalsFrom(size_t frameBase)
 // statements, and returns the MIRPlace containing the final result.
 // ═════════════════════════════════════════════════════════════════════════════
 
+/// Lower an expression and STAMP ITS SOURCE SPAN onto the resulting place.
+///
+/// Every place-producing HIR expression goes through here, so the span is the
+/// OUTERMOST expression that formed the place (`s.a.b` carries the span of the
+/// whole member access, not of `s`) — which is what a borrow or move diagnostic
+/// should underline. The checkers run on MIR now, so the span has to travel
+/// with the place rather than be fetched from the HIR tree.
 MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
+{
+    MIRPlace place = buildExprInner(expr);
+    if (expr)
+    {
+        place.pos = expr->position;
+        place.length = expr->length;
+    }
+    return place;
+}
+
+MIRPlace MIRBuilder::buildExprInner(HIRExpr *expr)
 {
     if (auto *lit = dynamic_cast<HIRLiteral *>(expr))
         return buildLiteral(lit);

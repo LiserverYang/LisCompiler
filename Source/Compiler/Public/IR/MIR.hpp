@@ -5,6 +5,7 @@
 
 #pragma once
 #include "Analysiser/Type.hpp"
+#include "Core/SourcePosition.hpp"
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -44,6 +45,19 @@ struct MIRPlace
     std::string name;                    // debug name
     std::vector<Projection> projections; // in application order
     std::shared_ptr<Type> type;
+
+    /// Source span of the HIR expression that produced this place. Borrow /
+    /// move / definite-assignment checking runs on MIR (2026-09-19), and those
+    /// diagnostics point at the PLACE a program uses (E3005 use-after-move,
+    /// E3011 uninitialized use, E4001-E4004 borrow conflicts), so the position
+    /// has to ride along with the place instead of being looked up in the HIR
+    /// tree afterwards. MIRBuilder::buildExpr stamps it.
+    ///
+    /// Empty for compiler-generated places that have no source form (a temp
+    /// holding a call result, the return slot): the checkers fall back to a
+    /// statement/function-level location for those.
+    SourcePosition pos;
+    size_t length = 0;
 };
 
 // ─── Operands ────────────────────────────────────────────────────────────────
