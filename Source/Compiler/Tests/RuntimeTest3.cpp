@@ -1636,3 +1636,27 @@ TEST_F(RuntimeTest, TryOperatorRequiresResultReturningFunction)
                       "fn main() -> i32 { ret 0; }",
         "requires the enclosing function to return");
 }
+
+// ── two-phase borrows end to end ──────────────────────────────────────────────
+// The compile-level cases live in BorrowCheckerTest; these two also RUN, which
+// pins the MIR-side argument evaluation order (the receiver address is taken
+// before the arguments are evaluated, so the read sees the pre-call value).
+
+TEST_F(RuntimeTest, TwoPhaseReceiverReadsSiblingArg)
+{
+    expectRun("struct S { pub n: i32 }"
+              " impl S { fn set(self: &mut S, v: i32) { self.n = v; } }"
+              " fn main() -> i32 { let mut s = S { n: 1 }; s.set(s.n + 5); ret s.n; }",
+        6);
+}
+
+TEST_F(RuntimeTest, TwoPhaseMutArgReadsSiblingIndex)
+{
+    // vm_push(self, self.vars[arg]) — a method body passing its own receiver as
+    // a &mut argument while reading a field of it as a sibling argument.
+    expectRun("struct V { pub vars: [i32; 4], pub sp: i32 }"
+              " fn push(vm: &mut V, v: i32) { vm.vars[vm.sp] = v; vm.sp = vm.sp + 1; }"
+              " impl V { fn dup_top(self: &mut V) { push(self, self.vars[0] + 1); } }"
+              " fn main() -> i32 { let mut m = V { vars: [7, 0, 0, 0], sp: 1 }; m.dup_top(); ret m.vars[1]; }",
+        8);
+}

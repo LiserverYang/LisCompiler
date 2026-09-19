@@ -1736,3 +1736,69 @@ TEST_F(BorrowCheckerTest, MutRefBindingNeedsAnInitializer)
     expectError("struct S { pub v: i32 } fn main() { let r: &mut S; ret 0; }",
         "without an initializer");
 }
+
+// ── two-phase borrows (reservations) ──────────────────────────────────────────
+// A &mut receiver / reference argument is only RESERVED while the rest of the
+// call is still being evaluated, so a SIBLING argument may still read the very
+// same place: s.set(s.n + 5) is legal. Before this rule every such call had to
+// hoist the value into a temporary (the lisvm project did that at 30+ sites).
+// Writes and moves are NOT relaxed: the callee may observe the place through
+// the reservation afterwards.
+
+TEST_F(BorrowCheckerTest, TwoPhaseReceiverAllowsReadingSiblingArg)
+{
+    expectOk("struct S { pub n: i32 }"
+             " impl S { fn set(self: &mut S, v: i32) { self.n = v; } }"
+             " fn main() { let mut s = S { n: 1 }; s.set(s.n + 5); ret 0; }");
+}
+
+TEST_F(BorrowCheckerTest, TwoPhaseReceiverAllowsReadingSiblingIndexArg)
+{
+    // The lisvm shape: code.patch(jz, code.count).
+    expectOk("struct C { pub ops: [i32; 4], pub count: i32 }"
+             " impl C { fn patch(self: &mut C, i: i32, v: i32) { self.ops[i] = v; } }"
+             " fn main() { let mut c = C { ops: [0, 0, 0, 0], count: 1 }; c.patch(0, c.count); ret 0; }");
+}
+
+TEST_F(BorrowCheckerTest, TwoPhaseMutArgAllowsReadingSiblingArg)
+{
+    // The other lisvm shape: vm_push(self, self.vars[arg]) — a free function
+    // whose &mut parameter is fed from a method body.
+    expectOk("struct S { pub n: i32, pub m: i32 }"
+             " fn bump(x: &mut S, v: i32) { x.n = v; }"
+             " fn f(s: &mut S) { bump(s, s.m + 1); }"
+             " fn main() { let mut x = S { n: 0, m: 1 }; f(&mut x); ret 0; }");
+}
+
+TEST_F(BorrowCheckerTest, TwoPhaseReservationStillBlocksAMove)
+{
+    // Passing the reserved place BY VALUE consumes it: the callee would hold a
+    // second owner of a value that the reservation still refers to.
+    expectError("struct S { pub a: [i32; 2] }"
+                " impl S { fn take(self: &mut S, other: S) { self.a[0] = other.a[1]; } }"
+                " fn main() { let mut s = S { a: [1, 2] }; s.take(s); ret 0; }",
+        "because it is borrowed");
+}
+
+TEST_F(BorrowCheckerTest, TwoPhaseReservationStillBlocksASecondMutBorrow)
+{
+    // b(s, a(s)): the second &mut would hand out a second exclusive borrow of a
+    // place the first argument has already reserved.
+    expectError("struct S { pub n: i32 }"
+                " fn a(x: &mut S) -> i32 { ret x.n; }"
+                " fn b(x: &mut S, v: i32) { x.n = v; }"
+                " fn f(s: &mut S) { b(s, a(s)); }"
+                " fn main() { let mut x = S { n: 0 }; f(&mut x); ret 0; }",
+        "already borrowed");
+}
+
+TEST_F(BorrowCheckerTest, TwoPhaseReservationStillBlocksAWrite)
+{
+    // The assignment target is checked after the value, so this write is seen
+    // through the reservation the call left behind: still rejected.
+    expectError("struct S { pub n: i32 }"
+                " fn take(x: &mut S) -> i32 { ret x.n; }"
+                " fn f(s: &mut S) { s.n = take(s); }"
+                " fn main() { let mut x = S { n: 0 }; f(&mut x); ret 0; }",
+        "because it is borrowed");
+}

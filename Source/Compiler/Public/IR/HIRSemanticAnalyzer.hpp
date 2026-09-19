@@ -137,6 +137,19 @@ private:
         bool isPromoted;               // variable borrow (`let r = &p`) survives statements
         size_t createStmt;             // statement ordinal at creation (NLL)
         SourcePosition pos;
+        /**
+         * TWO-PHASE BORROW (reservation). A method receiver or a reference
+         * argument borrows the place for the duration of the CALL, but the
+         * callee has not started using it yet while the remaining arguments are
+         * still being evaluated — so a READ of that same place in a sibling
+         * argument is not a conflict (`s.set(s.n + 5)`,
+         * `vm_push(self, self.vars[arg])`).
+         *
+         * The reservation ends with the statement (it is a temporary borrow), and
+         * it never relaxes WRITES or MOVES: `x.m(x)` is still rejected. See
+         * checkBorrowUse.
+         */
+        bool isTwoPhase = false;
     };
 
     /// Access kind of a place use, for the borrow-conflict rules.
@@ -200,7 +213,10 @@ private:
     /// Register a borrow of `(root, path)`, checking aliasing conflicts first.
     /// `isPromoted` marks a borrow-variable (`let r = &p`) that survives the
     /// statement. Returns true on success.
-    bool registerBorrow(const std::string &root, const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode);
+    /// `isTwoPhase` marks the reservation described on Borrow::isTwoPhase: a
+    /// borrow taken for a call (receiver / reference argument) that permits
+    /// reads of the same place until the statement ends.
+    bool registerBorrow(const std::string &root, const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode, bool isTwoPhase = false);
 
     /// Check a place use against active borrows; logs a conflict and returns
     /// false if the access is forbidden.

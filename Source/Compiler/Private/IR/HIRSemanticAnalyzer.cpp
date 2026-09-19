@@ -2283,6 +2283,20 @@ bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
         case BorrowUseKind::Read: conflict = b.isMut; break;         // &mut blocks read; & allows
         }
 
+        // TWO-PHASE BORROW: a &mut borrow taken FOR A CALL (a method receiver or
+        // a reference argument) is only RESERVED while the rest of the call is
+        // still being evaluated. The callee has not touched the place yet, so a
+        // read or a shared borrow of it in a sibling argument is fine:
+        //     s.set(s.n + 5)                   code.patch(jz, code.count)
+        //     vm_push(self, self.vars[arg])    f(&mut x, x.n)
+        // Writes and moves are NOT relaxed (the reservation is exclusive once the
+        // callee starts): x.m(x) is still rejected, and so is a second &mut in
+        // another argument. The reservation dies with the statement (it is a
+        // temporary borrow), so nothing outside the statement changes.
+        if (conflict && b.isTwoPhase && b.isMut
+            && (kind == BorrowUseKind::Read || kind == BorrowUseKind::BorrowShared))
+            conflict = false;
+
         if (conflict)
         {
             // NLL: a conflict against a PROMOTED (variable) borrow is deferred to
@@ -2359,11 +2373,12 @@ bool HIRSemanticAnalyzer::registerBorrow(const std::string &root,
     const std::vector<std::string> &path,
     bool isMut,
     bool isPromoted,
-    HIRNode &errNode)
+    HIRNode &errNode,
+    bool isTwoPhase)
 {
     if (!checkBorrowUse(root, path, isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode))
         return false;
-    activeBorrows_.push_back(Borrow{root, "", path, isMut, isPromoted, 0, errNode.position});
+    activeBorrows_.push_back(Borrow{root, "", path, isMut, isPromoted, 0, errNode.position, isTwoPhase});
     return true;
 }
 
@@ -2768,7 +2783,10 @@ bool HIRSemanticAnalyzer::tryReborrowArg(HIRExpr *arg, const std::shared_ptr<Typ
     // (Like the rest of the borrow checker this is deliberately permissive: a
     // conflict routed through a *different* alias of the same referent is missed
     // rather than falsely rejected.)
-    registerBorrow(root, path, paramRef->isMutableRef(), /*isPromoted=*/false, errNode);
+    // A TWO-PHASE reservation: the callee has not started using the referent
+    // while the remaining arguments are still being evaluated, so a sibling
+    // argument may still READ it (`f(&mut x, x.n)`).
+    registerBorrow(root, path, paramRef->isMutableRef(), /*isPromoted=*/false, errNode, /*isTwoPhase=*/true);
     return true;
 }
 
@@ -4473,7 +4491,7 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
                 if (extractRootAndPath(node->object.get(), rroot, rpath))
                 {
                     if (auto *rsym = SymbolTable::getInstance().lookupSymbol(rroot))
-                        registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node);
+                        registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node, /*isTwoPhase=*/true);
                 }
             }
         }
@@ -5146,7 +5164,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                         if (!mut)
                             log(*node, "cannot borrow '" + rroot + "' as mutable because it is not mutable", E_CannotBorrowAsMutable);
                     }
-                    registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node);
+                    registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node, /*isTwoPhase=*/true);
                 }
             }
         }
