@@ -2090,13 +2090,12 @@ void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
 bool MIRBorrowCheck::enabled()
 {
     // Always true (2026-09-19): this pass OWNS the borrow / move /
-    // definite-assignment / dangling-return checks. The HIR implementations in
-    // HIRSemanticAnalyzer are unreachable now (its mirBorrowCheck_ flag is a
-    // constant) and are kept only until they are deleted — the former
-    // LIS_BORROW_CHECK=hir escape hatch was removed with the `for`-loop pin: the
-    // tree-based checker is not sound without that pin (it ends a borrow at its
-    // holder's last use, so `for e in v { v.push(1); }` slips through), which is
-    // exactly what the CFG-based live ranges fix.
+    // definite-assignment / dangling-return checks. The tree-based checker that
+    // used to live in HIRSemanticAnalyzer is gone, and so is the former
+    // LIS_BORROW_CHECK=hir escape hatch: the tree could not be sound (it ended a
+    // borrow at its holder's last use, so `for e in v { v.push(1); }` slipped
+    // through), which is exactly what the CFG-based live ranges fix. What stays
+    // in HIR is type checking, mutability (E3004/E4006) and E3012.
     return true;
 }
 

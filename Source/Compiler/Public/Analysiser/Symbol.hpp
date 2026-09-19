@@ -43,13 +43,6 @@ enum class SymbolKind
     Param
 };
 
-enum class VarState
-{
-    Valid,   // 可用
-    Moved,   // 已移动
-    Borrowed // 被借用
-};
-
 struct Symbol
 {
     SymbolKind kind;
@@ -58,26 +51,6 @@ struct Symbol
     std::shared_ptr<Type> type;
 
     std::optional<bool> isMutable; // 变量是否可变
-    VarState state;
-
-    /**
-     * Definite assignment: false only for a binding declared WITHOUT an
-     * initializer (`let x;`), which the language allows for Copy types. Every
-     * other binding — globals, params, match bindings, for-loop temporaries —
-     * starts initialized, so the conservative default cannot produce a false
-     * positive. Reads of a not-definitely-initialized binding are rejected; the
-     * flag is flow-sensitive (merged with AND across if/match branches, and
-     * reset across a loop body).
-     */
-    bool initialized = true;
-
-    /**
-     * Field paths moved out of this variable by partial (field) moves, e.g.
-     * `let x = p.a` → [["a"]], `let x = p.a.b` → [["a","b"]]. Mirrors the
-     * MIR-side partiallyMovedFields_. A whole-value use while this is non-empty
-     * is a double-free and is rejected by the semantic analyzer.
-     */
-    std::vector<std::vector<std::string>> movedFields;
 
     std::vector<std::string> implementedTraits;   // 结构体实现的Trait列表
     std::vector<std::string> structsImplementing; // 实现该Trait的结构体列表

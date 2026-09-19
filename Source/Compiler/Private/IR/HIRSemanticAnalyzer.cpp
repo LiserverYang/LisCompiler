@@ -163,11 +163,8 @@ bool pathSegmentOverlaps(const std::string &a, const std::string &b)
 /// and its place path. The path segments are: a field name ("a"), a constant
 /// index ("[0]"), the unknown-index wildcard ("[*]") or the deref marker ("*").
 ///
-/// SYNTAX ONLY — `*r` comes back as (root "r", ["*"]). Conflict detection uses
-/// resolvePlace(), which rewrites that through the alias table so `*r` denotes
-/// the place `r` was borrowed from (this is what makes `&mut *r` and `&mut x`
-/// conflict). Move/ownership bookkeeping deliberately keeps the syntactic form:
-/// `movedFields` is keyed by the BINDING, not by what a reference points at.
+/// SYNTAX ONLY — `*r` comes back as (root "r", ["*"]). The borrow checker
+/// resolves dereferences through its own alias table on the MIR instead.
 bool extractRootAndPath(HIRExpr *expr, std::string &root, std::vector<std::string> &path)
 {
     if (auto *ma = dynamic_cast<HIRMemberAccess *>(expr))
@@ -2539,19 +2536,15 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         log(*node, "variable '" + node->name + "' cannot have type 'void': void has no value.", E_TypeMismatch);
     }
 
-    // Definite assignment: a declaration WITHOUT an initializer is the only
-    // source of a maybe-uninitialized binding. It is allowed for Copy types
-    // (every use is checked), but NOT for Move types: such a binding owns a
-    // value that the scope-exit drop glue would release although it was never
-    // constructed. Reporting here (rather than tracking drop points) is what
-    // keeps the analysis small.
-    bool initialized = node->init.has_value();
-    if (!initialized && node->type && !node->type->isCopyable())
+    // A declaration WITHOUT an initializer is allowed for Copy types (MIR
+    // tracks which paths assigned it), but NOT for Move types: such a binding
+    // owns a value that the scope-exit drop glue would release although it was
+    // never constructed.
+    if (!node->init.has_value() && node->type && !node->type->isCopyable())
     {
         log(*node,
             "cannot declare '" + node->name + "' without an initializer: '" + node->type->toString() + "' is not a Copy type, so the binding could be released while uninitialized.",
             E_UninitializedNonCopyBinding);
-        initialized = true; // reported once; avoid cascading uninitialized-use errors
     }
 
     if (preRegisteredGlobal)
@@ -2560,7 +2553,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         preRegisteredGlobal->kind = SymbolKind::GlobalVar;
         preRegisteredGlobal->type = node->type;
         preRegisteredGlobal->isMutable = node->isMutable;
-        preRegisteredGlobal->initialized = initialized;
         node->varSymbol = preRegisteredGlobal;
     }
     else
@@ -2570,7 +2562,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         sym->name = node->name;
         sym->type = node->type;
         sym->isMutable = node->isMutable;
-        sym->initialized = initialized;
         SymbolTable::getInstance().insertSymbol(node->name, std::move(sym));
 
         node->varSymbol = SymbolTable::getInstance().lookupSymbol(node->name);
@@ -2581,8 +2572,8 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRAssign *node)
 {
-    // The write TARGET is not a read: `let x: i32; x = 1;` must not be reported as
-    // a use of an uninitialized value (the assignment is what initializes it).
+    // The assignment TARGET is not a read: it is resolved as a WRITE (`v[i] = x`
+    // → IndexMut::set) rather than as a read of the element.
     bool savedInAssignTarget = inAssignTarget_;
     bool savedInCompoundTarget = inCompoundAssignTarget_;
     inAssignTarget_ = true;
@@ -2753,40 +2744,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
                     log(*node, "cannot assign to element of immutable variable '" + rootRef->name + "'", E_AssignToImmutable);
                     return;
                 }
-            }
-        }
-    }
-
-    // The assignment target is reinitialized — it owns a fresh value again, so
-    // a prior move-out must not poison later reads (mirrors the MIR-side
-    // movedLocals_.erase in MIRBuilder::buildAssign).
-    if (auto *targetRef = dynamic_cast<HIRNameRef *>(node->target.get()))
-    {
-        if (auto *tsym = SymbolTable::getInstance().lookupSymbol(targetRef->name))
-        {
-            tsym->state = VarState::Valid;
-            tsym->movedFields.clear();
-            // A whole-binding write also satisfies definite assignment.
-            tsym->initialized = true;
-        }
-
-    }
-    else if (auto *targetMa = dynamic_cast<HIRMemberAccess *>(node->target.get()))
-    {
-        // Re-writing `p.a` re-owns field a (and everything under it): drop any
-        // moved path that starts with this field path.
-        std::string root;
-        std::vector<std::string> path;
-        if (extractRootAndPath(targetMa, root, path))
-        {
-            if (auto *tsym = SymbolTable::getInstance().lookupSymbol(root))
-            {
-                tsym->movedFields.erase(
-                    std::remove_if(tsym->movedFields.begin(), tsym->movedFields.end(), [&](const std::vector<std::string> &existing)
-                        {
-                            if (existing.size() < path.size()) return false;
-                            return std::equal(path.begin(), path.end(), existing.begin()); }),
-                    tsym->movedFields.end());
             }
         }
     }
@@ -4643,14 +4600,13 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             instantiatedFuncType = newTy;
         }
 
-        // The self param kind is known before the args so the receiver borrow can
-        // be registered first (a `&self` / `&mut self` receiver borrows the place
-        // for the call; by-value `self` moves it).
+        // The self param kind is known before the args: a `&self` / `&mut self`
+        // receiver is borrowed for the call, a by-value `self` moves it.
         auto selfParamTy = instantiatedFuncType->getParams()[0];
 
-        // Borrow-check: register the receiver borrow BEFORE the args, so an arg
-        // that conflicts with the receiver (e.g. `x.m(x)` moving x into an arg)
-        // is caught. A `&mut self` receiver must be a mutable place.
+        // A `&mut self` receiver must be a mutable place. (E4006 is a mutability
+        // diagnostic and stays in HIR; the borrow conflicts around the receiver
+        // are MIRBorrowCheck's job.)
         if (auto refTy = std::dynamic_pointer_cast<ReferenceType>(selfParamTy))
         {
             std::string rroot;
