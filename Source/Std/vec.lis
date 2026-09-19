@@ -215,6 +215,16 @@ impl Vec
     {
         ret VecIter { src: self, pos: 0 };
     }
+
+    // A borrowing MUTABLE iterator (2026-09-19): each step lends `&mut T`, so a
+    // loop can write through it. This is the API the CFG-based borrow checker
+    // unblocked — a `&mut` derived from `self` and RETURNED used to be rejected
+    // (E4001/E3002), which is why the earlier round had to document a
+    // `while i < v.len() { v[i] = ..; }` workaround instead.
+    fn iter_mut(self: &mut Vec<T>) -> VecIterMut<T>
+    {
+        ret VecIterMut { src: self, pos: 0 };
+    }
 }
 
 // Reading an element BY VALUE. `get` (and the index operators below) hand the
@@ -297,6 +307,26 @@ impl<T> Iterator<&T> for VecIter<T>
         let p = self.pos;
         self.pos = self.pos + 1;
         ret Option::Some(self.src.at_ref(p));
+    }
+}
+
+// The mutable counterpart: the source is `&mut Vec<T>` and every step hands out
+// a `&mut T` (at_mut reborrows it out of the field). Same shape as VecIter, and
+// the same pub-field caveat applies (it is built by `Vec::iter_mut`).
+struct VecIterMut<T>
+{
+    pub src: &mut Vec<T>,
+    pub pos: i32
+}
+
+impl<T> Iterator<&mut T> for VecIterMut<T>
+{
+    fn next(self: &mut Self) -> Option<&mut T>
+    {
+        if self.pos >= self.src.len() { ret Option::None; }
+        let p = self.pos;
+        self.pos = self.pos + 1;
+        ret Option::Some(self.src.at_mut(p));
     }
 }
 

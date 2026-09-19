@@ -1965,6 +1965,43 @@ TEST_F(RuntimeTest, ForNamedPureIteratorNeedsMove)
 // payload's type (a diverging one is compatible through never).
 
 // 'let x = maybe() else fallback;' binds the Some payload, or falls back on None.
+// ── iter_mut: the API the CFG-based borrow checker unblocked (2026-09-19) ─────
+//
+// A `&mut T` derived from `self` and RETURNED from a method used to be rejected
+// (E4001/E3002 by the tree-based checker), so the standard library had no
+// mutable iterator and the docs recommended a `while i < v.len() { v[i] = ..; }`
+// loop instead. With live ranges computed as CFG dataflow the pattern is legal
+// and `Vec::iter_mut()` exists.
+
+TEST_F(RuntimeTest, VecIterMutWritesThroughElements)
+{
+    // `Option` comes from the harness prologue; importing it again would be a
+    // duplicate selective import (E3003).
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(1); v.push(2); v.push(3);\n"
+              "    let mut it = v.iter_mut();\n"
+              "    match it.next() { Some(r) => { *r = 10; }, None => { ret 1; } }\n"
+              "    match it.next() { Some(r) => { *r = 20; }, None => { ret 2; } }\n"
+              "    if v[0] != 10 { ret 3; }\n"
+              "    if v[1] != 20 { ret 4; }\n"
+              "    if v[2] != 3 { ret 5; }\n"
+              "    ret 0; }\n",
+        0);
+}
+
+TEST_F(RuntimeTest, VecIterMutDrivesAConsumingForLoop)
+{
+    // The rvalue form: the loop consumes the iterator, and once it is over the
+    // borrow of v is over too, so v is readable again.
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.push(1); v.push(2);\n"
+              "    for r in v.iter_mut() { *r = *r + 10; }\n"
+              "    ret v[0] + v[1] - 23; }\n",
+        0);
+}
+
 TEST_F(RuntimeTest, LetElseOptionBothPaths)
 {
     expectRun("fn maybe(b: bool) -> Option<i32> { if b { ret Option::Some(5); } ret Option::None; }\n"

@@ -144,6 +144,7 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
 | `at_ref(self: &Vec, i: i32)` | — | `-> &T`：越界 panic；**出借**元素（见下面的警告） |
 | `at_mut(self: &mut Vec, i: i32)` | — | `-> &mut T`：同上，可写穿 |
 | `iter(self: &Vec)` | — | `-> VecIter<T>`：**借用**迭代器，每步交出 `&T` |
+| `iter_mut(self: &mut Vec)` | — | `-> VecIterMut<T>`：**可变借用**迭代器，每步交出 `&mut T` |
 | `for e in v` | — | **借用** v（走 `iter()`），`e` 是 `&T`；循环结束后 v 仍可用 |
 | `for e in move v` | — | **消费** v，按**正序**逐个交出元素（Copy 复制、非 Copy 移动） |
 | `get(self: &Vec, i: i32)` | ✔ | `-> Option<T>`：越界 `None`（**检查版**） |
@@ -165,8 +166,10 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
   `Drop`/`clear` 也只析构这一段——被移出的元素不会被析构第二次。
 - **遍历**（2026-09-19）：`for e in v` 借用（`e: &T`，循环结束后容器可用，但循环体内
   不能改动容器——扩容会释放迭代器指着的缓冲，报 E4001）；`for e in move v` 消费（`e: T`）。
-  **没有 `iter_mut()`**：交出可变借用需要借用追踪，需要就地改元素的场合用下标循环
-  `while i < v.len() { v[i] = ...; i += 1; }`。
+- **`iter_mut()`（2026-09-19 同日落地）**：`VecIterMut<T>` 每步交出 `&mut T`，可以就地改元素：
+  `for r in v.iter_mut() { *r = *r + 1; }`。这是把借用检查下放到 MIR（按 CFG 数据流算活跃
+  区间）之后才成立的 API——在此之前「从 `self` 派生并返回 `&mut`」会被 E4001/E3002 误拒，
+  文档只能建议写 `while i < v.len() { v[i] = ...; }` 下标循环。
 - 还没有 `with_capacity` / `reserve`：扩容需要元素大小，而 `__sizeof` 要一个 T 的**值**，
   所以大小由 `push`/`insert` 的实参带进来。
 
