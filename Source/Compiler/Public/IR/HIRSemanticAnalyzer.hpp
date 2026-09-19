@@ -44,20 +44,15 @@ private:
     bool suppressTypeErrors_ = false;
 
     /**
-     * The borrow / move / definite-assignment / dangling-return checks are
-     * DISABLED here by default and are produced by MIRBorrowCheck on the MIR CFG
-     * instead (they are CFG DATAFLOW — live ranges
-     * and per-point state — which the HIR tree can only approximate with
-     * statement ordinals).
+     * The borrow / move / definite-assignment / dangling-return checks are NOT
+     * here: they are CFG DATAFLOW (live ranges and per-point state), which the
+     * HIR tree can only approximate. MIRBorrowCheck produces them on the MIR CFG
+     * instead — see Source/Compiler/Private/IR/MIRBorrowCheck.cpp.
      *
      * What STAYS in this pass: type checking, mutability (E3004/E4006 — a
      * property of the place, no dataflow involved) and "a non-Copy binding needs
      * an initializer" (E3012 — a syntax rule).
-     *
-     * The flag exists so the existing test corpus acts as a differential oracle
-     * for the MIR implementation while it is being written; the default is `hir`.
      */
-    bool mirBorrowCheck_ = false;
 
     /** Loop nesting depth, for validating break/continue placement. */
     size_t loopDepth_ = 0;
@@ -120,163 +115,6 @@ private:
     /// Set currentModule_ from Context::stmtAttributions for the item at `index`.
     void setModuleForItem(size_t index);
 
-    // ── borrow-checker state (Stage 1: lexical temps, Stage 2: NLL) ────────────
-
-    /// One active borrow of a place. Created by `&p` / `&mut p`, a method
-    /// receiver, or a temporary call-argument borrow.
-    struct Borrow
-    {
-        std::string root;              // borrowed binding name (e.g. "x")
-        std::string holderName;        // borrow variable (`let r = &p` → "r")
-        std::vector<std::string> path; // field path (empty = whole root)
-        bool isMut;                    // &mut vs &
-        bool isPromoted;               // variable borrow (`let r = &p`) survives statements
-        size_t createStmt;             // statement ordinal at creation (NLL)
-        SourcePosition pos;
-        /**
-         * TWO-PHASE BORROW (reservation). A method receiver or a reference
-         * argument borrows the place for the duration of the CALL, but the
-         * callee has not started using it yet while the remaining arguments are
-         * still being evaluated — so a READ of that same place in a sibling
-         * argument is not a conflict (`s.set(s.n + 5)`,
-         * `vm_push(self, self.vars[arg])`).
-         *
-         * The reservation ends with the statement (it is a temporary borrow), and
-         * it never relaxes WRITES or MOVES: `x.m(x)` is still rejected. See
-         * checkBorrowUse.
-         */
-        bool isTwoPhase = false;
-    };
-
-    /// Access kind of a place use, for the borrow-conflict rules.
-    enum class BorrowUseKind
-    {
-        Read,         // Copy read — conflicts with active &mut borrows
-        Write,        // mutation — conflicts with any active borrow
-        Move,         // non-Copy consumption — conflicts with any active borrow
-        BorrowShared, // creating `&p` — conflicts with active &mut borrows
-        BorrowMut,    // creating `&mut p` — conflicts with any active borrow
-    };
-
-    /// Active borrows in the current statement/block scope chain (innermost last).
-    std::vector<Borrow> activeBorrows_;
-
-    /// Block-scope markers: size of activeBorrows_ at each block entry; a block's
-    /// borrows (and its temporaries) are truncated when the block exits.
-    std::vector<size_t> blockBorrowMarkers_;
-
-    /// Statement marker: size of activeBorrows_ at the start of the current
-    /// statement. Temporary (non-promoted) borrows created inside it are removed
-    /// at statement end; promoted (variable) borrows survive.
-    size_t stmtBorrowStart_ = SIZE_MAX;
-
-    // ── NLL (non-lexical lifetimes) state ──────────────────────────────────────
-
-    /// Statement ordinal: incremented per analyzeStmt, reset per function. Used
-    /// to decide whether a promoted borrow is live at a conflicting use (the
-    /// borrow is live from its createStmt up to its holder's last-use ordinal).
-    size_t stmtOrdinal_ = 0;
-
-    /// All promoted (variable) borrows in the current function — survives block
-    /// truncation so the end-of-function NLL resolve can check liveness.
-    std::vector<Borrow> promotedBorrows_;
-
-    /// Borrow-holder name → last statement ordinal where it is used.
-    std::unordered_map<std::string, size_t> holderLastUseStmt_;
-
-    /// A place use that may conflict with a PROMOTED borrow; resolved at the end
-    /// of the function once holder last-uses are known.
-    struct PendingConflict
-    {
-        std::string root;
-        std::vector<std::string> path;
-        BorrowUseKind kind;
-        size_t ordinal;
-        SourcePosition pos;
-        size_t length;
-        /// The holders exempted by the check that produced this conflict
-        /// (checkBorrowUse's skipHolders) — the confirming pass must apply the
-        /// SAME exemption, or an access through a reference would be blocked by
-        /// that reference's own borrow of the place (and by the borrow it was
-        /// reborrowed through).
-        std::vector<std::string> skipHolders;
-    };
-    std::vector<PendingConflict> pendingBorrowConflicts_;
-
-    /// Resolve deferred promoted-borrow conflicts once holder last-uses are known.
-    void resolvePromotedBorrows();
-
-    /// Log a borrow error at an absolute source position (used by the NLL resolve).
-    void logAtPosition(const SourcePosition &pos, size_t length, const std::string &msg, size_t errorId);
-
-    /// Shared conflict message + error-id builder (inline and NLL resolve).
-    static void borrowConflictInfo(std::string &msg, size_t &errorId, const std::string &name, BorrowUseKind kind);
-
-    /// Register a borrow of `(root, path)`, checking aliasing conflicts first.
-    /// `isPromoted` marks a borrow-variable (`let r = &p`) that survives the
-    /// statement. Returns true on success.
-    /// `isTwoPhase` marks the reservation described on Borrow::isTwoPhase: a
-    /// borrow taken for a call (receiver / reference argument) that permits
-    /// reads of the same place until the statement ends.
-    bool registerBorrow(const std::string &root, const std::vector<std::string> &path, bool isMut, bool isPromoted, HIRNode &errNode, bool isTwoPhase = false, const std::vector<std::string> *skipHolders = nullptr);
-
-    /// Check a place use against active borrows; logs a conflict and returns
-    /// false if the access is forbidden.
-    /** `skipHolder` exempts ONE existing borrow from the check: the borrow that
-     *  the SAME reference holds on its own referent. `*r = v` writes through r,
-     *  which is legal exactly because r's exclusive borrow is what grants the
-     *  write, and `&mut *r` reborrows the place r already owns. Without the
-     *  exemption a reference could never use what it borrows. */
-    bool checkBorrowUse(const std::string &root, const std::vector<std::string> &path, BorrowUseKind kind, HIRNode &errNode, const std::vector<std::string> *skipHolders = nullptr);
-
-    /** The HOLDER place of a place expression that goes through a deref:
-     *  `*r` / `(*r).a` / `a[0].*p` → the place of the pointer. Using `*r` USES
-     *  `r`, so the holder must be free right now, and that is also what freezes
-     *  the parent borrow while a reborrow lives. False when there is no deref. */
-    bool derefHolderOf(HIRExpr *expr, std::string &root, std::vector<std::string> &path);
-
-    /// Remove non-promoted (temporary) borrows created after `marker`.
-    void endTemporaryBorrowsSince(size_t marker);
-
-    /**
-     * `holder -> the place it was borrowed FROM` (`let r = &mut x;` records
-     * `r -> x`). Conflict detection resolves `*r` through this table, so `&mut *r`
-     * and `&mut x` denote the same place. Without it, borrows taken THROUGH a
-     * dereference were not tracked at all: two live `&mut *r` on the same
-     * reference were accepted (measured), while Rust rejects the second with
-     * E0499.
-     *
-     * The entry is refreshed by `let r = &mut y;`, copied by `let q = r;`, and
-     * erased whenever the binding is assigned something that is not a `&`
-     * expression — the referent is then unknown, and `*r` falls back to an opaque
-     * deref key (`(r, ["*"])`), which still catches two borrows derived from the
-     * same reference but cannot see through to the original place.
-     */
-    std::unordered_map<std::string, std::pair<std::string, std::vector<std::string>>> aliasOf_;
-
-    /** `holder -> the holder it was REBORROWED through` (`let s = &mut *r;` records
-     *  s -> r). Together with aliasOf_ this gives the derivation chain of a
-     *  reference, which is what an access through it must exempt: `*s = v` is
-     *  legal even though BOTH s and r hold a borrow of the place — s's borrow is
-     *  the grant, and r's is frozen behind it (Rust's rule for reborrows). Every
-     *  other access to the place still sees both. */
-    std::unordered_map<std::string, std::string> aliasParent_;
-
-    /// `holder` and every reference it was reborrowed through, nearest first.
-    /// Empty for an unknown holder.
-    std::vector<std::string> exemptionChain(const std::string &holder);
-
-    /// Record (or erase) `holder`s referent from its initialiser/assigned value.
-    void recordAlias(const std::string &holder, HIRExpr *init);
-
-    /** The place a use refers to, for CONFLICT DETECTION: extractRootAndPath()
-     *  plus alias resolution of leading derefs. Move/ownership bookkeeping keeps
-     *  the syntactic form (`movedFields` is keyed by the binding, not by what a
-     *  reference points at). Returns false when `expr` is not a place. */
-    bool resolvePlace(HIRExpr *expr, std::string &root, std::vector<std::string> &path);
-
-    /// True if two place paths overlap (one is a prefix of the other).
-    static bool pathsOverlap(const std::vector<std::string> &a, const std::vector<std::string> &b);
 
     // ── Stage 3 (dangling returns) moved to MIRBorrowCheck ──────────────────────
     //
@@ -527,11 +365,8 @@ public:
     HIRSemanticAnalyzer(std::shared_ptr<Context> cnt)
     {
         context = cnt;
-        // MIRBorrowCheck owns the borrow/move/init/dangling checks (see
-        // MIRBorrowCheck::enabled, now a constant). The flag stays as the marker
-        // of which code below is DEAD — the implementations it guards are kept
-        // only until they are deleted, together with the flag itself.
-        mirBorrowCheck_ = true;
+        // Borrow / move / definite assignment / dangling returns are checked by
+        // MIRBorrowCheck on the MIR CFG, not by this pass.
         SymbolTable::getInstance().initGlobalScope();
     }
 

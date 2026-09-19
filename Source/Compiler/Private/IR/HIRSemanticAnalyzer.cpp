@@ -452,15 +452,7 @@ void HIRSemanticAnalyzer::analyzeExpr(HIRExpr *expr)
 void HIRSemanticAnalyzer::analyzeStmt(HIRStmt *stmt)
 {
     if (!stmt) return;
-    // Statement-scope borrow marker: temporary (non-promoted) borrows created
-    // inside this statement end when it completes (`foo(&x); bar(&mut x);` must
-    // be legal). Promoted variable borrows (`let r = &x`) survive.
-    ++stmtOrdinal_; // NLL: statement ordinal for borrow liveness
-    size_t saved = stmtBorrowStart_;
-    stmtBorrowStart_ = activeBorrows_.size();
     stmt->accept(this);
-    endTemporaryBorrowsSince(stmtBorrowStart_);
-    stmtBorrowStart_ = saved;
 }
 
 std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::inferGenericArguments(
@@ -2137,12 +2129,6 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
     auto funcScope = SymbolTable::getInstance().getCurrentScope()->createChild();
     SymbolTable::getInstance().enterScope(funcScope);
 
-    // Per-function NLL borrow state resets (activeBorrows_ is managed by the
-    // block markers; the promoted/pending state must not leak across functions).
-    stmtOrdinal_ = 0;
-    promotedBorrows_.clear();
-    holderLastUseStmt_.clear();
-    pendingBorrowConflicts_.clear();
     sequenceTerminated_ = false; // per-function: reachability is not inherited
     loopBodyBreaks_.clear();
 
@@ -2248,10 +2234,6 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
     if (node->body)
         visit(node->body.get());
 
-    // NLL: resolve deferred promoted-borrow conflicts now that every holder's
-    // last use is known.
-    resolvePromotedBorrows();
-
     functionInfo.isInFunction = false;
 
     // If return type was inferred from return statements, update node
@@ -2331,10 +2313,6 @@ void HIRSemanticAnalyzer::visit(HIRBlock *node)
     SymbolTable::getInstance().enterScope(scope);
     node->scope = scope;
 
-    // Block-scope borrow marker: all borrows created in this block (variable and
-    // temporary) end when the block exits (`{ let r = &x; } x.v = 5;` is legal).
-    blockBorrowMarkers_.push_back(activeBorrows_.size());
-
     // Reachability is tracked PER STATEMENT SEQUENCE: a `ret`/`break`/`continue`
     // (or a diverging call) inside this block does not make the ENCLOSING
     // sequence unreachable, so the flag is saved on entry and OR-ed back out.
@@ -2346,319 +2324,7 @@ void HIRSemanticAnalyzer::visit(HIRBlock *node)
     bool blockTerminated = sequenceTerminated_;
     sequenceTerminated_ = savedTerminated || blockTerminated;
 
-    activeBorrows_.resize(blockBorrowMarkers_.back());
-    blockBorrowMarkers_.pop_back();
-
     SymbolTable::getInstance().exitScope();
-}
-
-// ---------------------------------------------------------------------------
-// Borrow-checker helpers (Stage 1: lexical lifetimes)
-// ---------------------------------------------------------------------------
-
-bool HIRSemanticAnalyzer::pathsOverlap(const std::vector<std::string> &a,
-    const std::vector<std::string> &b)
-{
-    // One place is a prefix of the other (`a` overlaps `a[0]`, `a[0]` overlaps
-    // `a[0].f`). Each shared segment is compared by pathSegmentOverlaps, so the
-    // index wildcard `[*]` still matches a concrete `[0]`, while two DIFFERENT
-    // constant indices are correctly disjoint.
-    size_t n = std::min(a.size(), b.size());
-    for (size_t i = 0; i < n; ++i)
-        if (!pathSegmentOverlaps(a[i], b[i])) return false;
-    return true;
-}
-
-void HIRSemanticAnalyzer::borrowConflictInfo(std::string &msg, size_t &errorId, const std::string &name, BorrowUseKind kind)
-{
-    switch (kind)
-    {
-    case BorrowUseKind::BorrowMut:
-        msg = "cannot borrow '" + name + "' as mutable because it is already borrowed";
-        errorId = E_CannotBorrowMutWhileBorrowed;
-        break;
-    case BorrowUseKind::BorrowShared:
-        msg = "cannot borrow '" + name + "' because it is already borrowed as mutable";
-        errorId = E_CannotBorrowWhileMutBorrowed;
-        break;
-    case BorrowUseKind::Write:
-        msg = "cannot assign to '" + name + "' because it is borrowed";
-        errorId = E_CannotMutateWhileBorrowed;
-        break;
-    case BorrowUseKind::Move:
-        msg = "cannot move out of '" + name + "' because it is borrowed";
-        errorId = E_CannotMoveWhileBorrowed;
-        break;
-    case BorrowUseKind::Read:
-        msg = "cannot read '" + name + "' because it is borrowed as mutable";
-        errorId = E_CannotBorrowWhileMutBorrowed;
-        break;
-    }
-}
-
-bool HIRSemanticAnalyzer::checkBorrowUse(const std::string &root,
-    const std::vector<std::string> &path,
-    BorrowUseKind kind,
-    HIRNode &errNode,
-    const std::vector<std::string> *skipHolders)
-{
-    // In `mir` mode the borrow checks are MIRBorrowCheck's job (see the flag).
-    if (mirBorrowCheck_) return true;
-    if (activeBorrows_.empty()) return true;
-    bool ok = true;
-    std::string name = placeName(root, path);
-
-    for (const auto &b : activeBorrows_)
-    {
-        if (b.root != root || !pathsOverlap(b.path, path)) continue;
-        // A reference is never blocked by the borrows of its own derivation
-        // chain: the place it points at is exactly what those borrows granted it
-        // (see exemptionChain).
-        if (skipHolders && !skipHolders->empty()
-            && std::find(skipHolders->begin(), skipHolders->end(), b.holderName) != skipHolders->end())
-            continue;
-
-        bool conflict = false;
-        switch (kind)
-        {
-        case BorrowUseKind::BorrowMut: conflict = true; break;       // any borrow blocks &mut
-        case BorrowUseKind::BorrowShared: conflict = b.isMut; break; // &mut blocks &; & allows &
-        case BorrowUseKind::Write: conflict = true; break;           // any borrow blocks write
-        case BorrowUseKind::Move: conflict = true; break;            // any borrow blocks move
-        case BorrowUseKind::Read: conflict = b.isMut; break;         // &mut blocks read; & allows
-        }
-
-        // TWO-PHASE BORROW: a &mut borrow taken FOR A CALL (a method receiver or
-        // a reference argument) is only RESERVED while the rest of the call is
-        // still being evaluated. The callee has not touched the place yet, so a
-        // read or a shared borrow of it in a sibling argument is fine:
-        //     s.set(s.n + 5)                   code.patch(jz, code.count)
-        //     vm_push(self, self.vars[arg])    f(&mut x, x.n)
-        // Writes and moves are NOT relaxed (the reservation is exclusive once the
-        // callee starts): x.m(x) is still rejected, and so is a second &mut in
-        // another argument. The reservation dies with the statement (it is a
-        // temporary borrow), so nothing outside the statement changes.
-        if (conflict && b.isTwoPhase && b.isMut
-            && (kind == BorrowUseKind::Read || kind == BorrowUseKind::BorrowShared))
-            conflict = false;
-
-        if (conflict)
-        {
-            // NLL: a conflict against a PROMOTED (variable) borrow is deferred to
-            // the end of the function — the borrow may have already ended at its
-            // holder's last use before this use. Moves stay inline (conservative:
-            // moving a borrowed place would leave the reference dangling).
-            if (b.isPromoted && kind != BorrowUseKind::Move)
-            {
-                pendingBorrowConflicts_.push_back(
-                    PendingConflict{root, path, kind, stmtOrdinal_, errNode.position, errNode.length,
-                        skipHolders ? *skipHolders : std::vector<std::string>{}});
-            }
-            else
-            {
-                std::string msg;
-                size_t errId = E_SemanticError;
-                borrowConflictInfo(msg, errId, name, kind);
-                log(errNode, msg, errId);
-            }
-            ok = false;
-        }
-    }
-    return ok;
-}
-
-void HIRSemanticAnalyzer::logAtPosition(const SourcePosition &pos, size_t length, const std::string &msg, size_t errorId)
-{
-    Logger::LogInfo info{};
-    info.codePath = currentFilePath_.empty() ? context->filePath : currentFilePath_;
-    info.code = &context->fileValue;
-    info.col = pos.col;
-    info.line = pos.line;
-    info.length = length;
-    info.beginPosition = pos.lineStart;
-    info.msg = msg;
-    info.errorId = errorId;
-    info.exit = false; // non-fatal — the sema reports all errors, then gates.
-    Logger::Log(Logger::LogLevel::ERROR, info);
-}
-
-void HIRSemanticAnalyzer::resolvePromotedBorrows()
-{
-    if (mirBorrowCheck_)
-    {
-        pendingBorrowConflicts_.clear();
-        return;
-    }
-    for (const auto &pc : pendingBorrowConflicts_)
-    {
-        for (const auto &b : promotedBorrows_)
-        {
-            if (b.root != pc.root || !pathsOverlap(b.path, pc.path)) continue;
-            // Same exemption the inline check applied (see checkBorrowUse).
-            if (!pc.skipHolders.empty()
-                && std::find(pc.skipHolders.begin(), pc.skipHolders.end(), b.holderName) != pc.skipHolders.end())
-                continue;
-
-            // The borrow is live at the conflicting use iff it was created at or
-            // before that statement AND its holder is still possibly used there.
-            size_t lastUse = b.createStmt;
-            auto it = holderLastUseStmt_.find(b.holderName);
-            if (it != holderLastUseStmt_.end()) lastUse = it->second;
-            // A borrow is live at the conflicting use iff it was created BEFORE
-            // that statement (a borrow created AT the same ordinal is the very
-            // access being checked, not a pre-existing conflicting borrow) and
-            // its holder is still possibly used there.
-            bool live = b.createStmt < pc.ordinal && pc.ordinal <= lastUse;
-
-            if (live)
-            {
-                std::string name = placeName(pc.root, pc.path);
-                std::string msg;
-                size_t errId = E_SemanticError;
-                borrowConflictInfo(msg, errId, name, pc.kind);
-                logAtPosition(pc.pos, pc.length, msg, errId);
-                break;
-            }
-        }
-    }
-    pendingBorrowConflicts_.clear();
-}
-
-bool HIRSemanticAnalyzer::registerBorrow(const std::string &root,
-    const std::vector<std::string> &path,
-    bool isMut,
-    bool isPromoted,
-    HIRNode &errNode,
-    bool isTwoPhase,
-    const std::vector<std::string> *skipHolders)
-{
-    if (mirBorrowCheck_) return true; // MIRBorrowCheck owns this in `mir` mode
-    if (!checkBorrowUse(root, path, isMut ? BorrowUseKind::BorrowMut : BorrowUseKind::BorrowShared, errNode, skipHolders))
-        return false;
-    activeBorrows_.push_back(Borrow{root, "", path, isMut, isPromoted, 0, errNode.position, isTwoPhase});
-    return true;
-}
-
-void HIRSemanticAnalyzer::recordAlias(const std::string &holder, HIRExpr *init)
-{
-    if (!init)
-    {
-        aliasOf_.erase(holder);
-        return;
-    }
-
-    // `let r = &mut <place>;` — remember the referent, resolved through any
-    // alias in between, so a chain (`let a = &mut x; let b = &mut *a;`) still
-    // points at `x`.
-    if (auto *ref = dynamic_cast<HIRRef *>(init))
-    {
-        std::string root;
-        std::vector<std::string> path;
-        if (resolvePlace(ref->expr.get(), root, path))
-        {
-            aliasOf_[holder] = {std::move(root), std::move(path)};
-
-            // `&mut *r` also REBORROWS through r: remember that, because an
-            // access through the new reference has to be exempt from r's own
-            // borrow of the place as well (see exemptionChain).
-            std::string hroot;
-            std::vector<std::string> hpath;
-            if (derefHolderOf(ref->expr.get(), hroot, hpath) && hpath.empty())
-                aliasParent_[holder] = std::move(hroot);
-            else
-                aliasParent_.erase(holder);
-            return;
-        }
-    }
-
-    // `let q = r;` / `q = r;` — a reference moved (or shared-copied) from another
-    // binding keeps the same referent.
-    if (auto *nr = dynamic_cast<HIRNameRef *>(init))
-    {
-        auto it = aliasOf_.find(nr->name);
-        if (it != aliasOf_.end())
-        {
-            aliasOf_[holder] = it->second;
-            // The copy takes over the source's role; the walk in exemptionChain
-            // follows the source's own chain from here.
-            aliasParent_[holder] = nr->name;
-            return;
-        }
-    }
-
-    // Anything else (`r = other_ref_param;`, a conditional, ...) leaves the
-    // referent unknown: drop the entries so a stale target is never used.
-    aliasOf_.erase(holder);
-    aliasParent_.erase(holder);
-}
-
-std::vector<std::string> HIRSemanticAnalyzer::exemptionChain(const std::string &holder)
-{
-    std::vector<std::string> chain;
-    if (holder.empty()) return chain;
-    chain.push_back(holder);
-
-    std::string cur = holder;
-    for (size_t guard = 0; guard < 32; ++guard)
-    {
-        auto it = aliasParent_.find(cur);
-        if (it == aliasParent_.end() || it->second.empty()) break;
-        cur = it->second;
-        if (std::find(chain.begin(), chain.end(), cur) != chain.end()) break; // cycle guard
-        chain.push_back(cur);
-    }
-    return chain;
-}
-
-bool HIRSemanticAnalyzer::derefHolderOf(HIRExpr *expr,
-    std::string &root,
-    std::vector<std::string> &path)
-{
-    std::string sroot;
-    std::vector<std::string> spath;
-    if (!extractRootAndPath(expr, sroot, spath)) return false;
-
-    for (size_t i = 0; i < spath.size(); ++i)
-        if (spath[i] == kDeref)
-        {
-            root = std::move(sroot);
-            path.assign(spath.begin(), spath.begin() + i);
-            return true;
-        }
-    return false;
-}
-
-bool HIRSemanticAnalyzer::resolvePlace(HIRExpr *expr,
-    std::string &root,
-    std::vector<std::string> &path)
-{
-    if (!extractRootAndPath(expr, root, path)) return false;
-
-    // Rewrite a leading deref into the place the holder was borrowed from:
-    // `*r` (with `r = &mut x`) IS `x`, and `(*r).a` is `x.a`. A reference with no
-    // known referent (a parameter, or a binding whose value was overwritten)
-    // keeps the deref segment, which still gives every `*p` of the same shape one
-    // shared identity.
-    for (size_t guard = 0; guard < 32; ++guard)
-    {
-        if (path.empty() || path.front() != kDeref) break;
-        auto it = aliasOf_.find(root);
-        if (it == aliasOf_.end()) break;
-
-        std::vector<std::string> resolved = it->second.second;
-        resolved.insert(resolved.end(), path.begin() + 1, path.end());
-        root = it->second.first;
-        path = std::move(resolved);
-    }
-    return true;
-}
-
-void HIRSemanticAnalyzer::endTemporaryBorrowsSince(size_t marker)
-{
-    // Remove temporary (non-promoted) borrows created after `marker`.
-    for (size_t i = activeBorrows_.size(); i > marker; --i)
-        if (!activeBorrows_[i - 1].isPromoted)
-            activeBorrows_.erase(activeBorrows_.begin() + (i - 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -2821,28 +2487,7 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
             log(*node, "global variable initializer must be a literal (not '" + (initType ? initType->toString() : std::string("?")) + "').");
         }
 
-        // Borrow promotion: `let r = &p` binds the borrow to the variable r, so
-        // it survives the statement. Under NLL its liveness runs to r's last use;
-        // record the holder + creation ordinal and keep a function-scoped copy.
-        if (auto *ref = dynamic_cast<HIRRef *>(node->init.value().get()))
-        {
-            // Everything the initialiser registered, not just the last entry: a
-            // borrow through a deref also freezes the pointer it went through
-            // (HIRRef::borrowMark).
-            for (size_t i = ref->borrowMark; i < activeBorrows_.size(); ++i)
-            {
-                activeBorrows_[i].isPromoted = true;
-                activeBorrows_[i].holderName = node->name;
-                activeBorrows_[i].createStmt = stmtOrdinal_;
-                promotedBorrows_.push_back(activeBorrows_[i]);
-            }
-        }
     }
-
-    // Keep the alias table in step with this binding: `let r = &mut x;` records
-    // r -> x (so `*r` denotes `x`), `let q = r;` copies the entry, and anything
-    // else leaves the referent unknown (see recordAlias).
-    recordAlias(node->name, node->init.has_value() ? node->init.value().get() : nullptr);
 
     if (node->hasExplicitType)
     {
@@ -2987,25 +2632,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         }
     }
 
-    // Borrow-check: writing to a borrowed place is forbidden. A write THROUGH a
-    // reference (`r.v = 5` where r = &mut x) roots on `r`, which is not itself
-    // a borrowed binding, so it passes here and is governed by mutability below.
-    // Writing through a dereference uses the POINTER as well: `*r = v` needs r
-    // itself to be free, and the referent check exempts r's own borrow — writing
-    // through your own exclusive borrow is exactly what having one is for.
-    std::string targetRoot;
-    std::vector<std::string> targetPath;
-    std::string holderRoot;
-    std::vector<std::string> holderPath;
-    bool viaHolder = derefHolderOf(node->target.get(), holderRoot, holderPath);
-    if (viaHolder)
-        checkBorrowUse(holderRoot, holderPath, BorrowUseKind::Write, *node);
-    std::vector<std::string> exempt = viaHolder ? exemptionChain(holderRoot)
-                                                : std::vector<std::string>{};
-    if (resolvePlace(node->target.get(), targetRoot, targetPath))
-        checkBorrowUse(targetRoot, targetPath, BorrowUseKind::Write, *node,
-            exempt.empty() ? nullptr : &exempt);
-
     // A never-valued RHS is compatible with any target type (bottom), like a
     // never-valued initialiser or argument.
     if (node->target->type && node->value->type
@@ -3144,9 +2770,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
             tsym->initialized = true;
         }
 
-        // A reference binding may now point somewhere else (`r = &mut y;`), or
-        // nowhere we can name — keep the alias table honest either way.
-        recordAlias(targetRef->name, node->value.get());
     }
     else if (auto *targetMa = dynamic_cast<HIRMemberAccess *>(node->target.get()))
     {
@@ -3173,17 +2796,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRIf *node)
 {
-    // The condition is fully evaluated BEFORE either branch runs, so the
-    // temporary borrows it created are over by then. A method receiver is only
-    // RESERVED while its call is set up (two-phase, see the borrow notes), and a
-    // reservation is not relaxed for a write — without releasing it here, the
-    // body could not touch the very receiver the condition had asked:
-    // `if i < v.len() { v[i] = x; }` reported E4003 ("cannot assign to 'v[*]'
-    // because it is borrowed") against the condition's own `len()` call, because
-    // a statement's temporaries otherwise live until the end of the whole `if`.
-    const size_t condBorrowStart = activeBorrows_.size();
     analyzeExpr(node->cond.get());
-    endTemporaryBorrowsSince(condBorrowStart);
 
     auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
     if (node->cond->type && !node->cond->type->equals(boolTy))
@@ -3211,14 +2824,7 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
 {
     auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
 
-    // The scrutinee is evaluated before any arm runs, so its temporary borrows
-    // are over by then — `match f(&mut x) { ... x ... }` may use `x` in the arms.
-    // (Before this, a `&mut` created in the scrutinee stayed live for the whole
-    // match and every arm that touched the argument again was E4002 — the reason
-    // lisvm had to bind the call result first and match the binding.)
-    const size_t scrutineeBorrowStart = activeBorrows_.size();
     analyzeExpr(node->scrutinee.get());
-    endTemporaryBorrowsSince(scrutineeBorrowStart);
     if (!node->scrutinee->type)
         return;
 
@@ -3386,28 +2992,12 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
 {
     if (node->cond.has_value())
     {
-        // Same as visit(HIRIf): the condition's temporary reservations end with
-        // the condition, so the body may write what the condition read —
-        // `while i < v.len() { v[i] = ... }`.
-        const size_t condBorrowStart = activeBorrows_.size();
         analyzeExpr(node->cond.value().get());
-        endTemporaryBorrowsSince(condBorrowStart);
 
         auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
         if (node->cond.value()->type && !node->cond.value()->type->equals(boolTy))
             log(*node, "loop condition must be bool.");
     }
-
-    // Loop-carried move detection (flow-sensitive over the back-edge): the body
-    // re-executes each iteration, so a whole/partial move of an ENCLOSING-scope
-    // non-Copy local inside the body without re-assignment would be re-moved on
-    // the next iteration — a runtime double-free. Snapshot the enclosing locals'
-    // move state before the body and reject any that became moved in the body.
-    std::unordered_map<std::string, std::pair<bool, bool>> preBodyMoves; // name → (moved, partial)
-    for (auto s = SymbolTable::getInstance().getCurrentScope(); s; s = s->getParent())
-        for (const auto &[name, sym] : s->getSymbols())
-            if (sym->type && !sym->type->isCopyable())
-                preBodyMoves[name] = {sym->state == VarState::Moved, !sym->movedFields.empty()};
 
     const bool reachable = !sequenceTerminated_;
 
@@ -3432,19 +3022,6 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
     }
     sequenceTerminated_ = !reachable || neverFallsThrough;
 
-    for (auto s = SymbolTable::getInstance().getCurrentScope(); s; s = s->getParent())
-        for (const auto &[name, sym] : s->getSymbols())
-        {
-            if (!sym->type || sym->type->isCopyable()) continue;
-            auto it = preBodyMoves.find(name);
-            if (it == preBodyMoves.end()) continue; // declared in the body, not enclosing
-            bool nowMoved = sym->state == VarState::Moved || !sym->movedFields.empty();
-            bool wasMoved = it->second.first || it->second.second;
-            if (nowMoved && !wasMoved && !mirBorrowCheck_)
-                log(*node, "value '" + name + "' is moved inside this loop without being "
-                                              "re-assigned; the next iteration would move it again.",
-                    E_UseOfMovedValue);
-        }
 }
 
 // ---------------------------------------------------------------------------
@@ -3649,21 +3226,6 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
     // locals/params keep their bare name.
     node->name = sym->name;
 
-    // NLL: record the last use of any borrow-holder variable (r in `let r = &x`),
-    // so its borrow's liveness can end here.
-    if (!promotedBorrows_.empty())
-    {
-        for (const auto &b : promotedBorrows_)
-            if (b.holderName == node->name)
-            {
-                auto it = holderLastUseStmt_.find(node->name);
-                size_t cur = it != holderLastUseStmt_.end() ? it->second : 0;
-                if (stmtOrdinal_ > cur)
-                    holderLastUseStmt_[node->name] = stmtOrdinal_;
-                break;
-            }
-    }
-
     // An UNINHABITED binding (`let x: never;`) has no value to read: the type is
     // allowed (it is the bottom type), but a value of it can never exist, so any
     // use of the binding is a bug — and materialising it would put a valueless
@@ -3676,17 +3238,6 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
         return;
     }
 
-    // Borrow-check: a Copy read of a whole variable conflicts with active &mut
-    // borrows. Non-Copy uses are moves and are checked at the consuming sites.
-    // Also close the read-after-move gap in non-consuming positions (e.g. `if x
-    // == 0` after `let y = x;`).
-    if (!mirBorrowCheck_)
-    {
-        if (sym->type && sym->type->isCopyable())
-            checkBorrowUse(node->name, {}, BorrowUseKind::Read, *node);
-        if (sym->state == VarState::Moved)
-            log(*node, "use of moved value: '" + node->name + "'", E_UseOfMovedValue);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4266,23 +3817,6 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
         if (node->args.size() != expectedArgs)
             log(*node, "method '" + node->methodName + "' expects " + std::to_string(expectedArgs) + " arguments, got " + std::to_string(node->args.size()) + ".");
 
-        // Borrow-check: the receiver is borrowed for the call (a temporary
-        // borrow); register it BEFORE the args so an arg conflicting with it is
-        // caught. The self param is a reference (asserted below).
-        if (!paramTypes.empty())
-        {
-            if (auto refTy = std::dynamic_pointer_cast<ReferenceType>(paramTypes[0]))
-            {
-                std::string rroot;
-                std::vector<std::string> rpath;
-                if (extractRootAndPath(node->object.get(), rroot, rpath))
-                {
-                    if (auto *rsym = SymbolTable::getInstance().lookupSymbol(rroot))
-                        registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node, /*isTwoPhase=*/true);
-                }
-            }
-        }
-
         // Type-check args against params[1..] (params[0] is the receiver).
         checkCallArgs(node->args, paramTypes,
             /*paramOffset=*/1, *node, /*explainUninferredGeneric=*/false);
@@ -4457,7 +3991,7 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
             // already reported its own error, so stay quiet about it here.)
             std::string droot;
             std::vector<std::string> dpath;
-            if (node->args[0]->type && !resolvePlace(node->args[0].get(), droot, dpath))
+            if (node->args[0]->type && !extractRootAndPath(node->args[0].get(), droot, dpath))
                 log(*node->args[0], "builtin '__drop' expects a place (a variable, a field, an index or a dereference), which is what it releases.");
         }
 
@@ -5133,7 +4667,6 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                         if (!mut)
                             log(*node, "cannot borrow '" + rroot + "' as mutable because it is not mutable", E_CannotBorrowAsMutable);
                     }
-                    registerBorrow(rroot, rpath, refTy->isMutableRef(), /*isPromoted=*/false, *node, /*isTwoPhase=*/true);
                 }
             }
         }
@@ -5413,15 +4946,6 @@ void HIRSemanticAnalyzer::visit(HIRMemberAccess *node)
     else
         log(*node, "struct '" + ct->getName() + "' has no field '" + node->memberName + "'.");
 
-    // Borrow-check: a Copy field read conflicts with active &mut borrows. The
-    // access is resolved to its PLACE — alias-resolved, so a read through a
-    // reference (`*r`, `(*r).a`) is checked against the referent, not against the
-    // reference binding. Non-Copy field moves are checked at consuming sites.
-    std::string root;
-    std::vector<std::string> path;
-    if (node->type && node->type->isCopyable()
-        && resolvePlace(node, root, path))
-        checkBorrowUse(root, path, BorrowUseKind::Read, *node);
 }
 
 // ---------------------------------------------------------------------------
@@ -5623,16 +5147,6 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
             // `v[2] = v[0] + 1;` was rejected as "cannot assign to 'v[2]'
             // because it is borrowed" (E4003) by the read on its right-hand side.
             //
-            // An assignment target (`v[0] = x` → IndexMut::set, `&mut self`)
-            // does not even check here: visit(HIRAssign) runs the write check on
-            // this very place, which is the same protection.
-            if (!inAssignTarget_)
-            {
-                std::string rroot;
-                std::vector<std::string> rpath;
-                if (resolvePlace(node->object.get(), rroot, rpath))
-                    checkBorrowUse(rroot, rpath, BorrowUseKind::Read, *node);
-            }
         }
         else
         {
@@ -5697,16 +5211,6 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
 
     node->type = elemTy;
 
-    // A Copy element read conflicts with active &mut borrows (same rule as a
-    // Copy field read in visit(HIRMemberAccess)). The path carries a CONSTANT
-    // index segment ("[0]") when the index is a literal — so a borrow of `a[0]`
-    // does not block `a[1]` — and the wildcard "[*]" when it is not, which
-    // overlaps every element (sound: the value is not known).
-    std::string root;
-    std::vector<std::string> path;
-    if (node->type && node->type->isCopyable()
-        && resolvePlace(node, root, path))
-        checkBorrowUse(root, path, BorrowUseKind::Read, *node);
 }
 
 // ---------------------------------------------------------------------------
@@ -5723,30 +5227,6 @@ void HIRSemanticAnalyzer::visit(HIRDeref *node)
     {
         node->type = ref->getBaseType();
 
-        // A Copy read THROUGH the deref conflicts with a live exclusive borrow of
-        // the same place (`let s = &mut *r; let v = *r;` — Rust rejects this with
-        // E0503 while `s` is live). The WRITE case is handled by visit(HIRAssign)
-        // with the same resolved place, and a non-Copy read is E3017 in
-        // handleMoveSource.
-        if (!inAssignTarget_ && node->type->isCopyable())
-        {
-            // Reading `*r` USES r and then reads the referent: both are checked,
-            // and the referent check exempts r's own borrow — the very borrow
-            // that makes the read legal.
-            std::string holderRoot;
-            std::vector<std::string> holderPath;
-            bool viaHolder = derefHolderOf(node, holderRoot, holderPath);
-            if (viaHolder)
-                checkBorrowUse(holderRoot, holderPath, BorrowUseKind::Read, *node);
-
-            std::vector<std::string> exempt = viaHolder ? exemptionChain(holderRoot)
-                                                        : std::vector<std::string>{};
-            std::string root;
-            std::vector<std::string> path;
-            if (resolvePlace(node, root, path))
-                checkBorrowUse(root, path, BorrowUseKind::Read, *node,
-                    exempt.empty() ? nullptr : &exempt);
-        }
         return;
     }
 
@@ -6090,73 +5570,9 @@ void HIRSemanticAnalyzer::visit(HIRVariantInit *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRRef *node)
 {
-    // Everything registered from here on belongs to this `&` expression, so a
-    // var-decl initialiser can promote the whole group (see HIRRef::borrowMark).
-    node->borrowMark = activeBorrows_.size();
-
     analyzeExpr(node->expr.get());
     if (node->expr->type)
         node->type = context->typeContext->getReference(node->expr->type, node->isMutable);
-
-    // Borrow-check: `&p` / `&mut p` borrows the place p. Register the borrow
-    // after checking aliasing and that p hasn't been moved.
-    //
-    // The place is ALIAS-RESOLVED, which is what makes a borrow taken through a
-    // dereference join the same accounting as the original: `&mut *r` (with
-    // `r = &mut x`) borrows `x`, so a second `&mut *r`, a `&mut x`, or a plain
-    // `*r = v` in between are all conflicts. Before this the deref form was not
-    // tracked at all — two live `&mut *r` were accepted.
-    // A borrow THROUGH a dereference (`&mut *r`) has two halves: the POINTER has
-    // to be usable right now, and the referent is what gets borrowed. The first
-    // half is what freezes the parent — a second `&mut *r` while the first
-    // reborrow is still live is rejected here (Rust's E0499) — and the second
-    // joins the referent place, so `&mut x`, `*r = v` or a plain read of `x`
-    // conflict with it.
-    std::string holderRoot;
-    std::vector<std::string> holderPath;
-    bool viaHolder = derefHolderOf(node->expr.get(), holderRoot, holderPath);
-    if (viaHolder)
-    {
-        // Registering the FREEZE is also the "is the pointer usable right now"
-        // check — registerBorrow checks the same place with the same kind first,
-        // so the diagnostic is reported once and only when the freeze is taken.
-        registerBorrow(holderRoot, holderPath, node->isMutable, /*isPromoted=*/false, *node);
-    }
-
-    std::string root;
-    std::vector<std::string> path;
-    if (resolvePlace(node->expr.get(), root, path))
-    {
-        if (auto *sym = SymbolTable::getInstance().lookupSymbol(root))
-        {
-            // In `mir` mode the moved-state and the borrow bookkeeping below are
-            // MIRBorrowCheck's job (it sees the same place with a Deref projection).
-            if (mirBorrowCheck_) return;
-
-            // A whole-value move poisons every borrow of the root.
-            if (sym->state == VarState::Moved)
-            {
-                log(*node, "cannot borrow moved value '" + root + "'", E_CannotBorrowMovedValue);
-                return;
-            }
-            // Field precision: a partial (field) move only poisons the moved
-            // field and its descendants. Borrowing a DISJOINT sibling is fine
-            // (`let v = p.b; let r = &p.a;`), while `&p.b` / `&p` still fail.
-            for (const auto &movedPath : sym->movedFields)
-            {
-                if (pathsOverlap(movedPath, path))
-                {
-                    log(*node, "cannot borrow moved value '" + root + "'", E_CannotBorrowMovedValue);
-                    return;
-                }
-            }
-            // Temporary borrow by default; `let r = &p` promotes it (visit(HIRVarDecl)).
-            std::vector<std::string> exempt = viaHolder ? exemptionChain(holderRoot)
-                                                        : std::vector<std::string>{};
-            registerBorrow(root, path, node->isMutable, /*isPromoted=*/false, *node,
-                /*isTwoPhase=*/false, exempt.empty() ? nullptr : &exempt);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

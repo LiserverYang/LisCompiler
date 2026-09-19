@@ -79,24 +79,6 @@ struct Symbol
      */
     std::vector<std::vector<std::string>> movedFields;
 
-    // ── Borrow-checker Stage 3: dangling / escape origins ──────────────────────
-    // These are only populated for LOCAL bindings (params/globals are derived
-    // on demand from SymbolKind). They die with the scope, like the binding.
-
-    /// Where the reference VALUE held by this binding points. Set for
-    /// reference-typed bindings; read by originOfBinding(). Unset → Unknown.
-    std::optional<RefOrigin> refOrigin;
-
-    /// For struct-typed bindings: origin of each reference-typed FIELD's value,
-    /// keyed by field name. Set at declaration / assignment; an absent field
-    /// (e.g. the struct came from a call) → Unknown.
-    std::map<std::string, RefOrigin> refFieldOrigins;
-
-    /// Where a reference-typed LOCAL binding points, as a place (root, path).
-    /// Used to resolve field accesses THROUGH the reference (`let r = &h; ret r.v`
-    /// needs h's field origins, not r's own slot origin).
-    std::optional<std::pair<std::string, std::vector<std::string>>> refTarget;
-
     std::vector<std::string> implementedTraits;   // 结构体实现的Trait列表
     std::vector<std::string> structsImplementing; // 实现该Trait的结构体列表
 

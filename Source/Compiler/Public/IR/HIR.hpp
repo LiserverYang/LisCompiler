@@ -383,13 +383,6 @@ public:
     std::unique_ptr<HIRExpr> expr;
     bool isMutable = false;
 
-    /// SEMA BOOKKEEPING (not syntax): the index of the first borrow this `&`
-    /// expression registered in HIRSemanticAnalyzer::activeBorrows_. A borrow
-    /// taken through a dereference registers up to two (the referent place, plus
-    /// a FREEZE on the holder reference), and `let r = &mut *p;` has to promote
-    /// all of them so both lifetimes end at r's last use. Set on every
-    /// visit(HIRRef); only a var-decl initialiser reads it.
-    size_t borrowMark = 0;
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
