@@ -95,46 +95,19 @@ private:
      *  the un-inferrable-definition error the same code is outside such a
      *  context. */
     bool inGenericContext() const;
-    // ── definite assignment (`let x;` has no initializer) ─────────────────────
-
-    /// Symbol → initialized, for every LOCAL binding visible at one point.
-    using InitState = std::unordered_map<Symbol *, bool>;
-
-    /// Snapshot the visible local bindings (locals/params only — the global
-    /// scope holds top-level symbols, which are always initialized).
-    InitState snapshotInitState();
-
-    /// Re-read the SAME key set. Re-walking the scope chain would be wrong here:
-    /// bindings declared inside a branch are out of scope once it exits, so their
-    /// Symbol objects are already destroyed.
-    InitState captureInitState(const InitState &keys) const;
-
-    /// Write a state back onto its symbols.
-    void restoreInitState(const InitState &state);
-
-    /// dst[k] = dst[k] && other[k] — the AND rule for a branch join: a binding is
-    /// definitely initialized after the join only if BOTH paths initialized it.
-    static void mergeInitState(InitState &dst, const InitState &other);
-
-    /// Reject a USE of a binding that is not definitely initialized on this path.
-    /// `placeExpr` is the whole place expression (`x`, `x.f`, `a[i]`); only a plain
-    /// variable root can be uninitialized.
-    void checkInitializedUse(HIRExpr *placeExpr, HIRNode &errNode);
-
     /// True while the statement sequence being analyzed is already unreachable
     /// (after `ret`/`break`/`continue`, a diverging call, or a branch that cannot
-    /// fall through). Definite-assignment diagnostics are suppressed there — the
-    /// code cannot run — mirroring MIRBuilder's dead-block handling. Only the new
-    /// check consults it; all other diagnostics keep reporting as before.
+    /// fall through). Reachability is what tells a loop that `while true { ... }`
+    /// with no break never falls through to the code after it.
     bool sequenceTerminated_ = false;
 
     /// Per-loop "its body contains a break" flags (innermost last), used to decide
     /// whether `while true { ... }` can ever fall through to the code after it.
     std::vector<bool> loopBodyBreaks_;
 
-    /// Set while the ASSIGNMENT TARGET of an assign statement is being analyzed, so
-    /// visit(HIRNameRef) does not report the write itself as a read of an
-    /// uninitialized value (`let x: i32; x = 1;`).
+    /// Set while the ASSIGNMENT TARGET of an assign statement is being analyzed:
+    /// `v[i] = x` resolves `IndexMut::set`, while reading the element in a
+    /// compound assignment (`v[i] += x`) resolves `Index::at`.
     bool inAssignTarget_ = false;
 
     /// True while the assignment target being analyzed belongs to a COMPOUND

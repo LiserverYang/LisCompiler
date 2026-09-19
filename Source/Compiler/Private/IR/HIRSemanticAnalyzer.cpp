@@ -3202,14 +3202,6 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
         }
     }
 
-    // Definite assignment on the TARGET side: assigning the whole binding
-    // initializes it, but writing a FIELD/ELEMENT requires it to be initialized
-    // already — the language tracks whole bindings, not individual fields, so a
-    // partially constructed struct would otherwise be released half-built at
-    // scope exit.
-    if (dynamic_cast<HIRMemberAccess *>(node->target.get()) || dynamic_cast<HIRIndexAccess *>(node->target.get()))
-        checkInitializedUse(node->target.get(), *node);
-
     // Borrow-check: writing to a borrowed place is forbidden. A write THROUGH a
     // reference (`r.v = 5` where r = &mut x) roots on `r`, which is not itself
     // a borrowed binding, so it passes here and is governed by mutability below.
@@ -3415,46 +3407,18 @@ void HIRSemanticAnalyzer::visit(HIRIf *node)
     if (node->cond->type && !node->cond->type->equals(boolTy))
         log(*node, "if condition must be bool.");
 
-    // Definite assignment across the branch: snapshot at the join point, run each
-    // branch from that snapshot, then combine. A branch that cannot FALL THROUGH
-    // (it always returns / breaks / diverges) contributes no state at all — the
-    // other branch decides. Otherwise the join is the element-wise AND, and a
-    // missing `else` counts as an empty branch that assigns nothing.
+    // Reachability across the branch: each side is visited as if the code before
+    // the if had run, and a side that cannot FALL THROUGH (it always returns /
+    // breaks / diverges) contributes nothing to what follows.
     const bool reachable = !sequenceTerminated_;
-    InitState entry = reachable ? snapshotInitState() : InitState{};
 
     sequenceTerminated_ = !reachable;
     if (node->thenBlock) visit(node->thenBlock.get());
     const bool thenTerminates = sequenceTerminated_;
-    InitState thenState = reachable ? captureInitState(entry) : InitState{};
 
-    // The else side starts from the ENTRY state again — otherwise a variable the
-    // then-branch assigned would leak its "initialized" into a branch that never
-    // touched it.
-    if (reachable) restoreInitState(entry);
     sequenceTerminated_ = !reachable;
     if (node->elseBlock.has_value()) visit(node->elseBlock.value().get());
     const bool elseTerminates = sequenceTerminated_ && node->elseBlock.has_value();
-    InitState elseState = reachable ? captureInitState(entry) : InitState{};
-
-    if (reachable)
-    {
-        if (thenTerminates && !elseTerminates)
-        {
-            // Only the else path reaches the join (the implicit empty else when
-            // there is none: it assigns nothing, i.e. the entry state).
-            restoreInitState(elseState);
-        }
-        else if (elseTerminates && !thenTerminates)
-        {
-            restoreInitState(thenState);
-        }
-        else if (!thenTerminates && !elseTerminates)
-        {
-            mergeInitState(thenState, elseState);
-            restoreInitState(thenState);
-        }
-    }
 
     // The statement after the if is reachable unless BOTH branches terminate.
     sequenceTerminated_ = !reachable || (thenTerminates && elseTerminates);
@@ -3499,22 +3463,15 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
     bool hasValueArm = false;
     std::shared_ptr<Type> matchResultType = nullptr;
 
-    // Definite assignment across the arms: a binding is initialized after the
-    // match only if EVERY arm that can fall through initialized it. Arms that
-    // cannot fall through (ret / break / a diverging tail) contribute nothing.
+    // Reachability across the arms: something after the match is reachable iff
+    // at least one arm can fall through.
     const bool reachable = !sequenceTerminated_;
-    InitState entry = reachable ? snapshotInitState() : InitState{};
-    InitState mergedArms;
     bool haveMergedArm = false;
 
     for (auto &arm : node->arms)
     {
         auto armScope = SymbolTable::getInstance().getCurrentScope()->createChild();
         SymbolTable::getInstance().enterScope(armScope);
-
-        // Every arm starts from the match ENTRY state: one arm assignments must
-        // never leak into a later arm.
-        if (reachable) restoreInitState(entry);
 
         if (arm.isWildcard)
         {
@@ -3607,18 +3564,7 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
             const bool armTerminates = sequenceTerminated_
                                       || (arm.tailValue && isNeverType(arm.tailValue->type));
             if (!armTerminates)
-            {
-                InitState armState = captureInitState(entry);
-                if (!haveMergedArm)
-                {
-                    mergedArms = armState;
-                    haveMergedArm = true;
-                }
-                else
-                {
-                    mergeInitState(mergedArms, armState);
-                }
-            }
+                haveMergedArm = true; // this arm can reach whatever follows
         }
     }
 
@@ -3651,13 +3597,8 @@ void HIRSemanticAnalyzer::visit(HIRMatch *node)
     else
         node->type = voidTy;
 
-    if (reachable)
-    {
-        if (haveMergedArm)
-            restoreInitState(mergedArms);
-        // Every arm terminates: nothing after the match can run.
-        sequenceTerminated_ = !haveMergedArm;
-    }
+    // Every arm terminates: nothing after the match can run.
+    if (reachable) sequenceTerminated_ = !haveMergedArm;
 
     SymbolTable::getInstance().exitScope(); // matchScope
 }
@@ -3690,11 +3631,7 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
             if (sym->type && !sym->type->isCopyable())
                 preBodyMoves[name] = {sym->state == VarState::Moved, !sym->movedFields.empty()};
 
-    // Definite assignment across a loop: the body may run ZERO times, so the
-    // state after the loop is the state before it (assignments inside do not
-    // count). This is the standard conservative rule.
     const bool reachable = !sequenceTerminated_;
-    InitState entry = reachable ? snapshotInitState() : InitState{};
 
     loopDepth_++;
     loopBodyBreaks_.push_back(false);
@@ -3702,8 +3639,6 @@ void HIRSemanticAnalyzer::visit(HIRLoop *node)
     const bool bodyBreaks = loopBodyBreaks_.back();
     loopBodyBreaks_.pop_back();
     loopDepth_--;
-
-    if (reachable) restoreInitState(entry);
 
     // `while true { ... }` with no break in the body never falls through, so the
     // statements after it are unreachable (which also suppresses their
@@ -3887,71 +3822,6 @@ bool HIRSemanticAnalyzer::inGenericContext() const
     auto ct = std::dynamic_pointer_cast<CustomType>(currentStructType);
     return ct && ct->isGeneric(); // a method of a generic struct: mono prepends its params
 }
-// ── definite assignment (`let x;` has no initializer) ────────────────────────
-
-HIRSemanticAnalyzer::InitState HIRSemanticAnalyzer::snapshotInitState()
-{
-    InitState state;
-    // Locals and params only: stop at the global scope (the only scope without a
-    // parent) — top-level symbols are always initialized.
-    for (auto scope = SymbolTable::getInstance().getCurrentScope(); scope && scope->getParent();
-         scope = scope->getParent())
-        for (const auto &[name, sym] : scope->getSymbols())
-        {
-            (void)name;
-            state[sym.get()] = sym->initialized;
-        }
-    return state;
-}
-
-HIRSemanticAnalyzer::InitState HIRSemanticAnalyzer::captureInitState(const InitState &keys) const
-{
-    InitState state;
-    state.reserve(keys.size());
-    for (const auto &[sym, wasInitialized] : keys)
-    {
-        (void)wasInitialized;
-        if (sym) state[sym] = sym->initialized;
-    }
-    return state;
-}
-
-void HIRSemanticAnalyzer::restoreInitState(const InitState &state)
-{
-    for (const auto &[sym, initialized] : state)
-        if (sym) sym->initialized = initialized;
-}
-
-void HIRSemanticAnalyzer::mergeInitState(InitState &dst, const InitState &other)
-{
-    for (auto &[sym, initialized] : dst)
-    {
-        auto it = other.find(sym);
-        if (it == other.end()) continue; // outside the key set: nothing to merge
-        initialized = initialized && it->second;
-    }
-}
-
-void HIRSemanticAnalyzer::checkInitializedUse(HIRExpr *placeExpr, HIRNode &errNode)
-{
-    // Definite assignment is CFG dataflow now: MIRBorrowCheck owns it.
-    if (mirBorrowCheck_) return;
-
-    // Unreachable code cannot read anything: after a `ret`/`break`/`continue`, a
-    // diverging call, or a branch that never falls through, the definite-
-    // assignment state is meaningless. MIRBuilder drops those statements too.
-    if (!placeExpr || sequenceTerminated_) return;
-
-    std::string root;
-    std::vector<std::string> path;
-    if (!extractRootAndPath(placeExpr, root, path)) return;
-
-    Symbol *sym = SymbolTable::getInstance().lookupSymbol(root);
-    if (!sym || sym->initialized) return;
-
-    log(errNode, "use of uninitialized value: '" + root + "'", E_UseOfUninitializedValue);
-}
-
 Symbol *HIRSemanticAnalyzer::lookupModuleAware(const std::string &name)
 {
     auto &table = SymbolTable::getInstance();
@@ -4039,13 +3909,6 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
         log(*node, "cannot use '" + node->name + "': it has the uninhabited type 'never'.", E_UndefinedIdentifier);
         return;
     }
-
-    // Definite assignment: reading a `let x;` binding before every path has
-    // assigned it. Assignment targets are exempt (visit(HIRAssign) sets
-    // inAssignTarget_ and checks the field/element rule itself), because the
-    // write is what initializes the binding.
-    if (!inAssignTarget_)
-        checkInitializedUse(node, *node);
 
     // Borrow-check: a Copy read of a whole variable conflicts with active &mut
     // borrows. Non-Copy uses are moves and are checked at the consuming sites
