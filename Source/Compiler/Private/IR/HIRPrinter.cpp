@@ -203,6 +203,12 @@ public:
         os << " index_access";
     }
 
+    void visit(HIRDeref *node)
+    {
+        printCommon(node);
+        os << " deref";
+    }
+
     void visit(HIRArrayLiteral *node)
     {
         printCommon(node);
@@ -412,6 +418,8 @@ public:
             visit(e);
         else if (auto e = dynamic_cast<HIRIndexAccess *>(node))
             visit(e);
+        else if (auto e = dynamic_cast<HIRDeref *>(node))
+            visit(e);
         else if (auto e = dynamic_cast<HIRArrayLiteral *>(node))
             visit(e);
         else if (auto e = dynamic_cast<HIRStructInit *>(node))
@@ -505,6 +513,10 @@ std::vector<HIRNode *> getHIRChildren(HIRNode *node)
     {
         for (auto &elem : e->elements)
             children.push_back(elem.get());
+    }
+    else if (auto e = dynamic_cast<HIRDeref *>(node))
+    {
+        if (e->operand) children.push_back(e->operand.get());
     }
     else if (auto e = dynamic_cast<HIRStructInit *>(node))
     {

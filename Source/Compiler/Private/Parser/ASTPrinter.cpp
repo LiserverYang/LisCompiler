@@ -452,6 +452,12 @@ void ASTPrinter::visit(ParenExpr *node)
     os << " [ParenExpr]";
 }
 
+void ASTPrinter::visit(DerefExpr *node)
+{
+    printCommon(node);
+    os << " deref";
+}
+
 void ASTPrinter::visit(BorrowExpr *node)
 {
     printCommon(node);

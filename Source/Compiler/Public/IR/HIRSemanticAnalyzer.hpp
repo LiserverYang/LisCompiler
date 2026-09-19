@@ -535,6 +535,7 @@ public:
     virtual void visit(HIRCall *node) override;
     virtual void visit(HIRMemberAccess *node) override;
     virtual void visit(HIRIndexAccess *node) override;
+    virtual void visit(HIRDeref *node) override;
     virtual void visit(HIRArrayLiteral *node) override;
     virtual void visit(HIRStructInit *node) override;
     virtual void visit(HIRVariantInit *node) override;

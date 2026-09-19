@@ -1102,6 +1102,11 @@ void Parser::applyIKnow(Expr *expr)
             applyIKnow(elem.get());
         return;
     }
+    if (auto deref = dynamic_cast<DerefExpr *>(expr))
+    {
+        applyIKnow(deref->operand.get());
+        return;
+    }
     if (auto variant = dynamic_cast<VariantInitExpr *>(expr))
     {
         for (auto &arg : variant->arguments)
@@ -1443,14 +1448,10 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
     PositionRecorder exprRecorder(this, nullptr);
     PositionRecorder opRecorder(this, nullptr);
 
-    auto left = parsePrimary();
-
-    if (match(TokenCode::AS))
-    {
-        left = parseCastExpression(std::move(left));
-    }
-
-    left = parseMemberAccessChain(std::move(left));
+    // One operand: an optional prefix `*p` dereference, then the primary with
+    // its postfix chain. Both the cast and the postfix chain live in parseUnary
+    // so a dereference binds them the same way a bare operand does.
+    auto left = parseUnary();
 
     // `a - b - c - ...` is built ITERATIVELY here, but the tree it leaves
     // behind is left-deep: every later pass walks it with one stack frame per
@@ -1533,6 +1534,49 @@ int Parser::getPrecedence(TokenCode type)
     default:
         return 0;
     }
+}
+
+std::unique_ptr<Expr> Parser::parseUnary()
+{
+    // Prefix `*` is the DEREFERENCE operator. It only ever appears where an
+    // OPERAND is expected, so it can never be confused with the binary `*`
+    // (the binary loop below consumes that one after a complete operand):
+    // `a * b` is a multiplication while `a * *b` multiplies by `*b`.
+    if (check(TokenCode::STAR))
+    {
+        // The node is anchored on the `*` itself (the star is consumed before
+        // any PositionRecorder could see it, so its position is captured here).
+        Token star = currentToken();
+        advance();
+
+        // A prefix chain (`****p`) is a new recursion point here, and it leaves
+        // one tree level per star for every later pass — charge it to the same
+        // nesting budget as parentheses.
+        ParserDepthGuard depth(this);
+        if (!depth)
+        {
+            auto placeholder = std::make_unique<IdentifierExpr>();
+            placeholder->name = "<error>";
+            return placeholder;
+        }
+
+        auto deref = std::make_unique<DerefExpr>();
+        deref->position = star.position;
+        deref->length = star.value.length();
+        // Postfix binds TIGHTER than the prefix, so `*p.f` is `*(p.f)` and
+        // `*p[0]` is `*(p[0])` — the operand is itself a full unary expression.
+        deref->operand = parseUnary();
+        return deref;
+    }
+
+    auto expr = parsePrimary();
+
+    if (match(TokenCode::AS))
+    {
+        expr = parseCastExpression(std::move(expr));
+    }
+
+    return parseMemberAccessChain(std::move(expr));
 }
 
 std::unique_ptr<Expr> Parser::parsePrimary()

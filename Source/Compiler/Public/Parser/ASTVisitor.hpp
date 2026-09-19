@@ -48,6 +48,7 @@ class BinaryOp;
 class CastExpr;
 class ParenExpr;
 class BorrowExpr;
+class DerefExpr;
 class TryExpr;
 class GenericParam;
 
@@ -105,6 +106,7 @@ public:
     virtual void visit(CastExpr *node) = 0;
     virtual void visit(ParenExpr *node) = 0;
     virtual void visit(BorrowExpr *node) = 0;
+    virtual void visit(DerefExpr *node) = 0;
     virtual void visit(TryExpr *node) = 0;
     virtual void visit(GenericParam *node) = 0;
 };

@@ -687,3 +687,24 @@ public:
         visitor->visit(this);
     }
 };
+
+/// `*p` — the unary DEREFERENCE expression.
+///
+/// Only a reference (`&T` / `&mut T`) is dereferenceable; a raw pointer keeps its
+/// stdlib-only `__deref`/`__deref_mut` bridge, so `*p` on a `*T` is rejected
+/// outside the standard library. It yields a PLACE, not a value: reading it is a
+/// Copy read (moving a non-Copy pointee out of a borrow is E3017), and assigning
+/// to it writes through the reference (`*out = 1`) and requires `&mut T`.
+///
+/// Prefix precedence: `*p.f` parses as `*(p.f)` (postfix binds tighter, like
+/// Rust), and `*p + 1` as `(*p) + 1`.
+class DerefExpr : public Expr
+{
+public:
+    std::unique_ptr<Expr> operand;
+
+    void accept(ASTVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};

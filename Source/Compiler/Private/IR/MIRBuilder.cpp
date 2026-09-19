@@ -1047,6 +1047,14 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
         && lhs.type && lhs.type->needsDrop())
         emitDrop(localPlace(lhs.index));
 
+    // `*out = v` overwrites a value that lives in someone else's frame, so it is
+    // NOT covered by the drop-flag machinery above. Release the old value first
+    // (Rust does the same). Only the whole-pointee form is handled here: `p.f = v`
+    // / `(*p).f = v` keep their existing behaviour (documented in limitations.md).
+    if (lhs.projections.size() == 1 && lhs.projections[0].kind == ProjectionKind::Deref
+        && lhs.type && lhs.type->needsDrop())
+        emitDrop(lhs);
+
     // emitAssign re-arms ownership on a whole-root-local write.
     emitAssign(lhs, MIRRValueUse{.operand = std::move(rhs)});
 }
@@ -1622,6 +1630,9 @@ MIRPlace MIRBuilder::buildExpr(HIRExpr *expr)
     if (auto *ref = dynamic_cast<HIRRef *>(expr))
         return buildRef(ref);
 
+    if (auto *deref = dynamic_cast<HIRDeref *>(expr))
+        return buildDeref(deref);
+
     if (auto *tryExpr = dynamic_cast<HIRTry *>(expr))
         return buildTry(tryExpr);
 
@@ -1966,6 +1977,29 @@ MIRPlace MIRBuilder::buildMemberAccess(HIRMemberAccess *ma)
     if (ma->type)
         obj.type = ma->type;
     return obj;
+}
+
+// ── dereference: *p ──────────────────────────────────────────────────────────
+// A HIRDeref is a PLACE, not a value (exactly like a member access): the
+// operand's place gets a Deref projection appended, which loads the pointer out
+// of its slot and yields the referent's address. Appending (not prepending) is
+// what buildIndexAccess does and is the right order here — the operand's own
+// projections run FIRST.
+MIRPlace MIRBuilder::buildDeref(HIRDeref *d)
+{
+    MIRPlace base = buildExpr(d->operand.get());
+
+    while (base.type && base.type->isPointerLike())
+    {
+        base.projections.push_back(Projection{.kind = ProjectionKind::Deref});
+        base.type = base.type->getKind() == Type::Kind::Reference
+                        ? std::static_pointer_cast<ReferenceType>(base.type)->getBaseType()
+                        : std::static_pointer_cast<PointerType>(base.type)->getBaseType();
+    }
+
+    // The resolved type wins so the place matches what sema checked.
+    if (d->type) base.type = d->type;
+    return base;
 }
 
 // ── array / pointer indexing: a[i], p[i] ─────────────────────────────────────

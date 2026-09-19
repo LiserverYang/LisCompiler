@@ -1058,6 +1058,20 @@ void HIRBuilder::visit(IndexAccess *node)
 }
 
 // ---------------------------------------------------------------------------
+void HIRBuilder::visit(DerefExpr *node)
+{
+    auto result = std::make_unique<HIRDeref>();
+    result->position = node->position;
+    result->length = node->length;
+
+    node->operand->accept(this);
+    result->operand = std::unique_ptr<HIRExpr>(dynamic_cast<HIRExpr *>(nodeStack.top().release()));
+    nodeStack.pop();
+
+    nodeStack.push(std::move(result));
+}
+
+// ---------------------------------------------------------------------------
 void HIRBuilder::visit(ArrayLiteral *node)
 {
     auto result = std::make_unique<HIRArrayLiteral>();

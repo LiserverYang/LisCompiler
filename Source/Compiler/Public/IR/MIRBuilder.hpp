@@ -256,6 +256,8 @@ private:
     MIRPlace buildCall(HIRCall *call);
     MIRPlace buildMemberAccess(HIRMemberAccess *ma);
     MIRPlace buildIndexAccess(HIRIndexAccess *ia);
+    /// `*p` — a place: the operand's place with a Deref projection appended.
+    MIRPlace buildDeref(HIRDeref *d);
     MIRPlace buildArrayLiteral(HIRArrayLiteral *al);
     MIRPlace buildStructInit(HIRStructInit *si);
     MIRPlace buildVariantInit(HIRVariantInit *vi);

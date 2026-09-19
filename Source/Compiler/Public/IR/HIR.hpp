@@ -359,6 +359,25 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+/// `*p` — dereference. A PLACE, exactly like HIRMemberAccess / HIRIndexAccess:
+/// MIRBuilder turns it into a Deref projection, so it is readable (a Copy read;
+/// a non-Copy pointee is E3017, a move out of a borrow) and assignable (only
+/// through `&mut T`, which visit(HIRAssign) enforces).
+///
+/// The operand must be a reference: a raw pointer keeps the stdlib-only
+/// `__deref` / `__deref_mut` bridge, so user code cannot turn an unverified
+/// address into a value with `*`.
+class HIRDeref : public HIRExpr
+{
+public:
+    std::unique_ptr<HIRExpr> operand;
+    void accept(HIRVisitor *visitor) override
+    {
+        visitor->visit(this);
+    }
+};
+
+// ---------------------------------------------------------------------------
 class HIRBlock : public HIRStmt
 {
 public:

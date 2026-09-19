@@ -389,6 +389,11 @@ protected:
     std::unique_ptr<MatchArm> parseMatchArm();
     std::unique_ptr<Pattern> parsePattern();
     std::unique_ptr<Expr> parseBinaryExpression(int minPrecedence);
+
+    /// One OPERAND: a prefix `*p` dereference chain, then a primary with its
+    /// postfix chain (`as` cast, `.field`, `[i]`, `(...)`, `?`). Postfix binds
+    /// tighter than the prefix, so `*p.f` is `*(p.f)`.
+    std::unique_ptr<Expr> parseUnary();
     std::unique_ptr<Expr> parsePrimary();
     std::vector<std::unique_ptr<Expr>> parseArgumentList();
     std::unique_ptr<ParenExpr> parseParenthesized();

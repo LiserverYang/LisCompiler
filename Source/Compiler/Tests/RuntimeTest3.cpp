@@ -1729,3 +1729,88 @@ TEST_F(RuntimeTest, ArrayRepeatCountMustBeAnIntegerLiteral)
     expectCompileFail("fn main() -> i32 { let n = 3; let a = [0; n]; ret 0; }",
         "array repeat count must be an integer literal");
 }
+
+// ── unary dereference `*p` ────────────────────────────────────────────────────
+// `*p` is a PLACE, not a value: it reads (a Copy pointee), writes through a
+// `&mut T` (`*out = 1` — the out-parameter pattern that had no spelling before),
+// and a non-Copy read is E3017, exactly like a field move out of a borrow.
+// limitations.md listed `*x` as unimplemented; a raw pointer keeps the
+// stdlib-only `__deref` bridge.
+
+TEST_F(RuntimeTest, DerefWritesThroughAnOutParameter)
+{
+    expectRun("fn set0(out: &mut i32) { *out = 7; }"
+              " fn main() -> i32 { let mut x = 0; set0(&mut x); ret x; }",
+        7);
+}
+
+TEST_F(RuntimeTest, DerefReadsAndWritesTheSamePlace)
+{
+    // `*out = *out + 1` is the reason the operator has to be a place and not a
+    // value: the read and the write target the referent, not the reference.
+    expectRun("fn inc(out: &mut i32) { *out = *out + 1; }"
+              " fn main() -> i32 { let mut x = 40; inc(&mut x); inc(&mut x); ret x; }",
+        42);
+}
+
+TEST_F(RuntimeTest, DerefReadsACopyPointee)
+{
+    expectRun("fn main() -> i32 { let v = 5; let r = &v; let x = *r; ret x; }", 5);
+}
+
+TEST_F(RuntimeTest, DerefAssignsAWholeStructThroughMutRef)
+{
+    // Passing a struct out through &mut without a return value.
+    expectRun("struct S { pub v: i32 }"
+              " fn f(out: &mut S) { *out = S { v: 9 }; }"
+              " fn main() -> i32 { let mut s = S { v: 1 }; f(&mut s); ret s.v; }",
+        9);
+}
+
+TEST_F(RuntimeTest, DerefBindsTighterThanBinaryOperators)
+{
+    // `*r + 1` is `(*r) + 1`, not `*(r + 1)`.
+    expectRun("fn main() -> i32 { let v = 5; let r = &v; ret *r + 1; }", 6);
+}
+
+TEST_F(RuntimeTest, DerefAssignmentReleasesTheOverwrittenValue)
+{
+    // `*out = v` overwrites a value that lives in the CALLER frame, so it is not
+    // covered by the local drop-flag machinery: the old value has to be released
+    // here (Rust does the same). One drop has run by the time `ret g` reads the
+    // counter; the caller's own scope-exit drop happens after the value is read.
+    expectRun("let g = 0;"
+              " struct D { pub v: i32 }"
+              " impl Drop for D { fn drop(self) { g = g + 1; } }"
+              " fn f(out: &mut D) { *out = D { v: 2 }; }"
+              " fn main() -> i32 { let mut a = D { v: 1 }; f(&mut a); ret g; }",
+        1);
+}
+
+TEST_F(RuntimeTest, DerefMoveOutOfReferenceRejected)
+{
+    // Same E3017 as `let x = r.field;`: the referent still owns the value.
+    expectCompileFail("struct S { pub a: [i32; 2] }"
+                      " fn f(p: &mut S) -> S { ret *p; } fn main() -> i32 { ret 0; }",
+        "cannot move out of a reference");
+}
+
+TEST_F(RuntimeTest, DerefWriteThroughSharedReferenceRejected)
+{
+    expectCompileFail("fn f(p: &i32) { *p = 1; } fn main() -> i32 { ret 0; }",
+        "cannot assign through a shared reference");
+}
+
+TEST_F(RuntimeTest, DerefRawPointerRejected)
+{
+    // A raw pointer has no lifetime and no provenance: turning one into a value
+    // is the audited stdlib step `__deref`, never a user-facing `*p`.
+    expectCompileFail("fn f(p: *mut i32) { *p = 1; } fn main() -> i32 { ret 0; }",
+        "cannot dereference the raw pointer");
+}
+
+TEST_F(RuntimeTest, DerefNonReferenceRejected)
+{
+    expectCompileFail("fn main() -> i32 { let x = 5; let y = *x; ret y; }",
+        "requires a reference");
+}

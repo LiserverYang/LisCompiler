@@ -2852,6 +2852,13 @@ std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::moveOutContainers(HIRExp
 
     std::vector<std::shared_ptr<Type>> containers;
     containers.push_back(chain[0]->object->type);
+    // `(*p).f`: the chain root is an explicit DEREF, so the place is reached
+    // through the reference `p`. The deref node itself carries the POINTEE type;
+    // push the reference type too, so referenceMovedOutOf() sees the borrow and
+    // a non-Copy field move is E3017 — the same rule `p.f` already gets from the
+    // root binding's reference type.
+    if (auto *d = dynamic_cast<HIRDeref *>(chain[0]->object.get()))
+        if (d->operand->type) containers.push_back(d->operand->type);
     for (size_t i = 0; i + 1 < chain.size(); ++i)
         containers.push_back(chain[i]->type);
     return containers;
@@ -2919,6 +2926,19 @@ void HIRSemanticAnalyzer::handleMoveSource(HIRExpr *source, HIRNode &errNode)
             log(errNode, "use of moved value: '" + nameRef->name + "'", E_UseOfMovedValue);
         if (sym->type && !sym->type->isCopyable())
             sym->state = VarState::Moved;
+        return;
+    }
+
+    // Whole-value read THROUGH a deref: `let x = *p;`. A Copy pointee is an
+    // ordinary read (the branch above does its bookkeeping); a non-Copy one
+    // would hand the referent's value to the receiver while its owner still
+    // releases it — the same E3017 as moving a field out of a borrow.
+    if (auto *d = dynamic_cast<HIRDeref *>(source))
+    {
+        if (d->type && !d->type->isCopyable())
+            log(errNode,
+                "cannot move out of a reference: '*p' only borrows the value, so the referent still owns it.",
+                E_MoveOutOfReference);
         return;
     }
 
@@ -3228,6 +3248,23 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
             if (sym && !isMutableBinding(sym))
             {
                 log(*node, "cannot assign to field of immutable variable '" + rootRef->name + "'", E_AssignToImmutable);
+                return;
+            }
+        }
+    }
+    else if (auto *deref = dynamic_cast<HIRDeref *>(node->target.get()))
+    {
+        // `*out = v` writes THROUGH the reference, so the ROOT binding's own
+        // mutability is irrelevant (exactly like indexing through a pointer),
+        // but the reference must be exclusive: writing through a shared `&T`
+        // would mutate a value the other holders were promised is read-only.
+        // (The operand of a failed analysis has no type; its own error was
+        // already reported, so nothing is added here.)
+        if (auto refTy = std::dynamic_pointer_cast<ReferenceType>(deref->operand->type))
+        {
+            if (!refTy->isMutableRef())
+            {
+                log(*node, "cannot assign through a shared reference.", E_AssignToImmutable);
                 return;
             }
         }
@@ -5472,6 +5509,34 @@ void HIRSemanticAnalyzer::visit(HIRIndexAccess *node)
     if (node->type && node->type->isCopyable()
         && extractRootAndPath(node, root, path))
         checkBorrowUse(root, path, BorrowUseKind::Read, *node);
+}
+
+// ---------------------------------------------------------------------------
+// `*p` — dereference of a REFERENCE. The result is a place, not a value: the
+// read/write rules (Copy read, E3017 for a moving read, `&mut` required to
+// write) are enforced where the place is USED — handleMoveSource for a moving
+// read and visit(HIRAssign) for a write.
+void HIRSemanticAnalyzer::visit(HIRDeref *node)
+{
+    analyzeExpr(node->operand.get());
+    if (!node->operand->type) return; // the real error was already reported
+
+    if (auto ref = std::dynamic_pointer_cast<ReferenceType>(node->operand->type))
+    {
+        node->type = ref->getBaseType();
+        return;
+    }
+
+    // A raw pointer is deliberately NOT dereferenceable here: `*p` on a `*T`
+    // would be an unchecked load with no lifetime, which is exactly what the
+    // stdlib-only `__deref` / `__deref_mut` bridge exists to keep auditable
+    // (E3013/E3014). Everything else has no pointee at all.
+    if (std::dynamic_pointer_cast<PointerType>(node->operand->type))
+        log(*node, "cannot dereference the raw pointer '" + node->operand->type->toString()
+                       + "': use the standard library's '__deref'/'__deref_mut' (user code cannot turn an address into a value).");
+    else
+        log(*node, "cannot dereference a value of type '" + node->operand->type->toString()
+                       + "': '*p' requires a reference ('&T' or '&mut T').");
 }
 
 // ---------------------------------------------------------------------------
