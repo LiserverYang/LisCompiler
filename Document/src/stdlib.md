@@ -84,7 +84,10 @@ struct Range { pub start: i32, pub end: i32, pub current: i32 }
 
 - `range(start, end)`：半开区间 `[start, end)`。
 - 泛型助手（`T: Iterator<i32>`）：`sum` `count` `first` `last` `nth` `product`。
-- `for x in iterable { }` 的协议：见[语句](./statements.md)的 for 节。
+- `Vec<T>` 的**借用迭代器**（2026-09-19）：`struct VecIter<T> { pub src: &Vec<T>, pub pos: i32 }`
+  与 `impl<T> Iterator<&T> for VecIter<T>`；`v.iter()` 返回它。注意 `Iterator<T>` 的 `T` 是
+  **迭代步交出的类型**，所以这里是 `Iterator<&T>`——每步给一个元素引用。
+- `for x in iterable { }` 的协议（借用/`move`/右值三种形态）：见[语句](./statements.md)的 for 节。
 
 ## String
 
@@ -140,7 +143,9 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
 | `clear(self: &mut Vec)` | — | **析构**所有仍拥有的元素，长度归零，**保留容量** |
 | `at_ref(self: &Vec, i: i32)` | — | `-> &T`：越界 panic；**出借**元素（见下面的警告） |
 | `at_mut(self: &mut Vec, i: i32)` | — | `-> &mut T`：同上，可写穿 |
-| `for e in v` | — | **消费** v，按**正序**逐个交出元素（Copy 复制、非 Copy 移动） |
+| `iter(self: &Vec)` | — | `-> VecIter<T>`：**借用**迭代器，每步交出 `&T` |
+| `for e in v` | — | **借用** v（走 `iter()`），`e` 是 `&T`；循环结束后 v 仍可用 |
+| `for e in move v` | — | **消费** v，按**正序**逐个交出元素（Copy 复制、非 Copy 移动） |
 | `get(self: &Vec, i: i32)` | ✔ | `-> Option<T>`：越界 `None`（**检查版**） |
 | `v[i]` | ✔ | `Index::at`；越界 `panic("Vec index out of bounds")`（与数组一致） |
 | `v[i] = x` | ✔ | `IndexMut::set`；越界 `panic` |
@@ -158,9 +163,12 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
 - **`for` 的正序与游标**：`next()` 把元素移出，Vec 内部记下「已移出的前缀」；容器只拥有
   该前缀之后的元素，所以 `len()`、下标、`pop`/`remove` 都相对**存活区间**解释，
   `Drop`/`clear` 也只析构这一段——被移出的元素不会被析构第二次。
-- 遍历用 `for e in v`（消费）或 `at_ref`/`v[i]`；还没有 `with_capacity` / `reserve` /
-  `iter()`：扩容需要元素大小，而 `__sizeof` 要一个 T 的**值**，所以大小由
-  `push`/`insert` 的实参带进来。
+- **遍历**（2026-09-19）：`for e in v` 借用（`e: &T`，循环结束后容器可用，但循环体内
+  不能改动容器——扩容会释放迭代器指着的缓冲，报 E4001）；`for e in move v` 消费（`e: T`）。
+  **没有 `iter_mut()`**：交出可变借用需要借用追踪，需要就地改元素的场合用下标循环
+  `while i < v.len() { v[i] = ...; i += 1; }`。
+- 还没有 `with_capacity` / `reserve`：扩容需要元素大小，而 `__sizeof` 要一个 T 的**值**，
+  所以大小由 `push`/`insert` 的实参带进来。
 
 ## math
 
@@ -171,7 +179,7 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
   「从引用后移动」（E3017），并按值交出元素也只对 Copy 类型开放。原语（整数/浮点/char/bool）
   在语义分析里被**播种**为自动实现 `Copy`，用户类型要显式 `impl Copy for X { }`。
 - 函数：`min<T: Numeric>` `max<T: Numeric>` `clamp<T: Numeric>`、`abs(i32)` `fabs(f64)`
-  （无一元负号，`0 - x` 实现）、`gcd` `lcm` `ipow` `is_even` `is_odd` `sign`
+  （`abs`/`fabs` 写作 `0 - x`，一元 `-` 落地后实现未变）、`gcd` `lcm` `ipow` `is_even` `is_odd` `sign`
   `deg_to_rad` `rad_to_deg` `lerp`。
 
 ## chars
