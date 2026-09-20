@@ -282,6 +282,51 @@ void derefPointerOperand(MIROperand &op)
     place->projections.push_back(Projection{.kind = ProjectionKind::Deref});
     place->type = std::static_pointer_cast<ReferenceType>(place->type)->getBaseType();
 }
+
+/**
+ * Lower a TRAIT METHOD called on a PRIMITIVE instantiation of a generic
+ * parameter. Primitives have no method table, so `<T>::method` cannot be
+ * retargeted like a struct method; the few methods the compiler knows how to
+ * express on a primitive get a built-in lowering here. This is the non-operator
+ * counterpart of MIRStmtCall::genericOpFallback (which only covers the operator
+ * traits).
+ *
+ * Supported today:
+ *   `Hash::hash(self: &Self) -> i32` → `k * 2654435761`, the standard 32-bit
+ *   multiplicative mix (the language's silent wraparound does the mixing). The
+ *   receiver is `&Self`, hence the deref. The trait is seeded on i32 only, so
+ *   no other width can reach this yet.
+ *
+ * Returns true when `replacement` was filled in.
+ */
+bool lowerPrimitiveTraitMethod(MIRStmtCall &call, size_t sep, std::optional<MIRStatement> &replacement)
+{
+    const std::string method = call.funcName.substr(sep + 2);
+    if (method != "hash" || !call.dest.has_value() || call.args.size() != 1)
+        return false;
+
+    derefPointerOperand(call.args[0]);
+
+    const auto resultType = call.dest->type;
+    MIRPlace dest = std::move(*call.dest);
+    MIROperand arg = std::move(call.args[0]);
+
+    MIRConst mix{};
+    mix.kind = MIRConst::Kind::Int;
+    mix.value = static_cast<int64_t>(2654435761LL);
+    mix.type = resultType;
+
+    replacement = MIRStmtAssign{
+        .lhs = std::move(dest),
+        .rhs = MIRRValueBinaryOp{
+            .op = MIRRValueBinaryOp::Op::Mul,
+            .left = std::move(arg),
+            .right = MIROperand{std::move(mix)},
+            .type = resultType,
+        },
+    };
+    return true;
+}
 } // namespace
 
 void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_map<std::string, std::shared_ptr<Type>> &replaceTable)
@@ -371,6 +416,15 @@ void MIRMonomorphization::rewriteStatement(MIRStatement &stmt, std::unordered_ma
                     auto it = replaceTable.find(recv);
                     if (it != replaceTable.end())
                     {
+                        // A primitive has no method table, so a NON-operator trait
+                        // method (e.g. `Hash::hash`) needs a built-in lowering.
+                        // This is the counterpart of `genericOpFallback` above,
+                        // which only covers the operator traits.
+                        if (!std::dynamic_pointer_cast<CustomType>(it->second)
+                            && lowerPrimitiveTraitMethod(arg, sep, replacement))
+                        {
+                            return;
+                        }
                         if (auto ct = std::dynamic_pointer_cast<CustomType>(it->second))
                         {
                             std::string base = ct->getOriginName();

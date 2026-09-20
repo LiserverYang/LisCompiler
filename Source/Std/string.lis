@@ -23,11 +23,13 @@
 // has no error handling, so an allocation failure aborts inside the runtime
 // (memset/deref of a null buffer). Do not rely on graceful recovery.
 
-// Drop (for `impl Drop for String`), Option (for `index`) and the comparison
-// traits come from their modules — no auto-preload, explicit imports.
+// Drop (for `impl Drop for String`), Option (for `index`), the comparison/order
+// traits and Hash (the key traits of the containers) come from their modules —
+// no auto-preload, explicit imports.
 impt drop { Drop };
 impt option { Option };
-impt math { PartialEq, PartialOrd };
+impt math { PartialEq, PartialOrd, Ord };
+impt hash { Hash };
 
 struct String
 {
@@ -188,5 +190,32 @@ impl PartialOrd for String
     fn ge(self: &Self, other: &Self) -> bool
     {
         ret str_cmp(self.to_cstr(), other.to_cstr()) >= 0;
+    }
+}
+
+// TOTAL order: an empty marker impl. String compares through PartialOrd above,
+// and the ordered containers (Map/Set) compare KEYS with `<` / `>`, which is
+// exactly what the Ord bound promises (see math.lis's Ord).
+impl Ord for String
+{
+}
+
+// Hashing (the key protocol of HashMap/HashSet): FNV-1a, 32-bit —
+// `h = (h ^ byte) * 16777619` starting from the FNV offset basis 2166136261,
+// written as its signed i32 value because the literal does not fit an i32.
+// `^` is the language's XOR operator and `*` wraps silently, so this is the
+// textbook algorithm. The bytes come straight from the private buffer.
+impl Hash for String
+{
+    fn hash(self: &Self) -> i32
+    {
+        let mut h = -2128831035;
+        let mut i = 0;
+        while i < self.len
+        {
+            h = (h ^ (self.data[i] as i32)) * 16777619;
+            i = i + 1;
+        }
+        ret h;
     }
 }

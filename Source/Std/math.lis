@@ -98,6 +98,25 @@ trait PartialOrd
     fn ge(self: &Self, other: &Self) -> bool;
 }
 
+// TOTAL order (2026-09-20): a MARKER trait saying "every two keys compare, and
+// they are never both-less and never both-greater" — the invariant a search tree
+// needs. The ordered containers bound their key with it:
+//
+//     impl<K: Ord + PartialOrd, V> Map<K, V> { ... }
+//
+// It carries no `cmp` method on purpose: a method would have to be CALLED on
+// key values, and this language cannot call a trait method on a primitive
+// (`7.cmp(&8)` is "cannot call method on non-struct type 'int32'"). Comparison
+// therefore goes through the `<` / `>` operators, which work for primitives and
+// for a generic parameter bounded by PartialOrd.
+//
+// Primitives (ints/floats/char/bool) are seeded with it by the compiler, like
+// Copy/Numeric; a struct opts in with an empty `impl Ord for T { }` and a real
+// `impl PartialOrd for T` (String does exactly that).
+trait Ord
+{
+}
+
 // Bitwise: `& | ^`. Primitives (ints) auto-implement these.
 trait BitAnd
 {

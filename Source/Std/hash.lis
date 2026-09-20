@@ -1,0 +1,28 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// hash.lis
+//
+// `Hash` — the hashing protocol behind `hashmap.lis`. A key type returns a
+// 32-bit hash of its value; EQUAL keys must hash equally (`k1 == k2` implies
+// `k1.hash() == k2.hash()`). Hashes do not have to be collision-free: the table
+// resolves collisions by comparing keys with `==`.
+//
+//     struct MyKey { pub a: i32 }
+//     impl Hash for MyKey { fn hash(self: &MyKey) -> i32 { ret self.a * 2654435761; } }
+//
+// What implements it (2026-09-20):
+//   - `i32`: seeded by the compiler (a primitive cannot carry a method body) and
+//     lowered to `k * 2654435761` — the standard 32-bit multiplicative hash,
+//     with the language's silent wraparound doing the mixing.
+//   - `String`: implemented in `string.lis` (FNV-1a over the bytes).
+//   - user structs: by hand, as above.
+//   - `i8`/`i16`/`i64`/`char`/`bool`/`f32`/`f64`: NOT yet. `HashMap<i64, V>` is
+//     rejected by the `K: Hash` bound with a clear message; supporting the other
+//     integer widths needs the primitive lowering to emit a widening/narrowing
+//     cast first.
+
+trait Hash
+{
+    fn hash(self: &Self) -> i32;
+}

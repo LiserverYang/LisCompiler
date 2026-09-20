@@ -451,6 +451,73 @@ TEST_F(RuntimeTest, XorOnBoolRejected)
         "requires integer operands");
 }
 
+// ── Ord (marker) and Hash (method): the key protocols of the containers ───────
+//
+// NOTE on naming: these snippets keep their top-level names distinctive
+// (hash_key_of, ord_probe_ok). A user top-level function whose name matches a
+// LOCAL inside a stdlib module is reported as a shadowing conflict today
+// (e.g. "param 'x' shadows a previous definition" out of math.lis) — a
+// pre-existing wart of the no-shadowing rule, tracked separately.
+
+TEST_F(RuntimeTest, HashTraitOnI32UsesTheBuiltinMixing)
+{
+    // A generic body cannot call a method on a primitive, so `k.hash()` with K
+    // instantiated to i32 is lowered by monomorphization to the 32-bit
+    // multiplicative mix `k * 2654435761` (silent wraparound does the mixing).
+    // 7 * 2654435761 mod 2^32 = 1401181143 -> % 100 = 43.
+    expectRun("fn hash_key_of<T: Hash>(key_arg: &T) -> i32 { ret key_arg.hash(); }"
+              " fn main() -> i32 { let probe_key = 7; ret hash_key_of(&probe_key) % 100; }",
+        43);
+}
+
+TEST_F(RuntimeTest, HashTraitOnStringIsFnv1a)
+{
+    // FNV-1a over the bytes: offset basis 2166136261, prime 16777619.
+    // "abc" -> 0x1a47e90b = 440920331. Equal strings must hash equally.
+    expectRun("fn hash_key_of<T: Hash>(key_arg: &T) -> i32 { ret key_arg.hash(); }"
+              " fn main() -> i32 { let probe_a = String::from_lit(\"abc\");"
+              " let probe_b = String::from_lit(\"abc\");"
+              " if hash_key_of(&probe_a) != 440920331 { ret 1; }"
+              " if hash_key_of(&probe_a) != hash_key_of(&probe_b) { ret 2; }"
+              " ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, HashTraitImplementedByUserStruct)
+{
+    // A struct key implements the trait by hand; the call inside the generic
+    // body retargets to that method at monomorphization.
+    expectRun("struct Key { pub a: i32 }"
+              " impl Hash for Key { fn hash(self: &Key) -> i32 { ret self.a ^ 12345; } }"
+              " fn hash_key_of<T: Hash>(key_arg: &T) -> i32 { ret key_arg.hash(); }"
+              " fn main() -> i32 { let probe_k = Key { a: 7 }; ret hash_key_of(&probe_k); }",
+        7 ^ 12345);
+}
+
+TEST_F(RuntimeTest, OrdMarkerTraitAcceptsPrimitivesAndOptedInStructs)
+{
+    // i32 is seeded with Ord; a struct opts in with an empty impl (+ a real
+    // PartialOrd, which is what the ordered containers compare keys with).
+    expectRun("struct K { pub v: i32 } impl Ord for K { }"
+              " impl PartialOrd for K { fn lt(self: &Self, o: &Self) -> bool { ret self.v < o.v; }"
+              "  fn gt(self: &Self, o: &Self) -> bool { ret self.v > o.v; }"
+              "  fn le(self: &Self, o: &Self) -> bool { ret self.v <= o.v; }"
+              "  fn ge(self: &Self, o: &Self) -> bool { ret self.v >= o.v; } }"
+              " fn ord_probe_ok<T: Ord>(arg: &T) -> i32 { ret 5; }"
+              " fn main() -> i32 { let probe_k = K { v: 1 }; let probe_n = 2;"
+              " ret ord_probe_ok(&probe_k) + ord_probe_ok(&probe_n); }",
+        10);
+}
+
+TEST_F(RuntimeTest, HashBoundRejectsUnsupportedKeyWidths)
+{
+    // Hash is seeded on i32 only: the primitive lowering multiplies by an i32
+    // constant, so an i64 key is rejected by the bound (clearly, not silently).
+    expectCompileFail("fn hash_key_of<T: Hash>(key_arg: &T) -> i32 { ret key_arg.hash(); }"
+                      " fn main() -> i32 { let probe_big = 5 as i64; ret hash_key_of(&probe_big); }",
+        "didn't implement the trait constraint");
+}
+
 TEST_F(RuntimeTest, OpOverloadBitXor)
 {
     expectRun("struct M { pub x: i32 } impl BitXor for M { fn bitxor(self, o: Self) -> M {"

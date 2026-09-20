@@ -1811,8 +1811,16 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
     //   Copy : every primitive (a generic container needs `T: Copy` to be able
     //          to read an element through a reference at all — see
     //          Type::isCopyable).
+    //   Ord  : like PartialOrd (2026-09-20) — a total order, used as the key
+    //          bound of the ordered containers. Unlike Numeric/Integer it is
+    //          NOT primitives-only: a struct opts in with an empty impl.
+    //   Hash : i32 ONLY (2026-09-20). The generic body's `k.hash()` is lowered
+    //          for a primitive in MIRMonomorphization (see the lowering table
+    //          there); that lowering multiplies by an i32 constant, so any wider
+    //          key would need a cast it does not emit yet.
     if (displayName(node->name) == "Numeric" || displayName(node->name) == "Integer"
-        || displayName(node->name) == "Copy" || isOperatorTrait(displayName(node->name)))
+        || displayName(node->name) == "Copy" || displayName(node->name) == "Ord"
+        || displayName(node->name) == "Hash" || isOperatorTrait(displayName(node->name)))
     {
         auto traitTy = std::static_pointer_cast<TraitType>(sym->type);
         auto seed = [&](PrimitiveType::PrimKind k)
@@ -1828,9 +1836,11 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
         bool isArith = (n == "Add" || n == "Sub" || n == "Mul" || n == "Div" || n == "Rem");
         bool isBitwise = (n == "BitAnd" || n == "BitOr" || n == "BitXor" || n == "Shl" || n == "Shr");
         bool isCopyMarker = (n == "Copy");
+        bool isOrd = (n == "Ord");
+        bool isHash = (n == "Hash");
 
         // ints get every family (Numeric/Integer markers + all operator traits).
-        if (isNumeric || isInteger || isCmp || isArith || isBitwise || isCopyMarker)
+        if (isNumeric || isInteger || isCmp || isArith || isBitwise || isCopyMarker || isOrd)
         {
             seed(PrimitiveType::PrimKind::I8);
             seed(PrimitiveType::PrimKind::I16);
@@ -1838,15 +1848,18 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
             seed(PrimitiveType::PrimKind::I64);
         }
         // floats get Numeric + arithmetic + comparison, NOT Integer / bitwise.
-        if (isNumeric || isCmp || isArith || isCopyMarker)
+        if (isNumeric || isCmp || isArith || isCopyMarker || isOrd)
         {
             seed(PrimitiveType::PrimKind::F32);
             seed(PrimitiveType::PrimKind::F64);
         }
-        if (isNumeric || isCmp || isCopyMarker)
+        if (isNumeric || isCmp || isCopyMarker || isOrd)
             seed(PrimitiveType::PrimKind::CHAR); // char compares via i32
-        if (isCmp || isCopyMarker)
+        if (isCmp || isCopyMarker || isOrd)
             seed(PrimitiveType::PrimKind::BOOL); // == / < work on bool
+        // Hash: i32 only (see the rules above).
+        if (isHash)
+            seed(PrimitiveType::PrimKind::I32);
     }
 
     isInTraitMethod = false;

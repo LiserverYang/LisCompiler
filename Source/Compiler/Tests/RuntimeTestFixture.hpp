@@ -66,7 +66,8 @@ namespace
 /// longer auto-preloaded — selective imports promote the public API's bare
 /// names (the internal names stay `math$max` etc.).
 static const char *kStdlibPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
+    "impt hash { Hash };\n"
     "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
     "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
     "impt string { String };\n"
@@ -89,7 +90,7 @@ static const char *kResultPrologue =
     "impt drop { Drop };\n";
 
 static const char *kMathPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
 
 /// Exit status of a child process that reached the builtin panic: libc
 /// abort(). UCRT maps its __fastfail(FAST_FAIL_FATAL_APP_EXIT) to 0xC0000409;
@@ -399,8 +400,23 @@ protected:
     /// before it runs.
     int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr, std::string *err = nullptr)
     {
-        std::string linkCmd = "g++ -o \"" + exePath.string() + "\" \"" + objPath.string() + "\"";
-        if (std::system(linkCmd.c_str()) != 0)
+        // Link with a RETRY on a fresh output name. Under the 8-shard run an
+        // indexer/AV can still hold the executable ld just wrote the previous
+        // time and the link dies with
+        //     ld.exe: reopening F:\...\lis_rt_<pid>_<n>.exe: Permission denied
+        // which surfaced as a random single-test failure (seen on
+        // ResultUnwrapAndExpect and a handful of linkAndRun-only float tests).
+        // Retrying the SAME path can hit the same lock, so each attempt gets its
+        // own name; exePath is updated so TearDown removes what actually exists.
+        bool linked = false;
+        for (int attempt = 0; attempt < 3 && !linked; ++attempt)
+        {
+            if (attempt > 0)
+                exePath = fs::path(exePath.string() + ".r" + std::to_string(attempt));
+            std::string linkCmd = "g++ -o \"" + exePath.string() + "\" \"" + objPath.string() + "\"";
+            linked = std::system(linkCmd.c_str()) == 0;
+        }
+        if (!linked)
             return -1;
 #ifdef _WIN32
         // Redirect the child's stdout to a pipe so the caller can read it back.
