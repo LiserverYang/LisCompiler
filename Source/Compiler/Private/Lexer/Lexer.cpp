@@ -595,6 +595,7 @@ single_char:
     // in the member-access suffix chain, so it needs no binary precedence entry.
     case '?': token.code = TokenCode::QUESTION; break;
     case '|': token.code = TokenCode::BOR; break;
+    case '^': token.code = TokenCode::CARET; break;
     case '[': token.code = TokenCode::LBRACKET; break;
     case ']': token.code = TokenCode::RBRACKET; break;
     default: // unknown character

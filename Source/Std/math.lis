@@ -109,13 +109,16 @@ trait BitOr
     fn bitor(self, other: Self) -> Self;
 }
 
-// KNOWN LIMITATION (P13): `BitXor`, `Shl`, `Shr` have no infix operator syntax
-// — the lexer has no `^` / `<<` / `>>` tokens, so `a ^ b` and `a << b` cannot
-// be written. The traits below are still useful: primitives auto-implement them
-// and a generic bound `T: BitXor` / `T: Shl` works, with the concrete method
-// (`bitxor` / `shl` / `shr`) callable directly. They exist so the compiler's
-// operator-overload machinery stays complete; do not try to write `^`/`<<`/`>>`
-// in source.
+// `^`: infix XOR (2026-09-19). The lexer has a `^` token and the parser gives
+// it a level between `&` and `|`, so `a ^ b` works for integer primitives and
+// for a struct implementing this trait.
+//
+// KNOWN LIMITATION (P13, shifts only): `Shl` / `Shr` have NO infix syntax — the
+// lexer has no `<<` / `>>` tokens, so `a << b` cannot be written. The traits are
+// still useful: primitives auto-implement them and a generic bound `T: Shl`
+// works, with the concrete method (`shl` / `shr`) callable directly. They exist
+// so the compiler's operator-overload machinery stays complete; do not try to
+// write `<<`/`>>` in source.
 trait BitXor
 {
     fn bitxor(self, other: Self) -> Self;

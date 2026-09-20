@@ -856,7 +856,8 @@ TEST_F(LexerTest, UnknownCharsStillLexAround)
     EXPECT_EQ(context->tokenStream[2].value, "b");
 }
 
-// `~` is the bitwise-complement OPERATOR now (2026-09-19); `^` is still unknown.
+// `~` is the bitwise-complement OPERATOR (2026-09-19) and `^` became the XOR
+// TOKEN (2026-09-20) — it used to be an "Unknown character" lexer error.
 TEST_F(LexerTest, TildeIsBitComplementToken)
 {
     runLexer("~");
@@ -864,10 +865,11 @@ TEST_F(LexerTest, TildeIsBitComplementToken)
     expectToken(0, TokenCode::TILDE, "~", 1, 1);
 }
 
-TEST_F(LexerTest, CaretIsUnknownChar)
+TEST_F(LexerTest, CaretIsXorToken)
 {
     runLexer("^");
-    EXPECT_GT(Logger::GetErrorCount(), 0);
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+    expectToken(0, TokenCode::CARET, "^", 1, 1);
 }
 
 TEST_F(LexerTest, UnclosedStringThenMoreTokens)

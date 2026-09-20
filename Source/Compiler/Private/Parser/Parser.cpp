@@ -1535,39 +1535,44 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(int minPrecedence)
 
 int Parser::getPrecedence(TokenCode type)
 {
-    // KNOWN LIMITATION (P13): there is no token for `^`, `<<`, or `>>` — the
-    // lexer reports `^` as an unknown character and `<<`/`>>` lex as two separate
-    // `<`/`>` tokens. Consequently a HIRBinaryOp with OpKind BitXor/ShiftLeft/
-    // ShiftRight can never be produced from source syntax; those opKinds exist
-    // only so the operator-overload traits BitXor/Shl/Shr can lower a struct's
-    // `bitxor`/`shl`/`shr` method calls, and for the codegen's completeness.
-    // This is deliberate — do not add precedence entries for operators the
+    // `^` (XOR) is tokenized and has its own level between `&` and `|` — the
+    // C/Rust ordering. The levels are spaced by one so a new operator can be
+    // slotted in without renumbering the rest.
+    //
+    // KNOWN LIMITATION (P13, still true for shifts): there is no token for
+    // `<<` or `>>` — they lex as two separate `<`/`>` tokens. Consequently a
+    // HIRBinaryOp with OpKind ShiftLeft/ShiftRight can never be produced from
+    // source syntax; those opKinds exist only so the operator-overload traits
+    // Shl/Shr can lower a struct's `shl`/`shr` method calls, and for the
+    // codegen's completeness. Do not add precedence entries for operators the
     // lexer cannot tokenize (they would be dead code).
     switch (type)
     {
     case TokenCode::STAR:
     case TokenCode::SLASH:
     case TokenCode::MOD:
-        return 8;
+        return 10;
     case TokenCode::PLUS:
     case TokenCode::MINUS:
-        return 7;
+        return 9;
     case TokenCode::LT:
     case TokenCode::LT_EQ:
     case TokenCode::GT:
     case TokenCode::GT_EQ:
-        return 6;
+        return 8;
     case TokenCode::EQ_EQ:
     case TokenCode::NOT_EQ:
-        return 5;
+        return 7;
     case TokenCode::REFERENCE:
-        return 4;
+        return 6;
+    case TokenCode::CARET:
+        return 5;
     case TokenCode::BOR:
-        return 3;
+        return 4;
     case TokenCode::AND:
-        return 2;
+        return 3;
     case TokenCode::OR:
-        return 1;
+        return 2;
     default:
         return 0;
     }

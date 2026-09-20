@@ -1248,13 +1248,15 @@ void HIRBuilder::visit(BinaryOp *node)
         result->opKind = HIRBinaryOp::OpKind::ShiftLeft;
     else if (node->op == ">>")
         result->opKind = HIRBinaryOp::OpKind::ShiftRight;
-    // KNOWN LIMITATION (P13): the `^`, `<<`, `>>` branches above are
-    // unreachable from source — the lexer has no tokens for them (`^` is an
-    // "Unknown character" error, `<<`/`>>` lex as two `<`/`>` tokens) and
-    // getPrecedence() has no entries. They are kept so the mapping is complete
-    // for the operator-overload traits (BitXor/Shl/Shr lower *method* calls,
-    // never an infix `^`) and for anyone constructing HIR directly. Do not
-    // treat them as supported syntax.
+    // `^` (BitXor) IS reachable from source (2026-09-19): the lexer has a
+    // TokenCode::CARET and getPrecedence() gives it a level between `&` and `|`.
+    //
+    // KNOWN LIMITATION (P13, shifts only): the `<<` and `>>` branches are
+    // unreachable — the lexer has no tokens for them (they lex as two `<`/`>`
+    // tokens) and getPrecedence() has no entries. They are kept so the mapping is
+    // complete for the operator-overload traits (Shl/Shr lower *method* calls)
+    // and for anyone constructing HIR directly. Do not treat shifts as
+    // supported syntax.
     else
     {
         // Unreachable through the normal parser path, but don't silently

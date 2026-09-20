@@ -89,6 +89,7 @@ enum class TokenCode
     SLASH_ASSIGN, // "/="
     MOD_ASSIGN,   // "%="
     BOR,          // |
+    CARET,        // ^
     OR,           // ||
     AND,          // &&
     QUESTION,     // "?" — postfix error propagation (expr?), never a binary operator

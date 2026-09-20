@@ -417,6 +417,48 @@ TEST_F(RuntimeTest, BitOrAssociativity)
     expectRun("fn main() -> i32 { ret 1 | 2 | 4; }", 7);
 }
 
+// ── `^` (XOR): the infix operator added 2026-09-19 ─────────────────────────────
+
+TEST_F(RuntimeTest, XorBasic)
+{
+    expectRun("fn main() -> i32 { ret 6 ^ 3; }", 5);
+}
+
+TEST_F(RuntimeTest, XorAssociativity)
+{
+    // 6 ^ 3 = 5, 5 ^ 1 = 4.
+    expectRun("fn main() -> i32 { ret 6 ^ 3 ^ 1; }", 4);
+}
+
+TEST_F(RuntimeTest, XorPrecedenceBetweenAndAndOr)
+{
+    // C/Rust precedence: `&` binds tighter than `^`, `^` tighter than `|`.
+    // With the correct order: 3 & 1 = 1, 2 ^ 1 = 3, 1 | 3 = 3.
+    // `^` looser than `|` would give (1|2) ^ (3&1) = 3 ^ 1 = 2; `^` tighter
+    // than `&` would give 1 | ((2^3) & 1) = 1 | 1 = 1 — both distinguishable.
+    expectRun("fn main() -> i32 { ret 1 | 2 ^ 3 & 1; }", 3);
+}
+
+TEST_F(RuntimeTest, XorSelfIsZero)
+{
+    expectRun("fn main() -> i32 { let x = 12345; ret x ^ x; }", 0);
+}
+
+TEST_F(RuntimeTest, XorOnBoolRejected)
+{
+    // Bitwise operators are integer-only (bool is not an Integer).
+    expectCompileFail("fn main() -> i32 { let a = true; let b = false; let c = a ^ b; ret 0; }",
+        "requires integer operands");
+}
+
+TEST_F(RuntimeTest, OpOverloadBitXor)
+{
+    expectRun("struct M { pub x: i32 } impl BitXor for M { fn bitxor(self, o: Self) -> M {"
+              " ret M { x: self.x ^ o.x }; } }"
+              " fn main() -> i32 { let a = M { x: 6 }; let b = M { x: 3 }; let c = a ^ b; ret c.x; }",
+        5);
+}
+
 // ── B: enums and match ─────────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, EnumUnitDispatchValue)
