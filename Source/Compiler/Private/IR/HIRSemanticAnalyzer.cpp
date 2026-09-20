@@ -4876,7 +4876,11 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         auto callee = std::make_unique<HIRNameRef>();
         callee->name = funcName;
         callee->symbol = SymbolTable::getInstance().lookupSymbol(funcName);
-        if (callee->symbol) callee->type = callee->symbol->type;
+        // Same as the Method branch: the symbol is the generic DEFINITION, so its
+        // type still mentions the function's own parameters ("fn<T>(Option<T>) ->
+        // bool" for is_none). Mono substitutes with the CALLER's table, which has
+        // no T, and threw "Generic parameter 'T' not found in substitution map".
+        if (callee->symbol) callee->type = instantiatedFuncType ? instantiatedFuncType : callee->symbol->type;
         node->callee = std::move(callee);
         break;
     }
