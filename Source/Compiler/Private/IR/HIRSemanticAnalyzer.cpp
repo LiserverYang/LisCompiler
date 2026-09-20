@@ -4597,7 +4597,14 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         }
         else
         {
-            node->typedGenericParams = structArgs;
+            // A receiver that IS the generic definition (a sibling call inside
+            // 'impl Map', whose self type is the bare 'Map') reports NO
+            // getGenericArgs(); its arguments are the definition's own
+            // parameters, which is what definitionArgs holds. Without them the
+            // MIR call keeps the un-monomorphized name and the link fails with
+            // "undefined reference to map$Map::insertFixup".
+            auto callStructArgs = structArgs.empty() && !definitionArgs.empty() ? definitionArgs : structArgs;
+            node->typedGenericParams = callStructArgs;
             instantiatedFuncType = newTy;
         }
 
