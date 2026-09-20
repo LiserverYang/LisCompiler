@@ -4675,7 +4675,15 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         auto callee = std::make_unique<HIRNameRef>();
         callee->name = funcName;
         callee->symbol = SymbolTable::getInstance().lookupSymbol(funcName);
-        if (callee->symbol) callee->type = callee->symbol->type;
+        // The callee carries the INSTANTIATED signature, not the definition's.
+        // The method symbol is keyed on the struct's ORIGIN name, so its type
+        // still mentions the struct's own parameters ("fn<T>(&mut Arena<T>, i32)
+        // -> T" for Arena::take). Monomorphization substitutes with the CALLER's
+        // table, and when the struct's argument is itself a parameter
+        // (self.keys.take(i) with keys: Arena<K>) that table has K/V but no T —
+        // the stale T used to reach the Mono pass and throw "Generic parameter
+        // 'T' not found in substitution map".
+        if (callee->symbol) callee->type = instantiatedFuncType ? instantiatedFuncType : callee->symbol->type;
         node->callee = std::move(callee);
         break;
     }
