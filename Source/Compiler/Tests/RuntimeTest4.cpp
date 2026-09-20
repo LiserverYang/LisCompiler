@@ -518,6 +518,21 @@ TEST_F(RuntimeTest, HashBoundRejectsUnsupportedKeyWidths)
         "didn't implement the trait constraint");
 }
 
+TEST_F(RuntimeTest, SiblingCallInGenericStructLinks)
+{
+    // A method of a generic struct calling a SIBLING method receives 'self' of
+    // the bare DEFINITION type, which reports no generic arguments. The call was
+    // recorded without the struct's own parameters, so monomorphization skipped
+    // the instantiation and the program compiled but failed to LINK
+    // ("undefined reference to ...::helper"). expectRunProc is the path that
+    // links — the in-process MCJIT path would not catch it.
+    expectRunProc("struct Box<K: Ord + PartialOrd, V> { pub k: K, pub v: V, pub n: i32 }"
+                  " impl Box { fn helper(self: &Box) -> i32 { ret self.n; }"
+                  "             fn outer(self: &Box) -> i32 { ret self.helper() + 1; } }"
+                  " fn main() -> i32 { let b = Box { k: 1, v: 2, n: 3 }; ret b.outer(); }",
+        4);
+}
+
 TEST_F(RuntimeTest, OpOverloadBitXor)
 {
     expectRun("struct M { pub x: i32 } impl BitXor for M { fn bitxor(self, o: Self) -> M {"
