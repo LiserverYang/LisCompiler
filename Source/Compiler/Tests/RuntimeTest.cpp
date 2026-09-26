@@ -1243,3 +1243,25 @@ TEST_F(RuntimeTest, TryOperatorRequiresMatchingErrorType)
 // The end-to-end in-process path (compile a Lis snippet, JIT it, run it) is what
 // expectRun/expectOutput do for ~500 cases; the trivial module above covers the
 // JIT plumbing on its own.
+
+// A GENERIC FREE function called from a GENERIC struct's method body has to bind
+// the callee to its INSTANTIATED signature. visit(HIRCall)'s Regular branch used
+// to leave the DEFINITION's type on the callee ("fn<U>(Option<U>) -> bool") while
+// monomorphization rewrites that operand with the CALLER's table ({K} here), so
+// the unsubstituted U reached TypeContext::substitute and the compiler died with
+// "Generic parameter 'U' not found in substitution map". Found through set.lis
+// (Set::insert<K> calls is_none); the Method and Static branches had carried the
+// retarget since 2026-09-20, the free-function branch had not.
+TEST_F(RuntimeTest, GenericFreeFunctionCallInsideGenericMethod)
+{
+    // (The parameter names must differ — 'U' in the callee, 'K' in the caller —
+    // or the caller's table would satisfy the callee's parameter by accident.
+    // The real case was set.lis: Set<K>::insert calling option's is_none<T>.)
+    expectRun("fn myIsNone<U>(o: Option<U>) -> bool { ret is_none(o); }\n"
+              "fn wrapped<K>(o: Option<K>) -> bool { ret myIsNone(o); }\n"
+              "fn main() -> i32 {\n"
+              "    if wrapped(Option::Some(7)) { ret 1; }\n"
+              "    if myIsNone(Option::Some(9)) { ret 2; }\n"
+              "    ret 0; }\n",
+        0);
+}

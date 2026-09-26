@@ -2265,7 +2265,28 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         if (nr->name == "__drop")
         {
             if (!call->args.empty())
-                emitDrop(buildExpr(call->args[0].get()));
+            {
+                MIRPlace dropped = buildExpr(call->args[0].get());
+                emitDrop(dropped);
+
+                // `__drop(x)` CONSUMES the value at x (2026-09-26). emitDrop()
+                // released it, but a whole local is still on the scope-end sweep's
+                // owned list, so without this ownership hand-off every such value
+                // was destroyed TWICE. map.lis is where it became visible:
+                //     let key = self.keys.take(i);  __drop(key);
+                // double-freed every key/value as soon as K or V had a destructor
+                // (Map<i32, String>::clear, Map<String, i32>::remove, ...) and
+                // corrupted the heap, while the all-i32 case silently survived
+                // because a primitive drop compiles to nothing. MIRBorrowCheck
+                // already treats MIRStmtDrop as a move, so a later use of x is
+                // E3005; this is the builder's half of the same fact. A later
+                // `x = value` re-arms the local (emitAssign erases the mark).
+                if (dropped.base == PlaceBase::Local && dropped.projections.empty())
+                {
+                    movedLocals_.insert(dropped.index);
+                    partiallyMovedFields_.erase(dropped.index);
+                }
+            }
             return makeTempPlace(context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID));
         }
     }

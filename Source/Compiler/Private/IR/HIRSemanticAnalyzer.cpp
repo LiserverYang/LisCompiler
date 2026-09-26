@@ -4532,6 +4532,20 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             /*explainUninferredGeneric=*/true);
         // 设置返回值类型为实例化后的类型
         node->type = instantiatedFuncType->getReturnType();
+
+        // The callee must carry the INSTANTIATED signature (2026-09-26). The
+        // symbol is the generic DEFINITION, so analyzeExpr(node->callee) — i.e.
+        // visit(HIRNameRef) — stamped the definition's type onto it
+        // ("fn<T>(Option<T>) -> bool" for is_none). Monomorphization rewrites the
+        // callee operand with the CALLER's table, and when the call sits in a
+        // generic struct's method body that table holds only that struct's params
+        // (set$Set::insert<K> → {K}), so the stale T threw "Generic parameter 'T'
+        // not found in substitution map". The Method and Static branches have
+        // carried this retarget since 2026-09-20; the free-function branch was
+        // missed, which left Set/HashMap (both call is_none from a generic method
+        // body) uncompilable.
+        if (node->callee && instantiatedFuncType)
+            node->callee->type = instantiatedFuncType;
         break;
     }
 
