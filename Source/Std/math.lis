@@ -291,3 +291,179 @@ fn lerp(a: f64, b: f64, t: f64) -> f64
 {
     ret a + (b - a) * t;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 浮点数学（2026-09-26）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 纯 Lis，不依赖 libm（语言还没有 extern/FFI）。精度与 libm 同量级（相对误差
+// ~1e-16）：
+//   * sqrt             归一化到 [1, 4) + 牛顿迭代（二次收敛）
+//   * floor/ceil/round 建立在 trunc 上（用到 f64 -> i64 的 cast）
+//   * cos/sin/tan      区间归约 + 泰勒展开
+//
+// 全部按 f64 计算；floor/ceil/round/trunc 的定义域是 |x| < 2^63（超界的
+// f64 -> i64 转换与 C 一样是未定义的）。
+
+// 圆周率与它的两个常用倍数（全局初始化器必须是字面量，所以写成算好的常量）。
+let PI: f64 = 3.141592653589793;
+let TWO_PI: f64 = 6.283185307179586;
+let HALF_PI: f64 = 1.5707963267948966;
+
+// 向零截断（C 的 `(int)x`）。
+fn trunc(x: f64) -> f64
+{
+    ret (x as i64) as f64;
+}
+
+// 向下取整（<= x 的最大整数）。
+fn floor(x: f64) -> f64
+{
+    let t = trunc(x);
+    if x < 0.0 && t != x {
+        ret t - 1.0;
+    }
+    ret t;
+}
+
+// 向上取整（>= x 的最小整数）。
+fn ceil(x: f64) -> f64
+{
+    let t = trunc(x);
+    if x > 0.0 && t != x {
+        ret t + 1.0;
+    }
+    ret t;
+}
+
+// 四舍五入；恰为 .5 时远离零（与 C 的 round 一致）。
+fn round(x: f64) -> f64
+{
+    if x < 0.0 {
+        ret 0.0 - floor((0.0 - x) + 0.5);
+    }
+    ret floor(x + 0.5);
+}
+
+// 小数部分（x - trunc(x)，符号跟随 x）。
+fn fract(x: f64) -> f64
+{
+    ret x - trunc(x);
+}
+
+// 平方根。把 x 归一化到 [1, 4)（成对乘除 4，缩放因子同步成对乘除 2），于是
+// 初值 1.0 与真值最多差一倍；牛顿迭代 r <- (r + y/r) / 2 每步平方误差，6 步
+// 就到 1e-16 以下。缩放因子是 2 的幂，乘回去不丢精度。
+fn sqrt(x: f64) -> f64
+{
+    if x < 0.0 {
+        panic("sqrt of a negative number");
+    }
+    if x == 0.0 {
+        ret 0.0;
+    }
+
+    let mut y = x;
+    let mut scale = 1.0;
+    while y >= 4.0
+    {
+        y = y / 4.0;
+        scale = scale * 2.0;
+    }
+    while y < 1.0
+    {
+        y = y * 4.0;
+        scale = scale / 2.0;
+    }
+
+    let mut r = 1.0;
+    let mut i = 0;
+    while i < 6
+    {
+        r = (r + y / r) * 0.5;
+        i = i + 1;
+    }
+    ret r * scale;
+}
+
+// 把角度归约到 [0, 2*pi)：f64 的 % 是截断余数（frem），负的再加一个周期。
+fn wrap2pi(x: f64) -> f64
+{
+    let mut r = x % TWO_PI;
+    if r < 0.0 {
+        r = r + TWO_PI;
+    }
+    ret r;
+}
+
+// |x| <= pi/2 时的 cos 泰勒展开（12 项：x^24/24! < 1e-19）。
+fn cos_taylor(x: f64) -> f64
+{
+    let x2 = x * x;
+    let mut term = 1.0;
+    let mut acc = 1.0;
+    let mut k = 1;
+    while k <= 12
+    {
+        term = 0.0 - term * x2 / (((2 * k - 1) * (2 * k)) as f64);
+        acc = acc + term;
+        k = k + 1;
+    }
+    ret acc;
+}
+
+// |x| <= pi/2 时的 sin 泰勒展开。
+fn sin_taylor(x: f64) -> f64
+{
+    let x2 = x * x;
+    let mut term = x;
+    let mut acc = x;
+    let mut k = 1;
+    while k <= 12
+    {
+        term = 0.0 - term * x2 / (((2 * k) * (2 * k + 1)) as f64);
+        acc = acc + term;
+        k = k + 1;
+    }
+    ret acc;
+}
+
+// 余弦。四象限归约后用泰勒：cos(pi - t) = -cos(t)，cos(t + pi) = -cos(t)，
+// cos(2pi - t) = cos(t)。
+fn cos(x: f64) -> f64
+{
+    let r = wrap2pi(x);
+    if r < HALF_PI {
+        ret cos_taylor(r);
+    }
+    if r < PI {
+        ret 0.0 - cos_taylor(PI - r);
+    }
+    if r < PI + HALF_PI {
+        ret 0.0 - cos_taylor(r - PI);
+    }
+    ret cos_taylor(TWO_PI - r);
+}
+
+// 正弦。sin(pi - t) = sin(t)，sin(t + pi) = -sin(t)，sin(2pi - t) = -sin(t)。
+fn sin(x: f64) -> f64
+{
+    let r = wrap2pi(x);
+    if r < HALF_PI {
+        ret sin_taylor(r);
+    }
+    if r < PI {
+        ret sin_taylor(PI - r);
+    }
+    if r < PI + HALF_PI {
+        ret 0.0 - sin_taylor(r - PI);
+    }
+    ret 0.0 - sin_taylor(TWO_PI - r);
+}
+
+// 正切（cos 为 0 时结果是 ±inf，与 libm 一致）。
+fn tan(x: f64) -> f64
+{
+    ret sin(x) / cos(x);
+}
+

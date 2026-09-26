@@ -6,31 +6,32 @@
 
 impt math { abs, clamp, max, min };
 
+impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };
 fn main() -> i32
 {
-    print_str("hello");
-    print_char(' ');
-    print_str("world");
+    print("hello");
+    print(' ');
+    print("world");
     println();
 
-    print_int(42);
+    print(42);
     println();
-    print_float(3.14);
+    print(3.14);
     println();
-    print_bool(true);
+    print(true);
     println();
 
-    print_str("min(3,7)=");
-    print_int(min(3, 7));
+    print("min(3,7)=");
+    print(min(3, 7));
     println();
-    print_str("max(3,7)=");
-    print_int(max(3, 7));
+    print("max(3,7)=");
+    print(max(3, 7));
     println();
-    print_str("abs(-5)=");
-    print_int(abs(0 - 5));
+    print("abs(-5)=");
+    print(abs(0 - 5));
     println();
-    print_str("clamp(12,0,10)=");
-    print_int(clamp(12, 0, 10));
+    print("clamp(12,0,10)=");
+    print(clamp(12, 0, 10));
     println();
 
     ret 0;

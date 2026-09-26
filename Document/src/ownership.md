@@ -15,7 +15,7 @@ Lis 的所有权模型继承自 Rust：每个值有唯一所有者，移动是�
 ```lis
 let a = String::new();
 let b = a;          // 移动 a → b
-// print_str(a.to_cstr());  // 错误:use of moved value: 'a'
+// print(a.to_cstr());     // 错误:use of moved value: 'a'
 ```
 
 ## 移动语义细节

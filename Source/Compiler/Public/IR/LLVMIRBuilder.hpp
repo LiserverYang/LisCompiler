@@ -192,33 +192,15 @@ private:
     llvm::Function *getOrDeclareFn(const std::string &name);
     std::string mangleName(const MIRFunction &fn) const;
 
-    /// Builtin print: declare `printf(i32(ptr, ...))` once.
+    /// Declare `printf(i32(ptr, ...))` once. Still needed by the Display
+    /// lowering for the primitives (`__show_*`); the print_* builtins that used
+    /// it are gone — printing is stdlib code now.
     llvm::Function *getOrDeclarePrintf();
-    /// Lower a builtin print call (`print_str/int/float/bool/char`, `println`) to
-    /// a libc printf call.
-    void emitPrintCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
-    /// True if `name` is a builtin print function.
-    bool isPrintBuiltin(const std::string &name);
-
-    /// Builtin input: declare the libc functions used by the read builtins
-    /// (`fgets`/`strcspn`/`atoi`/`strtod`) and the stdin FILE* source once.
-    llvm::Function *getOrDeclareFgets();
-    llvm::Function *getOrDeclareStrCspn();
-    llvm::Function *getOrDeclareAtoi();
-    llvm::Function *getOrDeclareStrtod();
-    /// MinGW/UCRT defines `stdin` as `__acrt_iob_func(0)` (a function, not a
-    /// global) — get the FILE* through it there; fall back to the `@stdin`
-    /// external global on other libcs.
+    /// MinGW/UCRT defines the standard streams as `__acrt_iob_func(fd)` (a
+    /// function, not a data symbol) — get a FILE* through it there; fall back to
+    /// the `@stdin` / `@stdout` external globals on other libcs.
     llvm::Function *getOrDeclareAcrtIobFunc();
     llvm::GlobalVariable *getOrDeclareStdin();
-    /// The shared 256-byte input buffer (`read_line`/`read_int`/`read_f64`
-    /// read here; each call overwrites the previous line).
-    llvm::GlobalVariable *getOrCreateInputBuf();
-    /// Lower a builtin input call (`read_line` → &i8, `read_int` → i32,
-    /// `read_f64` → f64) to libc fgets + parse.
-    void emitInputCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
-    /// True if `name` is a builtin input function.
-    bool isInputBuiltin(const std::string &name);
 
     /// Builtin heap: declare `malloc`/`free`/`memcpy`/`strlen` with real
     /// signatures and lower `__alloc`/`__free`/`__memcpy`/`__strlen` to them.
@@ -273,6 +255,30 @@ private:
     /// strcmp. `str_eq` (the `&i8 == &i8` lowering) is strcmp(a, b) == 0.
     bool isStrBuiltin(const std::string &name);
     void emitStrBuiltinCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+
+    /// IO primitives (`__read_byte` / `__write` / `__flush`): the byte stream the
+    /// standard library's `io` module is built on, lowered to libc fgetc / fwrite
+    /// / fflush over stdin / stdout. Everything user-visible (tokens, numbers,
+    /// lines, print/println) is Lis code in Source/Std/io.lis.
+    bool isIoBuiltin(const std::string &name);
+    void emitIoCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
+    llvm::Function *getOrDeclareFgetc();
+    llvm::Function *getOrDeclareFwrite();
+    llvm::Function *getOrDeclareFflush();
+    /// FILE* for stdin / stdout (MinGW/UCRT resolves them through
+    /// __acrt_iob_func, other libcs export data symbols).
+    llvm::Value *getStdinFilePtr();
+    llvm::Value *getStdoutFilePtr();
+    /// Flush stdout. Called before every abort, so a panic or a bounds check does
+    /// not swallow the output a program already produced.
+    void emitFlushStdout();
+
+    /// The compiler-generated `Display` lowering for the primitives. A primitive
+    /// cannot carry a method body, so monomorphization retargets `<i32>::show`
+    /// to `__show_i32` and the backend prints it (printf with the type's
+    /// format). User types implement `Display` in Lis instead.
+    bool isShowBuiltin(const std::string &name);
+    void emitShowCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args);
 
     /// Get-or-declare an external libc function. If `name` already exists in
     /// the module but with a DIFFERENT type, report an internal error (a user

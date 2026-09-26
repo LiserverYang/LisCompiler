@@ -84,9 +84,54 @@ TEST_F(RuntimeTest, EnumMatchNonCopyPayload)
 
 TEST_F(RuntimeTest, PrintFloatAndBool)
 {
-    expectOutput("fn main() -> i32 { print_float(3.5); println(); print_bool(true); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(3.5); println(); print(true); println(); ret 0; }",
         "3.500000\n1\n",
         0);
+}
+
+TEST_F(RuntimeTest, MathSqrt)
+{
+    // New in 2026-09-26: math had no sqrt (and no way at all to get an integer
+    // out of an f64 until the float->int cast landed).
+    expectOutput("fn main() -> i32 { print(sqrt(2.0)); ret 0; }", "1.414214", 0);
+    expectOutput("fn main() -> i32 { print(sqrt(2.0) * sqrt(2.0)); ret 0; }", "2.000000", 0);
+    expectOutput("fn main() -> i32 { print(sqrt(0.0)); ret 0; }", "0.000000", 0);
+    expectOutput("fn main() -> i32 { print(sqrt(1e10)); ret 0; }", "100000.000000", 0);
+}
+
+TEST_F(RuntimeTest, MathFloorCeilRoundTrunc)
+{
+    // Each of them must be right on the NEGATIVE side too — that is where a
+    // naive trunc-based implementation goes wrong.
+    expectOutput("fn main() -> i32 { print(floor(2.5)); print(' '); print(floor(0.0 - 2.5)); ret 0; }",
+        "2.000000 -3.000000", 0);
+    expectOutput("fn main() -> i32 { print(ceil(2.5)); print(' '); print(ceil(0.0 - 2.5)); ret 0; }",
+        "3.000000 -2.000000", 0);
+    expectOutput("fn main() -> i32 { print(round(2.5)); print(' '); print(round(0.0 - 2.5)); ret 0; }",
+        "3.000000 -3.000000", 0);
+    expectOutput("fn main() -> i32 { print(trunc(2.9)); print(' '); print(trunc(0.0 - 2.9)); ret 0; }",
+        "2.000000 -2.000000", 0);
+    expectOutput("fn main() -> i32 { print(fract(2.25)); ret 0; }", "0.250000", 0);
+}
+
+TEST_F(RuntimeTest, MathCosSinTan)
+{
+    // Range reduction + Taylor, so the quadrant boundaries are what to pin.
+    expectOutput("fn main() -> i32 { print(cos(0.0)); ret 0; }", "1.000000", 0);
+    expectOutput("fn main() -> i32 { print(sin(PI / 2.0)); ret 0; }", "1.000000", 0);
+    expectOutput("fn main() -> i32 { print(cos(PI)); ret 0; }", "-1.000000", 0);
+    expectOutput("fn main() -> i32 { print(tan(PI / 4.0)); ret 0; }", "1.000000", 0);
+}
+
+TEST_F(RuntimeTest, MathPiConstant)
+{
+    expectOutput("fn main() -> i32 { print(PI); ret 0; }", "3.141593", 0);
+}
+
+TEST_F(RuntimeTest, MathSqrtNegativePanics)
+{
+    // abort() path: must not run in the JIT.
+    expectPanic("fn main() -> i32 { let x = sqrt(0.0 - 1.0); ret 0; }", "sqrt of a negative number");
 }
 
 TEST_F(RuntimeTest, MathMinMaxFloat)
@@ -137,7 +182,7 @@ TEST_F(RuntimeTest, ReadLine)
 {
     // read_line strips the trailing newline.
     expectOutputWithInput(
-        "fn main() -> i32 { let line = read_line(); print_str(line); println(); ret 0; }",
+        "fn main() -> i32 { let line = read_line(); print(line); println(); ret 0; }",
         "hello\n",
         "hello\n",
         0);
@@ -145,19 +190,22 @@ TEST_F(RuntimeTest, ReadLine)
 
 TEST_F(RuntimeTest, ReadIntThenLine)
 {
-    // read_int consumes one line; the next read_line consumes the next.
+    // read_i32 consumes exactly the NUMBER TOKEN, so read_line then returns the
+    // REST of that line (empty here -- the cursor sits right after "42") and the
+    // next read_line gets the following line. That is the getline-after-cin
+    // behaviour, and it is what lets values be separated by spaces.
     expectOutputWithInput(
-        "fn main() -> i32 { let n = read_int(); let line = read_line();"
-        " print_int(n); print_char(','); print_str(line); println(); ret 0; }",
+        "fn main() -> i32 { let n = read_i32(); let a = read_line(); let b = read_line();"
+        " print(n); print('|'); print(a); print('|'); print(b); println(); ret 0; }",
         "42\nhello\n",
-        "42,hello\n",
+        "42||hello\n",
         0);
 }
 
 TEST_F(RuntimeTest, StringFromLitAndPrint)
 {
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hi\");"
-                 " print_str(s.to_cstr()); println(); ret 0; }",
+                 " print(s.to_cstr()); println(); ret 0; }",
         "hi\n",
         0);
 }
@@ -326,7 +374,7 @@ TEST_F(RuntimeTest, IntegerWidthChainWidening)
 
 TEST_F(RuntimeTest, FloatDivision)
 {
-    expectOutput("fn main() -> i32 { print_float(7.0 / 2.0); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(7.0 / 2.0); println(); ret 0; }",
         "3.500000\n",
         0);
 }
@@ -334,7 +382,7 @@ TEST_F(RuntimeTest, FloatDivision)
 TEST_F(RuntimeTest, I64ToFloatCast)
 {
     expectOutput("fn main() -> i32 { let a = 3 as i64; let b = a as f64;"
-                 " print_float(b); println(); ret 0; }",
+                 " print(b); println(); ret 0; }",
         "3.000000\n",
         0);
 }
@@ -463,7 +511,7 @@ TEST_F(RuntimeTest, GenericPickLarger)
 TEST_F(RuntimeTest, GenericFloatInstantiation)
 {
     expectOutput("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 {"
-                 " let f = id(3.5); print_float(f); println(); ret 0; }",
+                 " let f = id(3.5); print(f); println(); ret 0; }",
         "3.500000\n",
         0);
 }
@@ -556,7 +604,7 @@ TEST_F(RuntimeTest, MathClampEqual)
 
 TEST_F(RuntimeTest, MathFabsPositive)
 {
-    expectOutput("fn main() -> i32 { print_float(fabs(2.25)); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(fabs(2.25)); println(); ret 0; }",
         "2.250000\n",
         0);
 }
@@ -592,7 +640,7 @@ TEST_F(RuntimeTest, MathDegToRadHalfPi)
 {
     // deg_to_rad(90) = π/2 ≈ 1.5707963...
     expectOutput("fn main() -> i32 { let r = deg_to_rad(90.0);"
-                 " print_float(r); println(); ret 0; }",
+                 " print(r); println(); ret 0; }",
         "1.570796\n",
         0);
 }
@@ -820,7 +868,7 @@ TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
 //     attached to the type before any body is analyzed (pass 1c-3);
 // (2) a selectively imported module-level `let` no longer makes the following
 //     `{` parse as a struct literal;
-// (3) `read_line`/`read_int`/`read_f64` report EOF instead of returning the
+// (3) `read_line`/`read_i32`/`read_f64` report EOF instead of returning the
 //     previous line forever;
 // (4) module-level `let` names can be selectively imported at all.
 
@@ -900,11 +948,13 @@ TEST_F(RuntimeTest, SelectiveImportMissingMemberStillRejected)
 
 TEST_F(RuntimeTest, ReadLineLoopTerminatesAtEof)
 {
-    // At end of input read_line used to return the PREVIOUS line forever, so
-    // this loop never ended; now it yields an empty string.
-    expectOutputWithInput("fn main() -> i32 { while true { let line = read_line();"
-                          " let s = String::from_lit(line); if s.len() == 0 { break; }"
-                          " print_str(s.to_cstr()); println(); } ret 0; }",
+    // At end of input read_line returns an EMPTY String. It used to hand back the
+    // previous line forever through one shared 256-byte buffer, so this loop never
+    // ended -- and read_line now owns its result, so the length is the whole
+    // (unbounded) line.
+    expectOutputWithInput("fn main() -> i32 { while true { let s = read_line();"
+                          " if s.len() == 0 { break; }"
+                          " print(s); println(); } ret 0; }",
         "a\nb\n",
         "a\nb\n",
         0);
@@ -912,7 +962,7 @@ TEST_F(RuntimeTest, ReadLineLoopTerminatesAtEof)
 
 TEST_F(RuntimeTest, ReadIntAtEofIsZero)
 {
-    expectOutputWithInput("fn main() -> i32 { print_int(read_int()); println(); ret 0; }",
+    expectOutputWithInput("fn main() -> i32 { print(read_i32()); println(); ret 0; }",
         "",
         "0\n",
         0);
@@ -920,11 +970,135 @@ TEST_F(RuntimeTest, ReadIntAtEofIsZero)
 
 TEST_F(RuntimeTest, ReadFloatAtEofIsZero)
 {
-    expectOutputWithInput("fn main() -> i32 { print_float(read_f64()); println(); ret 0; }",
+    expectOutputWithInput("fn main() -> i32 { print(read_f64()); println(); ret 0; }",
         "",
         "0.000000\n",
         0);
 }
+TEST_F(RuntimeTest, ReadTokensSeparatedBySpaces)
+{
+    // The readers are TOKEN based: one call consumes one number whatever the
+    // whitespace around it looks like. They used to read a whole LINE each, so
+    // "3 4" answered 3 and then 0 -- the second call ate the next line.
+    expectOutputWithInput("fn main() -> i32 { let a = read_i32(); let b = read_i32();"
+                          " print(a + b); println(); ret 0; }",
+        "3 4\n",
+        "7\n",
+        0);
+}
+
+TEST_F(RuntimeTest, ReadLongLineIsNotTruncated)
+{
+    // read_line used to read through ONE 256-byte static buffer: a longer line
+    // came back cut at 255 characters and the REST stayed in the stream, so every
+    // following read was silently shifted. It owns its result now and grows
+    // without limit.
+    const std::string longLine(4000, 'a');
+    expectOutputWithInput("fn main() -> i32 { let s = read_line(); print(s.len()); println(); ret 0; }",
+        longLine + "\n",
+        "4000\n",
+        0);
+}
+
+TEST_F(RuntimeTest, ReadI64CoversTheWholeRange)
+{
+    expectOutputWithInput("fn main() -> i32 { let a = read_i64(); let b = read_i64();"
+                          " print(a); print(' '); print(b); println(); ret 0; }",
+        "-9223372036854775808 9223372036854775807\n",
+        "-9223372036854775808 9223372036854775807\n",
+        0);
+}
+
+TEST_F(RuntimeTest, ReadFloatSignsAndExponents)
+{
+    expectOutputWithInput("fn main() -> i32 { let a = read_f64(); let b = read_f64(); let c = read_f64();"
+                          " print(a); print(' '); print(b); print(' '); print(c); println(); ret 0; }",
+        "2.5e3 -1.25 1e-2\n",
+        "2500.000000 -1.250000 0.010000\n",
+        0);
+}
+
+TEST_F(RuntimeTest, ReadWordThenRest)
+{
+    expectOutputWithInput("fn main() -> i32 { let w = read_word(); let rest = read_rest();"
+                          " print(w); print('|'); print(rest); ret 0; }",
+        "hello world\nsecond\n",
+        "hello| world\nsecond\n",
+        0);
+}
+
+TEST_F(RuntimeTest, TryReadTellsEofFromZero)
+{
+    // "0" is a value and end-of-input is None; the plain readers answer 0 for
+    // both, so the try_ family is what a "read until exhausted" loop needs.
+    // (match, not is_none(a) + a.unwrap(): is_none takes the Option BY VALUE, so
+     // the two calls would be a use-after-move.)
+    expectOutputWithInput("fn main() -> i32 { let a = try_read_i32();"
+                          " match a { Some(v) => { print(v); }, None => { print(\"none\"); } }"
+                          " let b = try_read_i32();"
+                          " if is_none(b) { print(\" none\"); } else { print(\" some\"); } ret 0; }",
+        "0\n",
+        "0 none",
+        0);
+}
+
+TEST_F(RuntimeTest, EmptyStringPrintsNothing)
+{
+    // String::new used to leave its buffer UNINITIALIZED: to_cstr hands the raw
+    // pointer out as a C string, so printing an empty String printed whatever
+    // malloc had left there. The buffer is NUL-terminated at birth now.
+    expectOutput("fn main() -> i32 { let s = String::new(); print('['); print(s); print(']'); ret 0; }",
+        "[]",
+        0);
+    expectRun("fn main() -> i32 { let s = String::new(); ret str_len(s.to_cstr()); }", 0);
+}
+
+TEST_F(RuntimeTest, UserTypeImplementsDisplay)
+{
+    // Display is the one print entry point: a user type joins it with an impl.
+    expectOutput("struct P { pub x: i32, pub y: i32 }"
+                 " impl Display for P { fn show(self: &Self) { print(self.x); print(','); print(self.y); } }"
+                 " fn main() -> i32 { print(P { x: 1, y: 2 }); println(); ret 0; }",
+        "1,2\n",
+        0);
+}
+
+TEST_F(RuntimeTest, PanicFlushesStdoutFirst)
+{
+    // abort() does not flush stdio, so without an explicit flush a panic would
+    // swallow everything the program had printed before it.
+    std::string out;
+    std::string err;
+    ASSERT_TRUE(compile("fn main() -> i32 { print(\"before\"); panic(\"boom\"); ret 0; }"));
+    const int code = linkAndRun(&out, nullptr, &err);
+    EXPECT_EQ(code, kPanicExitCode);
+    EXPECT_NE(out.find("before"), std::string::npos) << "stdout was: " << out;
+    EXPECT_NE(err.find("boom"), std::string::npos) << "stderr was: " << err;
+}
+
+TEST_F(RuntimeTest, ExampleFftBigIntMultiplies)
+{
+    // The FFT example is the "real program" guard: it drives Vec indexing at
+    // scale, the f64 maths (including the Lis-side cos/sin and the f64 -> int
+    // truncation the language still lacks) and the stdlib io API together.
+    // 1234 * 5678 = 7006652.
+    fs::path root = stdLibDir.parent_path().parent_path().parent_path();
+    std::ifstream f(root / "Examples" / "fft_bigint.lis");
+    ASSERT_TRUE(f.good()) << "cannot open Examples/fft_bigint.lis";
+    std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    ASSERT_TRUE(compile(src, "")) << "compilation failed";
+    std::string out;
+    const std::string in = "1234 5678\n";
+    // In-process MCJIT: the example never aborts, so the subprocess path (and
+    // its link step) is not needed — this is ~3x faster and exercises the JIT's
+    // stdin redirect too.
+    EXPECT_EQ(jitRun(&out, &in), 0);
+    std::string normalized;
+    for (char c : out)
+        if (c != '\r') normalized += c;
+    EXPECT_EQ(normalized, "7006652") << out;
+}
+
 // ── Nesting depth limit (--max-depth, E2018) ───────────────────────────────────
 //
 // The parser, the HIR builder, the analyzer, the MIR builder and the LLVM
@@ -1135,7 +1309,7 @@ TEST_F(RuntimeTest, ConditionalMoveKeepsUntrackedAliasAlive)
     expectOutput("fn main() -> i32 { let a = String::from_lit(\"hello\");"
                  " let p = a.to_cstr(); let c = 0; if c == 1 { let b = a; }"
                  " let z = String::from_lit(\"ZZZZZZZZZZZZZZZZ\");"
-                 " print_str(p); println(); ret 0; }",
+                 " print(p); println(); ret 0; }",
         "hello\n",
         0);
 }
@@ -1261,7 +1435,7 @@ TEST_F(RuntimeTest, NestedParens)
 
 TEST_F(RuntimeTest, FloatPrecisionAddition)
 {
-    expectOutput("fn main() -> i32 { print_float(0.1 + 0.2); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(0.1 + 0.2); println(); ret 0; }",
         "0.300000\n",
         0);
 }
@@ -1339,7 +1513,7 @@ TEST_F(RuntimeTest, RecursionMutualViaIndirect)
 TEST_F(RuntimeTest, FloatSumOfInts)
 {
     expectOutput("fn main() -> i32 { let a = 1 as f64; let b = 2 as f64;"
-                 " print_float(a + b); println(); ret 0; }",
+                 " print(a + b); println(); ret 0; }",
         "3.000000\n",
         0);
 }
@@ -1347,7 +1521,7 @@ TEST_F(RuntimeTest, FloatSumOfInts)
 TEST_F(RuntimeTest, GenericIdOnFloat)
 {
     expectOutput("fn id<T>(x: T) -> T { ret x; } fn main() -> i32 {"
-                 " let f = id(2.5); print_float(f); println(); ret 0; }",
+                 " let f = id(2.5); print(f); println(); ret 0; }",
         "2.500000\n",
         0);
 }
@@ -1407,7 +1581,7 @@ TEST_F(RuntimeTest, MultipleStringsInStruct)
 TEST_F(RuntimeTest, FloatMultiplyByIntCast)
 {
     expectOutput("fn main() -> i32 { let x = 1.5; let n = 2 as f64;"
-                 " print_float(x * n); println(); ret 0; }",
+                 " print(x * n); println(); ret 0; }",
         "3.000000\n",
         0);
 }
@@ -1510,7 +1684,7 @@ TEST_F(RuntimeTest, DivergenceInsideNestedCallArguments)
 // exist.
 TEST_F(RuntimeTest, NeverBindingCannotBeRead)
 {
-    expectCompileFail("fn main() -> i32 { let x: never; print_int(x); ret 0; }",
+    expectCompileFail("fn main() -> i32 { let x: never; print(x); ret 0; }",
         "uninhabited type 'never'");
 }
 
@@ -1571,7 +1745,7 @@ TEST_F(RuntimeTest, GenericEnumTwoTypesNonCopyPayloads)
     expectOutput("enum Pair<A, B> { Both(A, B), Neither }\n"
                  "fn main() -> i32 {\n"
                  "    let p = Pair::Both(String::from_lit(\"hello\"), String::from_lit(\"world\"));\n"
-                 "    match p { Both(a, b) => { print_str(a.to_cstr()); }, Neither => { print_int(0); } }\n"
+                 "    match p { Both(a, b) => { print(a.to_cstr()); }, Neither => { print(0); } }\n"
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
@@ -1874,7 +2048,7 @@ TEST_F(RuntimeTest, AssertArityRejected)
 }
 
 // ── `&i8` is a C string: content equality and length ──────────────────────────
-// `&i8` is how this language spells a C string (print_str / panic /
+// `&i8` is how this language spells a C string (print / panic /
 // String::from_lit all take one), so `==` on two of them compares the TEXT.
 // Before this it was a compile error, and comparing an input line against a
 // literal meant copying it into a String first.
@@ -1892,10 +2066,11 @@ TEST_F(RuntimeTest, StringLiteralInequalityComparesContent)
 
 TEST_F(RuntimeTest, ReadLineComparesEqualByContentNotAddress)
 {
-    // read_line returns the compiler's own buffer, so the two `&i8` values have
-    // different addresses; only a content comparison can make this true.
+    // read_line now hands back an owned String; the two sides hold different
+    // buffers, and == compares the TEXT (String's PartialEq goes through str_cmp),
+    // not the addresses.
     expectOutputWithInput("fn main() -> i32 { let line = read_line();"
-                          " if line == \"hi\" { print_str(\"same\"); } else { print_str(\"diff\"); } ret 0; }",
+                          " if line == String::from_lit(\"hi\") { print(\"same\"); } else { print(\"diff\"); } ret 0; }",
         "hi\n",
         "same",
         0);

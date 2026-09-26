@@ -16,6 +16,7 @@ impt result { Result, is_ok, is_err };
 impt string { String };
 
 // A one-character digit parser: the number, or an error message.
+impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };
 fn parse_digit(c: char) -> Result<i32, String>
 {
     if (c < '0') || (c > '9') {
@@ -37,8 +38,8 @@ fn parse_two(a: char, b: char) -> Result<i32, String>
 fn report(r: Result<i32, String>) -> i32
 {
     match r {
-        Ok(v) => { print_str("ok "); print_int(v); println(); ret v; },
-        Err(e) => { print_str("err "); print_str(e.to_cstr()); println(); ret 0 - 1; },
+        Ok(v) => { print("ok "); print(v); println(); ret v; },
+        Err(e) => { print("err "); print(e.to_cstr()); println(); ret 0 - 1; },
     }
 }
 

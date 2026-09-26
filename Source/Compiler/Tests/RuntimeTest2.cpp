@@ -98,6 +98,55 @@ TEST_F(RuntimeTest, StructLogicalOpRejected)
         "bool");
 }
 
+TEST_F(RuntimeTest, LogicalAndShortCircuits)
+{
+    // `&&` short-circuits: the right operand runs ONLY when the left is true.
+    // (It used to be lowered to an eager `and`, so both sides always ran.)
+    expectRun("let n: i32 = 0;"
+              " fn bump() -> bool { n = n + 1; ret true; }"
+              " fn main() -> i32 { if false && bump() { ret 1; } ret n; }",
+        0);
+    expectRun("let n: i32 = 0;"
+              " fn bump() -> bool { n = n + 1; ret true; }"
+              " fn main() -> i32 { if true && bump() { ret n; } ret 9; }",
+        1);
+}
+
+TEST_F(RuntimeTest, LogicalOrShortCircuits)
+{
+    expectRun("let n: i32 = 0;"
+              " fn bump() -> bool { n = n + 1; ret false; }"
+              " fn main() -> i32 { if true || bump() { ret n; } ret 9; }",
+        0);
+    expectRun("let n: i32 = 0;"
+              " fn bump() -> bool { n = n + 1; ret false; }"
+              " fn main() -> i32 { if false || bump() { ret 9; } ret n; }",
+        1);
+}
+
+TEST_F(RuntimeTest, LogicalGuardDoesNotEvaluateIndex)
+{
+    // The guard idiom must not touch the index it is guarding: with an eager
+    // `and`/`or` this aborted on the array bounds check.
+    expectRun("fn main() -> i32 { let a = [1, 2, 3]; let k = 0 - 1;"
+              " if k >= 0 && a[k] == 9 { ret 1; } ret 0; }",
+        0);
+    // ... and the `||` mirror: the right side runs only when the left is false,
+    // so THIS is the guard that keeps a[k] unevaluated for an out-of-range k.
+    expectRun("fn main() -> i32 { let a = [4, 5, 6]; let k = 3;"
+              " if k >= 3 || a[k] == 6 { ret 0; } ret 1; }",
+        0);
+}
+
+TEST_F(RuntimeTest, LogicalResultIsAValue)
+{
+    // The diamond writes the result temp on both paths, so it is usable as a
+    // value after the join, not just as an `if` condition.
+    expectRun("fn main() -> i32 { let c = false && true; let d = true || false;"
+              " if c == false { if d == true { ret 7; } } ret 0; }",
+        7);
+}
+
 // ── operator overloading ───────────────────────────────────────────────────────
 
 TEST_F(RuntimeTest, OperatorOverloadAdd)
@@ -133,12 +182,12 @@ TEST_F(RuntimeTest, MathSignEven)
         1); // -1 + 1 + 1
 }
 
-// ── input builtins (read_line / read_int / read_f64) ─────────────────────────
+// ── input builtins (read_line / read_i32 / read_f64) ─────────────────────────
 
 TEST_F(RuntimeTest, ReadInt)
 {
     expectOutputWithInput(
-        "fn main() -> i32 { let n = read_int(); print_int(n); println(); ret 0; }",
+        "fn main() -> i32 { let n = read_i32(); print(n); println(); ret 0; }",
         "42\n",
         "42\n",
         0);
@@ -147,10 +196,68 @@ TEST_F(RuntimeTest, ReadInt)
 TEST_F(RuntimeTest, ReadF64)
 {
     expectOutputWithInput(
-        "fn main() -> i32 { let x = read_f64(); print_float(x); println(); ret 0; }",
+        "fn main() -> i32 { let x = read_f64(); print(x); println(); ret 0; }",
         "3.5\n",
         "3.500000\n",
         0);
+}
+
+TEST_F(RuntimeTest, UserStructCopyImplMakesItCopy)
+{
+    // `impl Copy for P {}` is a REAL marker now (2026-09-26). Before this it was
+    // a documented no-op: isCopyable() ignored implTrait for a struct, so P was
+    // always Move and the impl changed nothing.
+    expectRun("struct P { pub x: i32, pub y: i32 } impl Copy for P {}"
+              " fn main() -> i32 { let p = P { x: 3, y: 4 };"
+              " let q = p; let r = p; ret q.x + r.y; }",
+        7);
+}
+
+TEST_F(RuntimeTest, UserCopyStructInArray)
+{
+    // Arrays require Copy elements, so this is the payoff of the marker: a plain
+    // data struct can now live in an array (and be read out twice).
+    expectRun("struct P { pub x: i32 } impl Copy for P {}"
+              " fn main() -> i32 { let a = [P { x: 1 }, P { x: 2 }, P { x: 3 }];"
+              " let b = a[1]; let c = a[1]; ret b.x * 10 + c.x; }",
+        22);
+}
+
+TEST_F(RuntimeTest, UserCopyStructInVec)
+{
+    // (Vec is not in the standard prologue — a snippet imports it itself.)
+    expectRun("impt vec { Vec, Index, IndexMut };"
+              " struct P { pub x: i32 } impl Copy for P {}"
+              " fn main() -> i32 { let mut v = Vec<P>::new();"
+              " v.push(P { x: 5 }); v.push(P { x: 6 });"
+              " let a = v[1]; v[0] = P { x: 9 }; ret a.x + v[0].x; }",
+        15);
+}
+
+TEST_F(RuntimeTest, CopyStructWithNonCopyFieldRejected)
+{
+    // A Copy value is duplicated by a plain bit copy, so it cannot own anything.
+    expectCompileFail("struct P { pub s: String } impl Copy for P {}"
+                      " fn main() -> i32 { ret 0; }",
+        "which is not Copy");
+}
+
+TEST_F(RuntimeTest, CopyStructWithDropRejected)
+{
+    // ... and it has no single owner that could run a destructor.
+    expectCompileFail("struct P { pub x: i32 } impl Copy for P {}"
+                      " impl Drop for P { fn drop(self) { } }"
+                      " fn main() -> i32 { ret 0; }",
+        "cannot implement 'Drop'");
+}
+
+TEST_F(RuntimeTest, CopyStructWithoutInitializerIsAllowed)
+{
+    // E3012 (a non-Copy binding must have an initializer) no longer applies; the
+    // definite-assignment rule still requires a write before the first read.
+    expectRun("struct P { pub x: i32 } impl Copy for P {}"
+              " fn main() -> i32 { let mut p: P; p = P { x: 8 }; ret p.x; }",
+        8);
 }
 
 TEST_F(RuntimeTest, ArrayMovedNotCopied)
@@ -165,16 +272,16 @@ TEST_F(RuntimeTest, StringPushAndGrow)
     // from_lit("hello") + push_char + push_str — exercises the buffer grow path.
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\"); let mut t = s;"
                  " t.push_char(' '); t.push_str(\"world\");"
-                 " print_str(t.to_cstr()); println(); ret t.len(); }",
+                 " print(t.to_cstr()); println(); ret t.len(); }",
         "hello world\n",
         11);
 }
 
 TEST_F(RuntimeTest, ToStringBuiltins)
 {
-    expectOutput("fn main() -> i32 { let a = to_string_i32(42); print_str(a.to_cstr()); println();"
-                 " let b = to_string_f64(3.5); print_str(b.to_cstr()); println();"
-                 " let c = to_string_bool(true); print_str(c.to_cstr()); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { let a = to_string_i32(42); print(a.to_cstr()); println();"
+                 " let b = to_string_f64(3.5); print(b.to_cstr()); println();"
+                 " let c = to_string_bool(true); print(c.to_cstr()); println(); ret 0; }",
         "42\n3.500000\n1\n",
         0);
 }
@@ -241,7 +348,7 @@ TEST_F(RuntimeTest, WriteThroughMutFieldIndex)
     // with a `&mut [i32; N]` field.
     expectOutput("struct Holder { pub buf: &mut [i32; 2] }"
                  " fn main() -> i32 { let mut a = [1, 2]; let h = Holder { buf: &mut a };"
-                 " h.buf[0] = 5; print_int(a[0]); println(); ret 0; }",
+                 " h.buf[0] = 5; print(a[0]); println(); ret 0; }",
         "5\n",
         0);
 }
@@ -318,7 +425,7 @@ TEST_F(RuntimeTest, I64Division)
 
 TEST_F(RuntimeTest, FloatAddition)
 {
-    expectOutput("fn main() -> i32 { print_float(1.5 + 2.5); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(1.5 + 2.5); println(); ret 0; }",
         "4.000000\n",
         0);
 }
@@ -331,7 +438,7 @@ TEST_F(RuntimeTest, FloatEquality)
 TEST_F(RuntimeTest, FloatScientificLiteral)
 {
     // 1e2 is 100.0.
-    expectOutput("fn main() -> i32 { print_float(1e2); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(1e2); println(); ret 0; }",
         "100.000000\n",
         0);
 }
@@ -341,9 +448,39 @@ TEST_F(RuntimeTest, IntToCharCast)
     expectRun("fn main() -> i32 { let x = 66 as i32; let c = x as char; ret c as i32; }", 66);
 }
 
-TEST_F(RuntimeTest, FloatToIntCastRejected)
+TEST_F(RuntimeTest, FloatToIntCastTruncatesTowardsZero)
 {
-    expectCompileFail("fn main() -> i32 { let x = 3.7 as i32; ret x; }", "cannot be cast");
+    // Float -> integer is ALLOWED now (2026-09-26) and truncates toward zero,
+    // like C's `(int)x`. It used to be rejected outright ("f64 cannot be cast"),
+    // which left no way at all to get an integer out of an f64.
+    expectRun("fn main() -> i32 { let x = 3.7 as i32; ret x; }", 3);
+    expectRun("fn main() -> i32 { let x = 0.0 - 3.7; ret x as i32; }", 0 - 3);
+    expectRun("fn main() -> i32 { let x = 3.9 as i64; ret (x == 3 as i64) as i32; }", 1);
+    expectRun("fn main() -> i32 { let x = 2.5 as i8; ret x as i32; }", 2);
+    // (No chained casts: the parser accepts ONE `as` per postfix chain, so
+    // `x as i16 as i32` is a parse error — pre-existing, out of this change's
+    // scope. Two statements do the same job.)
+    expectRun("fn main() -> i32 { let x = 1.0 as i16; ret x as i32; }", 1);
+}
+
+TEST_F(RuntimeTest, FloatToIntCastInExpression)
+{
+    // The cast binds tighter than any binary operator (`a + b as i32`), which is
+    // what makes `ans[i] + ((a[i] + 0.5) as i32)` read the way it should.
+    expectRun("fn main() -> i32 { let a = 2.5; ret ((a * 2.0) as i32) + 1; }", 6);
+    expectRun("fn main() -> i32 { let a = 7.0; ret 1 + a as i32; }", 8);
+}
+
+TEST_F(RuntimeTest, FloatNarrowingCastNeedsIKnow)
+{
+    // f64 -> f32 loses precision: an ERROR unless #[i_know] downgrades it (the
+    // same contract the integer-narrowing rule has).
+    expectCompileFail("fn main() -> i32 { let x = 1.5 as f32; ret 0; }",
+        "smaller float");
+    expectRun("fn main() -> i32 {"
+              " #[i_know = \"narrowing\"] let x = 1.5 as f32;"
+              " let y = x as f64; ret (y == 1.5) as i32; }",
+        1);
 }
 
 TEST_F(RuntimeTest, SameTypeCastUselessInfo)
@@ -453,7 +590,7 @@ TEST_F(RuntimeTest, GlobalReadFromFunction)
 
 TEST_F(RuntimeTest, GlobalFloatLiteral)
 {
-    expectOutput("let g = 2.5; fn main() -> i32 { print_float(g); println(); ret 0; }",
+    expectOutput("let g = 2.5; fn main() -> i32 { print(g); println(); ret 0; }",
         "2.500000\n",
         0);
 }
@@ -496,7 +633,7 @@ TEST_F(RuntimeTest, StringIndexInBounds)
 TEST_F(RuntimeTest, StringToCstrPrints)
 {
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\");"
-                 " let p = s.to_cstr(); print_str(p); println(); ret 0; }",
+                 " let p = s.to_cstr(); print(p); println(); ret 0; }",
         "hello\n",
         0);
 }
@@ -595,14 +732,14 @@ TEST_F(RuntimeTest, MathSignNegative)
 
 TEST_F(RuntimeTest, MathLerpMidpoint)
 {
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 0.5)); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(lerp(0.0, 10.0, 0.5)); println(); ret 0; }",
         "5.000000\n",
         0);
 }
 
 TEST_F(RuntimeTest, MathLerpEnd)
 {
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 1.0)); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(lerp(0.0, 10.0, 1.0)); println(); ret 0; }",
         "10.000000\n",
         0);
 }
@@ -692,7 +829,7 @@ TEST_F(RuntimeTest, StringToCstrLengthMatches)
     // `to_cstr` returns a borrow of the buffer; it must be exactly the content
     // (no `__strlen` — the heap primitives are stdlib-only now).
     expectOutput("fn main() -> i32 { let s = String::from_lit(\"hello\");"
-                 " print_str(s.to_cstr()); ret s.len(); }",
+                 " print(s.to_cstr()); ret s.len(); }",
         "hello",
         5);
 }
@@ -780,7 +917,7 @@ TEST_F(RuntimeTest, EmptyFunctionBody)
 
 TEST_F(RuntimeTest, FloatLargeExponent)
 {
-    expectOutput("fn main() -> i32 { print_float(1.5e5); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(1.5e5); println(); ret 0; }",
         "150000.000000\n",
         0);
 }
@@ -908,7 +1045,7 @@ TEST_F(RuntimeTest, MultipleGenericInstantiation)
 TEST_F(RuntimeTest, FloatCastIntRoundTrip)
 {
     expectOutput("fn main() -> i32 { let x = 5 as f64; let y = x + 0.5;"
-                 " print_float(y); println(); ret 0; }",
+                 " print(y); println(); ret 0; }",
         "5.500000\n",
         0);
 }
@@ -969,7 +1106,7 @@ TEST_F(RuntimeTest, SimpleReturnEarly)
 
 TEST_F(RuntimeTest, SimpleFloatLiteralPrint)
 {
-    expectOutput("fn main() -> i32 { print_float(1.0); println(); ret 0; }", "1.000000\n", 0);
+    expectOutput("fn main() -> i32 { print(1.0); println(); ret 0; }", "1.000000\n", 0);
 }
 
 TEST_F(RuntimeTest, ModuleNestedPathImport)

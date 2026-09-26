@@ -34,6 +34,16 @@ struct Context
     /// files). Stores INTERNAL names (module-prefixed).
     std::unordered_set<std::string> knownEnums;
 
+    /// Every struct/enum/trait DECLARATION name seen so far, shared across parser
+    /// instances for the same reason as knownEnums — and one step further: a
+    /// Parser's own `knownTypes` is per-INSTANCE, so the selective-import
+    /// promotion (`impt string { String };`) could not tell that `string$String`
+    /// is a type when it ran inside a module parsed by a fresh Parser. That made
+    /// `impl Display for String` (io.lis) fail with "undefined struct 'String'"
+    /// while the enum half of the same promotion worked (it consults the shared
+    /// knownEnums). Stores INTERNAL names.
+    std::unordered_set<std::string> knownNamedTypes;
+
     // ── module system registry (filled by the Parser, consumed by later passes) ──
 
     /// Per-top-level-statement module attribution, parallel to

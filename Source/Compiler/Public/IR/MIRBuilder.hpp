@@ -275,6 +275,12 @@ private:
     MIRPlace buildLiteral(HIRLiteral *lit);
     MIRPlace buildNameRef(HIRNameRef *ref);
     MIRPlace buildBinaryOp(HIRBinaryOp *bin);
+    /// `a && b` / `a || b`: SHORT-CIRCUIT — the right operand is evaluated only
+    /// when the left one does not already decide the result (`false && x` never
+    /// evaluates x, `true || x` never evaluates x). Lowered as a CFG diamond (the
+    /// result temp is assigned on BOTH paths) instead of the eager and/or
+    /// instruction both operands used to be folded into.
+    MIRPlace buildLogicalOp(HIRBinaryOp *bin);
     MIRPlace buildUnaryOp(HIRUnaryOp *un);
     /// `x op= y`: the target place is evaluated once (see the .cpp).
     void buildCompoundAssign(HIRAssign *assign);

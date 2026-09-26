@@ -7,6 +7,8 @@
 （见[声明](./declarations.md)的模块与导入节）。类型名大写开头（2026-08 命名规范）。
 
 ```lis
+impt io { print, println, read_i32, read_line };   // 输入输出（2026-09-25）
+impt fmt { Display };                              // 想给自己的类型实现打印时才需要
 impt math { max, abs };
 impt option { Option, unwrap_or };
 impt result { Result, is_ok, is_err };
@@ -14,15 +16,95 @@ impt string { String };
 impt vec { Vec };            // v[i] / v[i] = x 额外需要 Index / IndexMut，见下
 ```
 
-八个模块：`drop`（Drop trait）、`option`（Option<T>）、`result`（Result<T, E> + `?` 传播协议）、
+十四个模块：`fmt`（Display trait）、`io`（print/println/flush + read_* 与 try_read_*）、
+`drop`（Drop trait）、`option`（Option<T>）、`result`（Result<T, E> + `?` 传播协议）、
 `iterator`（Iterator/Range/for 协议）、`math`（Numeric/算子 trait + 数值函数）、`chars`
-（字符分类）、`string`（String 堆字符串）、`vec`（Vec<T> 堆数组 + Index/IndexMut trait）。
+（字符分类）、`string`（String 堆字符串）、`vec`（Vec<T> 堆数组 + Index/IndexMut trait）、
+`hash`（Hash trait）、`map`/`set`（红黑树有序容器）、`hashmap`（链式哈希表 + HashSet）。
 模块间依赖已显式声明（iterator 导入 option；string 导入 drop 与 option；
-vec 导入 math/option/iterator/drop）—— 只需导入你直接使用的模块。
+vec 导入 math/option/iterator/drop；io 导入 fmt/string/option）—— 只需导入你直接使用的模块。
 
 > `unwrap_or` 在 `option` 与 `result` 里**各有一个**。两者都做选择性导入会触发
 > 「selective import conflicts with an existing name」——这是既有的冲突规则，不是 bug。
 > 需要同时用两个时，用整模块导入 + 限定名：`impt result;` 然后 `result::unwrap_or(...)`。
+
+## io —— 输入输出（2026-09-25）
+
+`print_*` / `read_*` 那一族编译器内置函数**已全部退役**：io 是普通 Lis 模块，编译器只提供
+字节流原语（`__read_byte`/`__write`/`__flush`，stdlib 专用）与原语 `Display` 的下降。
+设计说明见[内置函数](./builtins.md)，这里给 API。
+
+| 输出 | 说明 |
+|---|---|
+| `print<T: Display>(x: T)` | 写 x，无换行、不 flush |
+| `println()` | 写换行**并 flush**（本语言的 `std::endl`，交互题用） |
+| `flush()` | 只 flush（不加换行） |
+
+`print(x); println();` 是「值 + 换行」的合并写法：语言没有重载，零参 `println` 与一参形式
+无法同名共存，而 flush 正是零参形式的独立语义。日常换行写 `print("\n")`（只入缓冲）。
+
+| 输入 | 说明 |
+|---|---|
+| `read_i32() -> i32` / `read_i64() -> i64` / `read_f64() -> f64` | 跳过空白，消费**一个 token**（`"3 4"` 同一行可用；支持正负号与 `1e-9` 指数）；EOF 时返回 0 |
+| `read_word() -> String` | 下一个空白分隔的词 |
+| `read_line() -> String` | 当前行的**剩余部分**（保留空格，去掉 LF/CRLF），长度不限；EOF/行尾返回空串 |
+| `read_rest() -> String` | 剩下的一切（含换行） |
+| `try_read_i32/i64/f64/word/line() -> Option<...>` | 只有**已经**无输入才返回 `None`（`"0"` 是 `Some(0)`） |
+
+`String` 的 `len()` 是字节数，所以"这一行多长"写 `read_line().len()`。
+
+## fmt —— Display
+
+```lis
+trait Display { fn show(self: &Self); }
+```
+
+原语（i8/i16/i32/i64/f32/f64/bool/char）与 `&i8`（C 串）由编译器播种；`String` 在 io 里实现；
+用户类型自己实现即可被 `print`/`println` 接受：
+
+```lis
+impt fmt { Display };
+impt io  { print, println };
+impl Display for Point { fn show(self: &Self) { print(self.x); print(','); print(self.y); } }
+print(Point { x: 1, y: 2 });   // 1,2
+```
+
+注意 `print` **按值**收参数（`fn print<T: Display>(x: T)`），所以打印一个非 Copy 值会**移动**
+它：`print(s); print(s);` 对 `String` 是 use-after-move。要重复打印就打印借用出来的 C 串：
+`print(s.to_cstr())`（`&i8` 是 Copy）。
+
+## math 的浮点函数（2026-09-26）
+
+纯 Lis 实现（区间归约 + 泰勒 / 牛顿迭代），精度与 libm 同级（相对误差 ~1e-16）：
+
+| 函数 | 说明 |
+|---|---|
+| `PI` / `TWO_PI` / `HALF_PI` | 模块级 f64 常量 |
+| `sqrt(x)` | 平方根（`x < 0` → panic） |
+| `floor/ceil/round/trunc/fract(x)` | 取整族（`round` 半数远离零；定义域 `|x| < 2^63`） |
+| `cos/sin/tan(x)` | 三角函数（弧度） |
+
+```lis
+impt math { sqrt, floor, PI };
+print(floor(sqrt(2.0) * 100.0));   // 141.000000
+```
+
+## `Copy`（`impl Copy for S {}`）
+
+`math` 里的 `Copy` 是**真的语义标记**（2026-09-26）：实现它的类型获得原语般的复制语义，
+可以作为数组元素、可以按值反复使用。字段必须全部 Copy，且不能同时实现 `Drop`。
+见[类型系统](./types.md)。
+
+## Vec 的容量 API
+
+| 方法 | 说明 |
+|---|---|
+| `Vec::from_elem(v, n)` | n 个 v 的副本（`vec![v; n]`） |
+| `resize(n, v)` | 长度调整为 n：变长用 v 填充，变短截断（元素须 Copy） |
+| `len()` / `cap()` / `is_empty()` / `clear()` | 现有容量/长度 API |
+
+`with_capacity` 仍缺失：扩容需要**类型级**的元素大小，而 `__sizeof` 需要一个 T 的值；
+`from_elem` 已覆盖"开一块 n 元素缓冲"的实际需要。
 
 ## Drop
 

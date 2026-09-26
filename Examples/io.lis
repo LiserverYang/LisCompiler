@@ -4,7 +4,7 @@
 // io.lis — standard input (compiler builtins) + stdlib breadth helpers.
 //
 // read_line() reads a line (stripped of its trailing newline) into a shared
-// input buffer and returns &i8; read_int() / read_f64() parse a line into
+// input buffer and returns &i8; read_i32() / read_f64() parse a line into
 // i32 / f64. Each read overwrites the shared buffer, so a read_line() result
 // is only valid until the next read. Run with piped input:
 //     echo "7
@@ -13,25 +13,26 @@
 impt math { gcd };
 impt chars { is_digit };
 
+impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };
 fn main() -> i32
 {
-    print_str("enter a number: ");
-    let n = read_int();
-    print_str("double it: ");
-    print_int(n * 2);
+    print("enter a number: ");
+    let n = read_i32();
+    print("double it: ");
+    print(n * 2);
     println();
 
-    print_str("say something: ");
+    print("say something: ");
     let line = read_line();
-    print_str("echo: ");
-    print_str(line);
+    print("echo: ");
+    print(line);
     println();
 
-    print_str("is_digit('5')=");
-    print_bool(is_digit('5'));
+    print("is_digit('5')=");
+    print(is_digit('5'));
     println();
-    print_str("gcd(12,18)=");
-    print_int(gcd(12, 18));
+    print("gcd(12,18)=");
+    print(gcd(12, 18));
     println();
 
     ret 0;

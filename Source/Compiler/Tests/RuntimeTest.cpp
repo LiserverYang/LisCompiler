@@ -86,12 +86,12 @@ TEST_F(RuntimeTest, EnumVariantIsMoved)
 
 TEST_F(RuntimeTest, PrintInt)
 {
-    expectOutput("fn main() -> i32 { print_int(42); println(); ret 0; }", "42\n", 0);
+    expectOutput("fn main() -> i32 { print(42); println(); ret 0; }", "42\n", 0);
 }
 
 TEST_F(RuntimeTest, PrintMultiple)
 {
-    expectOutput("fn main() -> i32 { print_str(\"x=\"); print_int(7); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(\"x=\"); print(7); println(); ret 0; }",
         "x=7\n",
         0);
 }
@@ -247,7 +247,7 @@ TEST_F(RuntimeTest, WriteThroughSharedRefRejected)
 TEST_F(RuntimeTest, ToStringF64LargeNoOverflow)
 {
     ASSERT_TRUE(compile("fn main() -> i32 { let s = to_string_f64(1e100);"
-                        " print_str(s.to_cstr()); println(); ret 0; }"))
+                        " print(s.to_cstr()); println(); ret 0; }"))
         << "compilation failed";
     std::string out;
     int code = linkAndRun(&out);
@@ -328,14 +328,14 @@ TEST_F(RuntimeTest, I8Comparison)
 
 TEST_F(RuntimeTest, FloatMultiplication)
 {
-    expectOutput("fn main() -> i32 { print_float(2.5 * 2.0); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(2.5 * 2.0); println(); ret 0; }",
         "5.000000\n",
         0);
 }
 
 TEST_F(RuntimeTest, IntToFloatCast)
 {
-    expectOutput("fn main() -> i32 { let x = 5 as f64; print_float(x); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { let x = 5 as f64; print(x); println(); ret 0; }",
         "5.000000\n",
         0);
 }
@@ -604,7 +604,7 @@ TEST_F(RuntimeTest, MathRadToDegFullCircle)
 {
     // rad_to_deg(6.28318530718) ≈ 360.
     expectOutput("fn main() -> i32 { let d = rad_to_deg(6.28318530718);"
-                 " print_float(d); println(); ret 0; }",
+                 " print(d); println(); ret 0; }",
         "360.000000\n",
         0);
 }
@@ -743,8 +743,8 @@ TEST_F(RuntimeTest, I8AndI16MixViaI32)
 
 TEST_F(RuntimeTest, FloatZeroAndNegative)
 {
-    expectOutput("fn main() -> i32 { print_float(0.0); println();"
-                 " print_float(0.0 - 1.5); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(0.0); println();"
+                 " print(0.0 - 1.5); println(); ret 0; }",
         "0.000000\n-1.500000\n",
         0);
 }
@@ -801,7 +801,7 @@ TEST_F(RuntimeTest, BoolResultInArithmetic)
 
 TEST_F(RuntimeTest, FloatNegativeZero)
 {
-    expectOutput("fn main() -> i32 { print_float(0.0 - 0.0); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(0.0 - 0.0); println(); ret 0; }",
         "0.000000\n",
         0);
 }
@@ -845,7 +845,7 @@ TEST_F(RuntimeTest, GenericIdentityChain)
 
 TEST_F(RuntimeTest, GlobalFloatArithmetic)
 {
-    expectOutput("let g = 2.0; fn main() -> i32 { print_float(g * 3.0); println(); ret 0; }",
+    expectOutput("let g = 2.0; fn main() -> i32 { print(g * 3.0); println(); ret 0; }",
         "6.000000\n",
         0);
 }
@@ -1002,7 +1002,7 @@ TEST_F(RuntimeTest, SimpleCharCompare)
 
 TEST_F(RuntimeTest, SimpleBoolPrint)
 {
-    expectOutput("fn main() -> i32 { print_bool(true); println(); ret 0; }", "1\n", 0);
+    expectOutput("fn main() -> i32 { print(true); println(); ret 0; }", "1\n", 0);
 }
 
 TEST_F(RuntimeTest, ModuleNotFoundRejected)
@@ -1111,7 +1111,7 @@ TEST_F(RuntimeTest, DivergingValueArmDoesNotFixMatchType)
 // MIRBuilder (conservative: the body must contain at least one diverging call).
 TEST_F(RuntimeTest, NeverFunctionMustDiverge)
 {
-    expectCompileFail("fn boom() -> never { print_str(\"side\"); }\nfn main() -> i32 { ret 0; }",
+    expectCompileFail("fn boom() -> never { print(\"side\"); }\nfn main() -> i32 { ret 0; }",
         "but never diverges");
     expectCompileFail("fn boom() -> never { }\nfn main() -> i32 { ret 0; }",
         "but never diverges");

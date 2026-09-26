@@ -302,6 +302,63 @@ void derefPointerOperand(MIROperand &op)
 bool lowerPrimitiveTraitMethod(MIRStmtCall &call, size_t sep, std::optional<MIRStatement> &replacement)
 {
     const std::string method = call.funcName.substr(sep + 2);
+
+    // `Display::show` on a primitive (2026-09-25): retarget the placeholder call
+    // `<T>::show` to the backend entry for the CONCRETE type (__show_i32, ...).
+    // The call stays a call — the backend intercepts it by name, exactly like the
+    // other builtins — so this only renames it; `replacement` stays empty.
+    //
+    // The receiver arrives as `&T` (the trait takes `self: &Self`), so the
+    // reference is dereferenced first: the backend wants the VALUE.
+    //
+    // A user trait that happens to declare a method of the same name cannot reach
+    // this path: it fires only for a PRIMITIVE instantiation, and a primitive can
+    // never implement a user trait.
+    if (method == "show")
+    {
+        if (call.args.size() != 1)
+            return false;
+        derefPointerOperand(call.args[0]);
+
+        MIRPlace *place = nullptr;
+        if (auto *c = std::get_if<MIRCopy>(&call.args[0]))
+            place = &c->place;
+        else if (auto *m = std::get_if<MIRMove>(&call.args[0]))
+            place = &m->place;
+        if (!place || !place->type)
+            return false;
+
+        std::string entry;
+        if (auto prim = std::dynamic_pointer_cast<PrimitiveType>(place->type))
+        {
+            switch (prim->getPrimKind())
+            {
+            case PrimitiveType::PrimKind::I8: entry = "__show_i8"; break;
+            case PrimitiveType::PrimKind::I16: entry = "__show_i16"; break;
+            case PrimitiveType::PrimKind::I32: entry = "__show_i32"; break;
+            case PrimitiveType::PrimKind::I64: entry = "__show_i64"; break;
+            case PrimitiveType::PrimKind::F32: entry = "__show_f32"; break;
+            case PrimitiveType::PrimKind::F64: entry = "__show_f64"; break;
+            case PrimitiveType::PrimKind::BOOL: entry = "__show_bool"; break;
+            case PrimitiveType::PrimKind::CHAR: entry = "__show_char"; break;
+            default: return false;
+            }
+        }
+        else if (auto ref = std::dynamic_pointer_cast<ReferenceType>(place->type))
+        {
+            // `&i8` is the language's C-string spelling: Display prints the text.
+            auto base = std::dynamic_pointer_cast<PrimitiveType>(ref->getBaseType());
+            if (!base || base->getPrimKind() != PrimitiveType::PrimKind::I8)
+                return false;
+            entry = "__show_str";
+        }
+        else
+            return false; // a struct/enum is retargeted to its own method instead
+
+        call.funcName = entry;
+        return true;
+    }
+
     if (method != "hash" || !call.dest.has_value() || call.args.size() != 1)
         return false;
 

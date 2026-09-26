@@ -91,7 +91,7 @@ TEST_F(RuntimeTest, EnumMatchExpression)
 
 TEST_F(RuntimeTest, PrintStringAndChar)
 {
-    expectOutput("fn main() -> i32 { print_str(\"hi\"); print_char('!'); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(\"hi\"); print('!'); println(); ret 0; }",
         "hi!\n",
         0);
 }
@@ -337,7 +337,7 @@ TEST_F(RuntimeTest, FloatComparison)
 TEST_F(RuntimeTest, FloatModuloVariables)
 {
     expectOutput("fn main() -> i32 { let x = 10.0; let y = 4.0; let z = x - y * 2.0;"
-                 " print_float(z); println(); ret 0; }",
+                 " print(z); println(); ret 0; }",
         "2.000000\n",
         0);
 }
@@ -687,7 +687,7 @@ TEST_F(RuntimeTest, MathAbsPositive)
 
 TEST_F(RuntimeTest, MathFabsNegative)
 {
-    expectOutput("fn main() -> i32 { print_float(fabs(0.0 - 3.5)); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(fabs(0.0 - 3.5)); println(); ret 0; }",
         "3.500000\n",
         0);
 }
@@ -724,14 +724,14 @@ TEST_F(RuntimeTest, MathSignZero)
 
 TEST_F(RuntimeTest, MathLerpStart)
 {
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 0.0)); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(lerp(0.0, 10.0, 0.0)); println(); ret 0; }",
         "0.000000\n",
         0);
 }
 
 TEST_F(RuntimeTest, MathLerpBeyondRange)
 {
-    expectOutput("fn main() -> i32 { print_float(lerp(0.0, 10.0, 2.0)); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(lerp(0.0, 10.0, 2.0)); println(); ret 0; }",
         "20.000000\n",
         0);
 }
@@ -998,7 +998,7 @@ TEST_F(RuntimeTest, OpOverloadFloat)
     expectOutput("struct V { pub x: f64 } impl Add for V { fn add(self, o: Self) -> V {"
                  " ret V { x: self.x + o.x }; } } fn main() -> i32 {"
                  " let a = V { x: 1.5 }; let b = V { x: 2.5 };"
-                 " print_float((a + b).x); println(); ret 0; }",
+                 " print((a + b).x); println(); ret 0; }",
         "4.000000\n",
         0);
 }
@@ -1042,7 +1042,7 @@ TEST_F(RuntimeTest, GlobalCounterInMatch)
 
 TEST_F(RuntimeTest, FloatLerpComposition)
 {
-    expectOutput("fn main() -> i32 { print_float(lerp(lerp(0.0, 10.0, 0.5), 100.0, 0.5));"
+    expectOutput("fn main() -> i32 { print(lerp(lerp(0.0, 10.0, 0.5), 100.0, 0.5));"
                  " println(); ret 0; }",
         "52.500000\n",
         0);
@@ -1057,7 +1057,7 @@ TEST_F(RuntimeTest, GlobalIncrementFunction)
 
 TEST_F(RuntimeTest, FloatDivisionPrecision)
 {
-    expectOutput("fn main() -> i32 { print_float(10.0 / 4.0); println(); ret 0; }",
+    expectOutput("fn main() -> i32 { print(10.0 / 4.0); println(); ret 0; }",
         "2.500000\n",
         0);
 }
@@ -1237,7 +1237,7 @@ TEST_F(RuntimeTest, OptionUnwrapNonCopyPayload)
     expectOutput("fn main() -> i32 {\n"
                  "    let o = Option::Some(String::from_lit(\"payload\"));\n"
                  "    let s = o.unwrap();\n"
-                 "    print_str(s.to_cstr());\n"
+                 "    print(s.to_cstr());\n"
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
@@ -1308,7 +1308,7 @@ TEST_F(RuntimeTest, TryOperatorNonCopyPayloads)
     expectOutput("fn make() -> Result<String, String> { ret Result::Ok(String::from_lit(\"payload\")); }\n"
                  "fn f() -> Result<String, String> { let a = make()?; ret Result::Ok(a); }\n"
                  "fn main() -> i32 { let r = f();\n"
-                 "    match r { Ok(v) => { print_str(v.to_cstr()); }, Err(e) => { print_str(e.to_cstr()); } }\n"
+                 "    match r { Ok(v) => { print(v.to_cstr()); }, Err(e) => { print(e.to_cstr()); } }\n"
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
@@ -1317,7 +1317,7 @@ TEST_F(RuntimeTest, TryOperatorNonCopyPayloads)
     expectOutput("fn bad() -> Result<i32, String> { ret Result::Err(String::from_lit(\"inner\")); }\n"
                  "fn f() -> Result<i32, String> { let v = bad()?; ret Result::Ok(v); }\n"
                  "fn main() -> i32 { let r = f();\n"
-                 "    match r { Ok(v) => { print_int(v); }, Err(e) => { print_str(e.to_cstr()); } }\n"
+                 "    match r { Ok(v) => { print(v); }, Err(e) => { print(e.to_cstr()); } }\n"
                  "    println();\n"
                  "    ret 0;\n"
                  "}",
@@ -1362,6 +1362,42 @@ TEST_F(RuntimeTest, VecPushAndIndexSum)
               "    v.push(1); v.push(2); v.push(3);\n"
               "    ret v[0] + v[1] + v[2]; }",
         6);
+}
+
+TEST_F(RuntimeTest, VecResizeGrowsAndShrinks)
+{
+    // resize is how a program asks for a buffer of n elements without n pushes
+    // (an FFT-sized array, say). Growing fills with copies, shrinking truncates
+    // (free for a Copy element — there is nothing to destroy).
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::new();\n"
+              "    v.resize(5, 7);\n"
+              "    if v.len() != 5 { ret 1; }\n"
+              "    if v[3] != 7 { ret 2; }\n"
+              "    v[4] = 9;\n"
+              "    v.resize(2, 0);\n"
+              "    if v.len() != 2 { ret 3; }\n"
+              "    v.push(11);\n"
+              "    ret v[0] + v[2]; }",
+        18);
+}
+
+TEST_F(RuntimeTest, VecFromElem)
+{
+    expectRun("impt vec { Vec };\n"
+              "fn main() -> i32 { let mut v = Vec<i32>::from_elem(7, 5);\n"
+              "    if v.len() != 5 { ret 1; }\n"
+              "    if v[3] != 7 { ret 2; }\n"
+              "    v[4] = 9;\n"
+              "    ret v[4] + v[0]; }",
+        16);
+}
+
+TEST_F(RuntimeTest, VecResizeNegativePanics)
+{
+    expectPanic("impt vec { Vec };\n"
+                "fn main() -> i32 { let mut v = Vec<i32>::new(); v.resize(0 - 1, 0); ret 0; }",
+        "Vec::resize with a negative length");
 }
 
 TEST_F(RuntimeTest, VecGrowsByDoubling)
@@ -1516,7 +1552,7 @@ TEST_F(RuntimeTest, VecNonCopyPushPopAndPrint)
                  "    v.push(String::from_lit(\"alpha\"));\n"
                  "    v.push(String::from_lit(\"beta\"));\n"
                  "    if v.len() != 2 { ret 1; }\n"
-                 "    match v.pop() { Some(s) => { print_str(s.to_cstr()); println(); }, None => { ret 2; } }\n"
+                 "    match v.pop() { Some(s) => { print(s.to_cstr()); println(); }, None => { ret 2; } }\n"
                  "    ret 0; }",
         "beta\n",
         0);
@@ -1530,7 +1566,7 @@ TEST_F(RuntimeTest, VecNonCopyForLoopKeepsOrder)
                  "    v.push(String::from_lit(\"a\"));\n"
                  "    v.push(String::from_lit(\"bb\"));\n"
                  "    v.push(String::from_lit(\"ccc\"));\n"
-                 "    for s in move v { print_str(s.to_cstr()); print_int(s.len()); }\n"
+                 "    for s in move v { print(s.to_cstr()); print(s.len()); }\n"
                  "    println();\n"
                  "    ret 0; }",
         "a1bb2ccc3\n",
@@ -2005,7 +2041,7 @@ TEST_F(RuntimeTest, ForBorrowsNonCopyElements)
     expectOutput("impt vec { Vec };\n"
                  "fn main() -> i32 { let mut v = Vec<String>::new();\n"
                  "    v.push(String::from_lit(\"ab\")); v.push(String::from_lit(\"cde\"));\n"
-                 "    for s in v { print_str(s.to_cstr()); print_int(s.len()); }\n"
+                 "    for s in v { print(s.to_cstr()); print(s.len()); }\n"
                  "    println();\n"
                  "    if v.len() != 2 { ret 1; }\n"
                  "    ret 0; }\n",
@@ -2198,7 +2234,7 @@ TEST_F(RuntimeTest, LetElseMovesANonCopyPayload)
                  "fn main() -> i32 {\n"
                  "    let s = maybe(true) else String::from_lit(\"none\");\n"
                  "    let t = maybe(false) else String::from_lit(\"none\");\n"
-                 "    print_str(s.to_cstr()); print_str(t.to_cstr()); println();\n"
+                 "    print(s.to_cstr()); print(t.to_cstr()); println();\n"
                  "    ret 0; }\n",
         "hinone\n",
         0);

@@ -184,6 +184,11 @@ int RunModuleInJit(std::unique_ptr<llvm::Module> Mod,
         {"memcpy", reinterpret_cast<void *>(&memcpy)},
         {"strlen", reinterpret_cast<void *>(&strlen)},
         {"abort", reinterpret_cast<void *>(&abort)},
+        // The IO primitives the stdlib io module is built on (and fflush, which
+        // every abort path calls before trapping).
+        {"fgetc", reinterpret_cast<void *>(&fgetc)},
+        {"fwrite", reinterpret_cast<void *>(&fwrite)},
+        {"fflush", reinterpret_cast<void *>(&fflush)},
 #ifdef _WIN32
         {"__acrt_iob_func", reinterpret_cast<void *>(&LisJitIobFunc)},
 #endif

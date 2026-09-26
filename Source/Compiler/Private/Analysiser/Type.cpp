@@ -35,6 +35,22 @@ bool Type::isCopyable() const
     if (kind == Kind::GenericParam)
         return implementsTrait("Copy");
 
+    // A USER TYPE becomes Copy by SAYING SO: `impl Copy for P {}` (2026-09-26).
+    // The marker was documented from the start but had no effect — isCopyable()
+    // ignored implTrait for a CustomType, so the impl did nothing: a struct was
+    // always Move, and `[P; N]` was rejected ("array element type ... must be
+    // Copy"). Wiring it up is what makes a plain-data struct behave like the
+    // primitive it is made of:
+    //
+    //     struct C { pub re: f64, pub im: f64 }   impl Copy for C {}
+    //     let a: [C; 4] = ...;   let b = a[0];   let c = a[0];   // both fine
+    //     f(x, y);               f(x, z);                        // no move
+    //
+    // visit(HIRImpl) enforces the two invariants that keep it sound: every field
+    // must itself be Copy, and the type must not implement Drop.
+    if (kind == Kind::Custom)
+        return implementsTrait("Copy");
+
     // `&mut T` is deliberately NOT Copy: two live copies of an exclusive
     // reference would both claim unique access to the referent. It is still
     // non-owning (see isPointerLike), so it never needs drop glue — that is what

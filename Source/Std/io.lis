@@ -1,0 +1,382 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// io.lis
+//
+// Input and output. Everything here is ordinary Lis code — the compiler only
+// provides the three byte-stream primitives (`__read_byte` / `__write` /
+// `__flush`, standard-library only) and the lowering of `Display` for the
+// primitives. Tokenizing, number parsing and line handling are policy, and
+// policy lives here.
+//
+// INPUT IS TOKEN BASED. The numeric readers skip any whitespace (spaces, tabs,
+// newlines) and consume exactly ONE token, so "3 4" on one line, one value per
+// line, or any mixture of the two all work:
+//
+//     let n = read_i32();          // "3 4" -> 3, then 4
+//     let a = read_i64();          // 64-bit values and a leading -/+ are fine
+//     let f = read_f64();          // 3.14, 1e-9, -2.5e8
+//     let w = read_word();         // -> String, whitespace-delimited
+//     let l = read_line();         // -> String, the REST of the current line
+//     let p = try_read_i32();      // -> Option<i32>: None at end of input
+//
+// `read_line` keeps spaces, drops the line terminator (both LF and CRLF) and
+// grows without limit — a line longer than any fixed buffer is fine.
+//
+// At end of input the `read_*` readers return 0 / an empty String (a program
+// that must tell "0" from "no more input" uses the `try_read_*` family).
+//
+// OUTPUT. `print(x)` writes x with no terminator and no flush; `println()` writes
+// a newline AND flushes, which is the interactive-problem protocol
+// (`print(x); println();` is the merged spelling). Output goes through libc's
+// stdout, so ordinary output is buffered by the C library and flushed when the
+// process exits — a program that never calls println()/flush() still prints
+// everything, just in bigger bursts.
+
+impt fmt { Display };
+impt string { String };
+impt option { Option };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Output
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Write `x` to standard output, with no trailing newline.
+fn print<T: Display>(x: T)
+{
+    x.show();
+}
+
+// Write a newline AND flush standard output.
+//
+// This is the io module's one flushing point: `print` (and `print("\n")`)
+// only buffer, `println()` pushes everything written so far out immediately.
+// That is what an INTERACTIVE problem needs — the judge reads the line before it
+// answers — and it is also how a running program makes its output visible.
+//
+// It deliberately takes no value, and it deliberately costs something: this is
+// the language's `std::endl`. A normal newline is `print("\n")` — buffered,
+// free — and `println()` is the explicit "flush what you have" call. Writing
+// `println()` after every line is therefore a visible choice with a visible
+// price, which is exactly the signal an interactive problem (or a debugging
+// session) wants and a bulk-output loop does not.
+//
+// (`print(x); println();` is the merged spelling. The language has no
+// overloading, so a one-argument `println` would need the compiler to
+// special-case the name; the flush is what makes the zero-argument form a
+// function of its own rather than a synonym for `print("\n")`.)
+fn println()
+{
+    __write("\n", 1);
+    __flush();
+}
+
+// Push everything written so far out to standard output, without adding a
+// newline — the interactive counterpart of `println()` when the protocol wants
+// no line break. Ordinary (non-interactive) programs never need it: libc flushes
+// stdout when the process exits.
+fn flush()
+{
+    __flush();
+}
+
+// A `String` prints as its text; `print(&i8)` (the primitive case) does the
+// actual writing, so there is no second copy of the string here.
+impl Display for String
+{
+    fn show(self: &Self)
+    {
+        print(self.to_cstr());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Input
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One byte of pushback is all the state the tokenizer needs, and it is an i32 —
+// module-level state can be an integer because globals are implicitly mutable
+// (a pointer-typed global could not even be initialized: a global initializer
+// must be a literal).
+//
+// -1 in `pushback` means "empty" (end of input is never stored: re-reading it
+// is the same answer).
+
+let pushback: i32 = -1;
+
+// The next byte without consuming it; -1 at end of input.
+fn peek_byte() -> i32
+{
+    if pushback >= 0 {
+        ret pushback;
+    }
+    let c = __read_byte();
+    if c >= 0 {
+        pushback = c;
+    }
+    ret c;
+}
+
+// Consume and return the next byte; -1 at end of input.
+fn take_byte() -> i32
+{
+    if pushback >= 0 {
+        let c = pushback;
+        pushback = -1;
+        ret c;
+    }
+    ret __read_byte();
+}
+
+// Whitespace, as the token readers define it: space, tab, LF, CR, VT, FF.
+fn is_space(c: i32) -> bool
+{
+    ret c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+}
+
+fn is_digit_byte(c: i32) -> bool
+{
+    ret c >= 48 && c <= 57;
+}
+
+// Consume whitespace, leaving the first non-space byte (or EOF) on the pushback.
+fn skip_spaces()
+{
+    let mut c = peek_byte();
+    while c >= 0 && is_space(c) {
+        pushback = -1;
+        c = peek_byte();
+    }
+}
+
+// ── integers ────────────────────────────────────────────────────────────────
+
+// The next integer token as an i64; 0 at end of input. A leading + or - is
+// accepted. Overflow wraps silently (like C++'s `cin`), so a value that does not
+// fit keeps its low bits.
+fn read_i64() -> i64
+{
+    skip_spaces();
+    let mut neg = false;
+    let mut c = peek_byte();
+    if c == 45 {
+        neg = true;
+        pushback = -1;
+        c = peek_byte();
+    } else if c == 43 {
+        pushback = -1;
+        c = peek_byte();
+    }
+    // NOTE: `0 as i64` rather than `0` — an integer literal is typed i32 and
+    // there is no literal-type inference yet, so a bare `0` does not fit an i64
+    // binding (see the i64-literal item in the roadmap).
+    let mut v: i64 = 0 as i64;
+    while is_digit_byte(c) {
+        v = v * (10 as i64) + ((c - 48) as i64);
+        pushback = -1;
+        c = peek_byte();
+    }
+    if neg {
+        ret (0 as i64) - v;
+    }
+    ret v;
+}
+
+// The next integer token as an i32; 0 at end of input.
+fn read_i32() -> i32
+{
+    skip_spaces();
+    let mut neg = false;
+    let mut c = peek_byte();
+    if c == 45 {
+        neg = true;
+        pushback = -1;
+        c = peek_byte();
+    } else if c == 43 {
+        pushback = -1;
+        c = peek_byte();
+    }
+    let mut v = 0;
+    while is_digit_byte(c) {
+        v = v * 10 + (c - 48);
+        pushback = -1;
+        c = peek_byte();
+    }
+    if neg {
+        ret 0 - v;
+    }
+    ret v;
+}
+
+// ── floats ──────────────────────────────────────────────────────────────────
+
+// The next floating-point token: an optional sign, digits, an optional
+// fractional part and an optional decimal exponent (1e-9, -2.5E8).
+// 0.0 at end of input.
+fn read_f64() -> f64
+{
+    skip_spaces();
+    let mut neg = false;
+    let mut c = peek_byte();
+    if c == 45 {
+        neg = true;
+        pushback = -1;
+        c = peek_byte();
+    } else if c == 43 {
+        pushback = -1;
+        c = peek_byte();
+    }
+
+    let mut ip: i64 = 0 as i64;
+    while is_digit_byte(c) {
+        ip = ip * (10 as i64) + ((c - 48) as i64);
+        pushback = -1;
+        c = peek_byte();
+    }
+
+    let mut frac: f64 = 0.0;
+    if c == 46 {
+        pushback = -1;
+        c = peek_byte();
+        let mut scale: f64 = 1.0;
+        while is_digit_byte(c) {
+            scale = scale * 10.0;
+            frac = frac + ((c - 48) as f64) / scale;
+            pushback = -1;
+            c = peek_byte();
+        }
+    }
+
+    let mut v: f64 = (ip as f64) + frac;
+    if c == 101 || c == 69 {
+        pushback = -1;
+        let mut eneg = false;
+        c = peek_byte();
+        if c == 45 {
+            eneg = true;
+            pushback = -1;
+            c = peek_byte();
+        } else if c == 43 {
+            pushback = -1;
+            c = peek_byte();
+        }
+        let mut e = 0;
+        while is_digit_byte(c) {
+            e = e * 10 + (c - 48);
+            pushback = -1;
+            c = peek_byte();
+        }
+        let mut i = 0;
+        while i < e {
+            if eneg {
+                v = v / 10.0;
+            } else {
+                v = v * 10.0;
+            }
+            i = i + 1;
+        }
+    }
+
+    if neg {
+        ret 0.0 - v;
+    }
+    ret v;
+}
+
+// ── words and lines ─────────────────────────────────────────────────────────
+
+// The next whitespace-delimited token as a String; empty at end of input.
+fn read_word() -> String
+{
+    skip_spaces();
+    let mut s = String::new();
+    let mut c = peek_byte();
+    while c >= 0 && !is_space(c) {
+        s.push_char(c as char);
+        pushback = -1;
+        c = peek_byte();
+    }
+    ret s;
+}
+
+// The REST of the current line, without its terminator (LF or CRLF). Spaces are
+// kept; the length is unlimited. Empty when the line is already exhausted (or at
+// end of input).
+fn read_line() -> String
+{
+    let mut s = String::new();
+    let mut c = take_byte();
+    while c >= 0 {
+        if c == 10 {
+            ret s;
+        }
+        if c != 13 {
+            s.push_char(c as char);
+        }
+        c = take_byte();
+    }
+    ret s;
+}
+
+// Everything that is left, including newlines; empty at end of input.
+fn read_rest() -> String
+{
+    let mut s = String::new();
+    let mut c = take_byte();
+    while c >= 0 {
+        s.push_char(c as char);
+        c = take_byte();
+    }
+    ret s;
+}
+
+// ── the `try_` family: end of input is an Option, not a zero ────────────────
+//
+// The plain readers cannot tell "no more input" from "the value 0"; these can.
+// None is returned only when the input is ALREADY exhausted — a malformed token
+// still yields Some(0), exactly like the plain readers.
+
+fn try_read_i64() -> Option<i64>
+{
+    skip_spaces();
+    if peek_byte() < 0 {
+        ret Option::None;
+    }
+    ret Option::Some(read_i64());
+}
+
+fn try_read_i32() -> Option<i32>
+{
+    skip_spaces();
+    if peek_byte() < 0 {
+        ret Option::None;
+    }
+    ret Option::Some(read_i32());
+}
+
+fn try_read_f64() -> Option<f64>
+{
+    skip_spaces();
+    if peek_byte() < 0 {
+        ret Option::None;
+    }
+    ret Option::Some(read_f64());
+}
+
+fn try_read_word() -> Option<String>
+{
+    skip_spaces();
+    if peek_byte() < 0 {
+        ret Option::None;
+    }
+    ret Option::Some(read_word());
+}
+
+// None only at end of input; an exhausted line yields Some("").
+fn try_read_line() -> Option<String>
+{
+    if peek_byte() < 0 {
+        ret Option::None;
+    }
+    ret Option::Some(read_line());
+}

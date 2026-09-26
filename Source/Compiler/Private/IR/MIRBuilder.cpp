@@ -1930,6 +1930,11 @@ MIRPlace MIRBuilder::buildNameRef(HIRNameRef *ref)
 
 MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
 {
+    // `&&` / `||` are the one pair that must NOT evaluate both operands: they
+    // short-circuit (see buildLogicalOp). Everything below is the eager path.
+    if (bin->opKind == HIRBinaryOp::OpKind::And || bin->opKind == HIRBinaryOp::OpKind::Or)
+        return buildLogicalOp(bin);
+
     // Evaluate operands before making the temp (important for aliased places).
     // A comparison READS both operands (`a < b` must not consume a or b — the
     // comparison traits take `&Self`), whatever the operand type's Copy-ness.
@@ -2010,6 +2015,60 @@ MIRPlace MIRBuilder::buildBinaryOp(HIRBinaryOp *bin)
 }
 
 // ── unary value operators ─────────────────────────────────────────────────────
+
+// ── `a && b` / `a || b`: short-circuit ───────────────────────────────────────
+//
+// C / Rust semantics: the right operand runs ONLY when the left one does not
+// already decide the result — `false && x` never evaluates x, `true || x` never
+// evaluates x. That is what makes the guard idiom safe, and it is why this is a
+// CFG diamond rather than the eager `and`/`or` instruction the operands used to
+// be folded into:
+//
+//     while h >= 0 && ans[h] == 0 { ... }     // no ans[-1] read once h < 0
+//
+// Shape (the same one buildIf and `let ... else` use): the left operand is
+// evaluated unconditionally, the result temp is assigned on BOTH paths so it is
+// definitely assigned at the join, and the right operand lives in its own block
+// — which also makes any temporary borrow it creates conditional.
+MIRPlace MIRBuilder::buildLogicalOp(HIRBinaryOp *bin)
+{
+    const bool isAnd = bin->opKind == HIRBinaryOp::OpKind::And;
+    MIRPlace dest = makeTempPlace(bin->type);
+
+    MIROperand lhs = exprToOperand(bin->left.get());
+
+    BasicBlockId rhsId = newBlock(isAnd ? "and_rhs" : "or_rhs");
+    BasicBlockId shortId = newBlock(isAnd ? "and_short" : "or_short");
+    BasicBlockId joinId = newBlock("logical_join");
+
+    // `a && b` evaluates b when a is TRUE; `a || b` evaluates b when a is FALSE.
+    sealBlock(curBB_, MIRTermBranch{
+                          .cond = std::move(lhs),
+                          .thenBlock = isAnd ? rhsId : shortId,
+                          .elseBlock = isAnd ? shortId : rhsId,
+                      });
+
+    // The short-circuiting path: the left operand already decided the result.
+    switchTo(shortId);
+    emitAssign(dest,
+        MIRRValueUse{.operand = MIRConst{
+                         .kind = MIRConst::Kind::Bool,
+                         .value = !isAnd,
+                         .type = dest.type,
+                     }});
+    sealBlock(curBB_, MIRTermGoto{.target = joinId});
+
+    // The path that evaluates the right operand. It may itself diverge
+    // (`true && panic("x")`): then this block is already sealed and there is no
+    // edge to the join — the same invariant buildIf / let-else respect.
+    switchTo(rhsId);
+    emitAssign(dest, MIRRValueUse{exprToOperand(bin->right.get())});
+    if (!std::holds_alternative<MIRTermDiverge>(currentBlock().terminator))
+        sealBlock(curBB_, MIRTermGoto{.target = joinId});
+
+    switchTo(joinId);
+    return dest;
+}
 
 MIRPlace MIRBuilder::buildUnaryOp(HIRUnaryOp *un)
 {

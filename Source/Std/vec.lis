@@ -239,6 +239,40 @@ impl<T: Copy> Vec<T>
         if i < 0 || i >= self.len - self.cursor { ret Option::None; }
         ret Option::Some(self.data[self.cursor + i]);
     }
+
+    // Grow or shrink to `n` elements, filling new slots with copies of `v`.
+    //
+    // This is the "give me a buffer of n elements" facility (2026-09-26): before
+    // it, sizing a Vec meant n `push`es. `T: Copy` is what makes the fill loop
+    // legal — the same value is handed to `push` on every iteration — and it is
+    // also why shrinking is free: a Copy value has nothing to destroy.
+    fn resize(self: &mut Vec, n: i32, v: T)
+    {
+        if n < 0 { panic("Vec::resize with a negative length"); }
+
+        if n < self.len
+        {
+            self.len = n;
+            if self.cursor > self.len { self.cursor = self.len; }
+            ret;
+        }
+
+        while self.len < n
+        {
+            self.push(v);
+        }
+    }
+
+    // A Vec of `n` copies of `v` — this standard library's `vec![v; n]`.
+    fn from_elem(v: T, n: i32) -> Vec
+    {
+        // NOTE the explicit `<T>`: this language has no expected-type inference,
+        // so a bare `Vec::new()` in a generic body cannot learn T (the same rule
+        // that makes `let v: Vec<i32> = Vec::new();` an error at a call site).
+        let mut r = Vec<T>::new();
+        r.resize(n, v);
+        ret r;
+    }
 }
 
 // `v[i]` — index out of bounds aborts (arrays behave the same way).

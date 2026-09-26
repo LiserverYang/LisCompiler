@@ -1,0 +1,30 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// fmt.lis
+//
+// `Display` — how a value prints itself. Implement it to make a type usable with
+// `print` / `println`:
+//
+//     impt fmt { Display };
+//     impt io  { print, println };
+//
+//     struct Point { pub x: i32, pub y: i32 }
+//     impl Display for Point
+//     {
+//         fn show(self: &Self) { print(self.x); print(","); print(self.y); }
+//     }
+//
+//     print(Point { x: 1, y: 2 });   // 1,2
+//
+// The primitives (i8/i16/i32/i64/f32/f64/bool/char) and `&i8` (a C string) are
+// seeded by the compiler — they cannot carry a method body of their own — and
+// their lowering lives in the backend. `String` implements it in io.lis.
+//
+// The receiver is `&Self`: printing must not consume the value.
+
+trait Display
+{
+    // Write this value to standard output.
+    fn show(self: &Self);
+}

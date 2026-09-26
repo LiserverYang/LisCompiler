@@ -30,14 +30,19 @@
 /// never drift apart when a new builtin is added.
 enum class BuiltinCategory
 {
-    Print,     // print_str / println / print_int / print_float / print_bool / print_char
-    Input,     // read_line / read_int / read_f64
+    // NOTE (2026-09-25): the print_* / read_* families are GONE. Printing and
+    // reading are ordinary Lis code in Source/Std/io.lis -- print / println /
+    // flush and the read_* readers -- built on the IO primitives below plus the
+    // Display lowering for the primitives. The compiler no longer knows those
+    // names, which is what keeps the API from growing a function per type.
     Heap,      // __alloc / __free / __memcpy / __strlen
     Ptr,       // __deref / __deref_mut  (raw pointer → reference)
     ToString,  // to_string_i32/i64/f64/bool/char
     Panic,     // panic
     Assert,    // assert (and the synthesized assert_fail backend entry)
     Str,       // str_len / str_cmp (C-string helpers over &i8)
+    IO,        // __read_byte / __write / __flush — the byte-stream primitives
+    Internal,  // __show_* — the Display lowering for the primitives
     NotBuiltin // any other name
 };
 
@@ -45,19 +50,6 @@ enum class BuiltinCategory
 /// codegen call this instead of maintaining their own name lists.
 inline BuiltinCategory classifyBuiltin(const std::string &name)
 {
-    static const std::unordered_set<std::string> print = {
-        "print_str",
-        "println",
-        "print_int",
-        "print_float",
-        "print_bool",
-        "print_char",
-    };
-    static const std::unordered_set<std::string> input = {
-        "read_line",
-        "read_int",
-        "read_f64",
-    };
     static const std::unordered_set<std::string> heap = {
         "__alloc",
         "__free",
@@ -99,14 +91,40 @@ inline BuiltinCategory classifyBuiltin(const std::string &name)
         "str_len",
         "str_cmp",
     };
-    if (print.count(name)) return BuiltinCategory::Print;
-    if (input.count(name)) return BuiltinCategory::Input;
+    // The IO PRIMITIVES: one buffered byte in, one byte block out, one flush.
+    // These are what the standard library's `io` module is built on — tokenizing,
+    // number parsing and line handling are POLICY and live in io.lis, not here.
+    // Like the heap primitives they are stdlib-only (E3013): user code goes
+    // through io's safe API.
+    static const std::unordered_set<std::string> io = {
+        "__read_byte", // () -> i32: the next byte, -1 at end of input
+        "__write",     // (*i8, i32) -> void: write n bytes to stdout
+        "__flush",     // () -> void: flush stdout
+    };
+    // INTERNAL entries: the `Display` lowering for the primitives, emitted by
+    // monomorphization (a primitive cannot carry a method body). They are
+    // reserved so no user function can collide with them, but they are NOT
+    // callable from source — an explicit call falls through to normal name
+    // resolution and reports "undefined identifier", which is the honest answer.
+    static const std::unordered_set<std::string> internal = {
+        "__show_i8",
+        "__show_i16",
+        "__show_i32",
+        "__show_i64",
+        "__show_f32",
+        "__show_f64",
+        "__show_bool",
+        "__show_char",
+        "__show_str",
+    };
     if (heap.count(name)) return BuiltinCategory::Heap;
     if (ptr.count(name)) return BuiltinCategory::Ptr;
     if (toString.count(name)) return BuiltinCategory::ToString;
     if (panic.count(name)) return BuiltinCategory::Panic;
     if (assertNames.count(name)) return BuiltinCategory::Assert;
     if (str.count(name)) return BuiltinCategory::Str;
+    if (io.count(name)) return BuiltinCategory::IO;
+    if (internal.count(name)) return BuiltinCategory::Internal;
     return BuiltinCategory::NotBuiltin;
 }
 

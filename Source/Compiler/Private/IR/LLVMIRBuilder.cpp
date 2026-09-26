@@ -470,22 +470,6 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     for (const auto &arg : s.args)
         args.push_back(lowerOperand(fs, arg));
 
-    // Builtin print calls lower to libc printf; intercept before the normal
-    // callee resolution (there is no `print_int` symbol).
-    if (isPrintBuiltin(s.funcName))
-    {
-        emitPrintCall(fs, s, args);
-        return;
-    }
-
-    // Builtin input calls lower to libc fgets + parse (`read_line`/`read_int`/
-    // `read_f64`); intercept for the same reason.
-    if (isInputBuiltin(s.funcName))
-    {
-        emitInputCall(fs, s, args);
-        return;
-    }
-
     // Builtin heap calls lower to libc malloc/free/memcpy/strlen.
     if (isHeapBuiltin(s.funcName))
     {
@@ -527,6 +511,21 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     if (isStrBuiltin(s.funcName))
     {
         emitStrBuiltinCall(fs, s, args);
+        return;
+    }
+
+    // IO primitives: the byte stream the stdlib io module reads and writes.
+    if (isIoBuiltin(s.funcName))
+    {
+        emitIoCall(fs, s, args);
+        return;
+    }
+
+    // The compiler-generated Display lowering for the primitives: `print(1)`
+    // reaches the backend as `__show_i32(1)`.
+    if (isShowBuiltin(s.funcName))
+    {
+        emitShowCall(fs, s, args);
         return;
     }
 
@@ -1099,6 +1098,9 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
                 builder_->CreateCondBr(bad, trapBB, contBB);
 
                 builder_->SetInsertPoint(trapBB);
+                // Flush before trapping: an out-of-bounds index must not swallow
+                // the output produced so far.
+                emitFlushStdout();
                 builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
                 builder_->CreateUnreachable();
 
@@ -1203,11 +1205,6 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)
         context->module.get());
 }
 
-bool LLVMIRBuilder::isPrintBuiltin(const std::string &name)
-{
-    return classifyBuiltin(name) == BuiltinCategory::Print;
-}
-
 llvm::Function *LLVMIRBuilder::getOrDeclarePrintf()
 {
     if (auto *fn = context->module->getFunction("printf"))
@@ -1222,101 +1219,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclarePrintf()
         context->module.get());
 }
 
-void LLVMIRBuilder::emitPrintCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
-{
-    llvm::Function *printf = getOrDeclarePrintf();
-    auto format = [&](const char *fmt)
-    {
-        return builder_->CreateGlobalStringPtr(fmt, ".fmt");
-    };
-
-    std::vector<llvm::Value *> callArgs;
-    llvm::Value *fmtPtr = nullptr;
-
-    if (s.funcName == "print_str")
-    {
-        fmtPtr = format("%s");
-        callArgs = args; // the string arg is already an i8*
-    }
-    else if (s.funcName == "print_int")
-    {
-        fmtPtr = format("%d");
-        callArgs = args;
-    }
-    else if (s.funcName == "print_float")
-    {
-        fmtPtr = format("%f");
-        callArgs = args;
-    }
-    else if (s.funcName == "print_bool")
-    {
-        fmtPtr = format("%d");
-        // Bool is i1/i8 — widen to the int that variadic printf expects.
-        if (!args.empty())
-            callArgs.push_back(builder_->CreateZExt(args[0], builder_->getInt32Ty()));
-    }
-    else if (s.funcName == "print_char")
-    {
-        fmtPtr = format("%c");
-        callArgs = args; // char already lowers to i32
-    }
-    else if (s.funcName == "println")
-    {
-        fmtPtr = format("\n");
-    }
-
-    // printf(fmt, arg...)
-    std::vector<llvm::Value *> printfArgs{fmtPtr};
-    printfArgs.insert(printfArgs.end(), callArgs.begin(), callArgs.end());
-    builder_->CreateCall(printf->getFunctionType(), printf, printfArgs);
-}
-
 // ── Builtin input: read_line / read_int / read_f64 ───────────────────────────
-
-bool LLVMIRBuilder::isInputBuiltin(const std::string &name)
-{
-    return classifyBuiltin(name) == BuiltinCategory::Input;
-}
-
-llvm::Function *LLVMIRBuilder::getOrDeclareFgets()
-{
-    // char* fgets(char* str, int count, FILE* stream)
-    return getOrDeclareLibcFunction("fgets",
-        llvm::FunctionType::get(
-            llvm::PointerType::getUnqual(ctx_), // returns char*
-            {llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt32Ty(ctx_), llvm::PointerType::getUnqual(ctx_)},
-            /*isVarArg=*/false));
-}
-
-llvm::Function *LLVMIRBuilder::getOrDeclareStrCspn()
-{
-    // size_t strcspn(const char* str, const char* reject)
-    return getOrDeclareLibcFunction("strcspn",
-        llvm::FunctionType::get(
-            llvm::Type::getInt64Ty(ctx_),
-            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
-            /*isVarArg=*/false));
-}
-
-llvm::Function *LLVMIRBuilder::getOrDeclareAtoi()
-{
-    // int atoi(const char* str)
-    return getOrDeclareLibcFunction("atoi",
-        llvm::FunctionType::get(
-            llvm::Type::getInt32Ty(ctx_),
-            {llvm::PointerType::getUnqual(ctx_)},
-            /*isVarArg=*/false));
-}
-
-llvm::Function *LLVMIRBuilder::getOrDeclareStrtod()
-{
-    // double strtod(const char* str, char** endptr)
-    return getOrDeclareLibcFunction("strtod",
-        llvm::FunctionType::get(
-            llvm::Type::getDoubleTy(ctx_),
-            {llvm::PointerType::getUnqual(ctx_), llvm::PointerType::getUnqual(ctx_)},
-            /*isVarArg=*/false));
-}
 
 llvm::Function *LLVMIRBuilder::getOrDeclareAcrtIobFunc()
 {
@@ -1345,81 +1248,6 @@ llvm::GlobalVariable *LLVMIRBuilder::getOrDeclareStdin()
         llvm::GlobalValue::ExternalLinkage,
         nullptr,
         "stdin");
-}
-
-llvm::GlobalVariable *LLVMIRBuilder::getOrCreateInputBuf()
-{
-    if (auto *g = context->module->getNamedGlobal("__lis_input_buf"))
-        return g;
-    auto *arrTy = llvm::ArrayType::get(llvm::Type::getInt8Ty(ctx_), 256);
-    return new llvm::GlobalVariable(*context->module, arrTy, /*isConstant=*/false, llvm::GlobalValue::PrivateLinkage, llvm::Constant::getNullValue(arrTy), "__lis_input_buf");
-}
-
-void LLVMIRBuilder::emitInputCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
-{
-    llvm::GlobalVariable *buf = getOrCreateInputBuf();
-    llvm::Value *bufPtr = buf; // globals are pointer values
-
-    llvm::Function *fgets = getOrDeclareFgets();
-    // stdin FILE*: MinGW/UCRT exposes it via `__acrt_iob_func(0)` (a macro in
-    // <stdio.h> → no `stdin` data symbol); other libcs export a `stdin` global.
-    llvm::Value *stdinVal;
-#ifdef _WIN32
-    stdinVal = builder_->CreateCall(getOrDeclareAcrtIobFunc()->getFunctionType(),
-        getOrDeclareAcrtIobFunc(),
-        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
-#else
-    llvm::GlobalVariable *stdinGlob = getOrDeclareStdin();
-    stdinVal = builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), stdinGlob);
-#endif
-
-    // fgets(buf, 256, stdin) — the RETURN VALUE matters: NULL means the input
-    // is exhausted, and the buffer still holds the PREVIOUS line (it is never
-    // cleared). Dropping it made `while true { read_line() }` spin forever on
-    // the last line read, so EOF now has to be handled explicitly: at end of
-    // input read_line yields an empty string and the numeric readers yield 0.
-    llvm::Value *read = builder_->CreateCall(fgets->getFunctionType(), fgets, {bufPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 256), stdinVal});
-    llvm::Value *eof = builder_->CreateICmpEQ(read, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_)));
-    auto select = [&](llvm::Value *whenEof, llvm::Value *otherwise)
-    {
-        return builder_->CreateSelect(eof, whenEof, otherwise);
-    };
-
-    if (s.funcName == "read_line")
-    {
-        // Strip trailing \r\n: idx = strcspn(buf, "\r\n"); buf[idx] = 0.
-        // On EOF the index is forced to 0 so the stale line is cleared instead
-        // of returned. An EMPTY LINE is indistinguishable from EOF here — the
-        // same thing Rust's read_line reports (0 bytes read).
-        llvm::Function *strcspn = getOrDeclareStrCspn();
-        llvm::Value *reject = builder_->CreateGlobalStringPtr("\r\n", ".rstr");
-        llvm::Value *found = builder_->CreateCall(strcspn->getFunctionType(), strcspn, {bufPtr, reject});
-        // strcspn returns size_t, so the EOF branch has to be the same width —
-        // an i32 zero here was an invalid `select` operand and failed the
-        // module verifier.
-        llvm::Value *idx = select(llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), 0), found);
-        llvm::Value *end = builder_->CreateInBoundsGEP(llvm::Type::getInt8Ty(ctx_), bufPtr, idx);
-        builder_->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(ctx_), 0), end);
-        if (s.dest.has_value())
-            storePlace(fs, *s.dest, bufPtr);
-    }
-    else if (s.funcName == "read_int")
-    {
-        llvm::Function *atoi = getOrDeclareAtoi();
-        llvm::Value *parsed = builder_->CreateCall(atoi->getFunctionType(), atoi, {bufPtr});
-        llvm::Value *val = select(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0), parsed);
-        if (s.dest.has_value())
-            storePlace(fs, *s.dest, val);
-    }
-    else if (s.funcName == "read_f64")
-    {
-        llvm::Function *strtod = getOrDeclareStrtod();
-        llvm::Value *endptr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_));
-        llvm::Value *parsed = builder_->CreateCall(strtod->getFunctionType(), strtod, {bufPtr, endptr});
-        llvm::Value *val = select(llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx_), 0.0), parsed);
-        if (s.dest.has_value())
-            storePlace(fs, *s.dest, val);
-    }
 }
 
 // ── Builtin heap: __alloc / __free / __memcpy / __strlen ─────────────────────
@@ -1572,6 +1400,186 @@ void LLVMIRBuilder::emitStrBuiltinCall(FunctionState &fs,
         storePlace(fs, *s.dest, result);
 }
 
+// ── IO primitives: __read_byte / __write / __flush ───────────────────────────
+//
+// The whole user-facing IO API lives in Source/Std/io.lis: these three are the
+// byte stream it is built on, and like the heap primitives they are reachable
+// only from the standard library (E3013). stdin/stdout are libc's own buffered
+// streams, so the buffering, the flush at exit and the interaction with a
+// redirected pipe/file all come from the C runtime.
+
+bool LLVMIRBuilder::isIoBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::IO;
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareFgetc()
+{
+    // int fgetc(FILE* stream) — returns the byte, or EOF (-1).
+    return getOrDeclareLibcFunction("fgetc",
+        llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(ctx_),
+            {llvm::PointerType::getUnqual(ctx_)},
+            /*isVarArg=*/false));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareFwrite()
+{
+    // size_t fwrite(const void* ptr, size_t size, size_t n, FILE* stream)
+    return getOrDeclareLibcFunction("fwrite",
+        llvm::FunctionType::get(
+            llvm::Type::getInt64Ty(ctx_),
+            {llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt64Ty(ctx_),
+                llvm::Type::getInt64Ty(ctx_), llvm::PointerType::getUnqual(ctx_)},
+            /*isVarArg=*/false));
+}
+
+llvm::Function *LLVMIRBuilder::getOrDeclareFflush()
+{
+    // int fflush(FILE* stream)
+    return getOrDeclareLibcFunction("fflush",
+        llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(ctx_),
+            {llvm::PointerType::getUnqual(ctx_)},
+            /*isVarArg=*/false));
+}
+
+llvm::Value *LLVMIRBuilder::getStdinFilePtr()
+{
+    // Same split as stderr/stdout below: MinGW/UCRT exposes the standard streams
+    // through __acrt_iob_func (no data symbol); other libcs export globals.
+#ifdef _WIN32
+    llvm::Function *iob = getOrDeclareAcrtIobFunc();
+    return builder_->CreateCall(iob->getFunctionType(), iob,
+        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
+#else
+    llvm::GlobalVariable *g = getOrDeclareStdin();
+    return builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), g);
+#endif
+}
+
+llvm::Value *LLVMIRBuilder::getStdoutFilePtr()
+{
+#ifdef _WIN32
+    llvm::Function *iob = getOrDeclareAcrtIobFunc();
+    return builder_->CreateCall(iob->getFunctionType(), iob,
+        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 1)});
+#else
+    llvm::GlobalVariable *g = context->module->getNamedGlobal("stdout");
+    if (!g)
+        g = new llvm::GlobalVariable(*context->module,
+            llvm::PointerType::getUnqual(ctx_),
+            /*isConstant=*/false,
+            llvm::GlobalValue::ExternalLinkage,
+            nullptr,
+            "stdout");
+    return builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), g);
+#endif
+}
+
+void LLVMIRBuilder::emitFlushStdout()
+{
+    llvm::Function *fflushFn = getOrDeclareFflush();
+    builder_->CreateCall(fflushFn->getFunctionType(), fflushFn, {getStdoutFilePtr()});
+}
+
+void LLVMIRBuilder::emitIoCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
+{
+    if (s.funcName == "__read_byte")
+    {
+        llvm::Function *fgetcFn = getOrDeclareFgetc();
+        llvm::Value *byte = builder_->CreateCall(fgetcFn->getFunctionType(), fgetcFn, {getStdinFilePtr()});
+        if (s.dest.has_value())
+            storePlace(fs, *s.dest, byte);
+    }
+    else if (s.funcName == "__write")
+    {
+        llvm::Function *fwriteFn = getOrDeclareFwrite();
+        llvm::Type *i64Ty = llvm::Type::getInt64Ty(ctx_);
+        // fwrite(ptr, 1, n, stdout): the length is the language's i32.
+        llvm::Value *n = args.size() > 1 ? builder_->CreateSExt(args[1], i64Ty)
+                                         : llvm::ConstantInt::get(i64Ty, 0);
+        llvm::Value *ptr = args.empty() ? llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_))
+                                        : args[0];
+        // Explicit vector: a braced list of mixed Constant*/Value* does not
+        // deduce to ArrayRef<Value*>.
+        std::vector<llvm::Value *> writeArgs{
+            ptr, llvm::ConstantInt::get(i64Ty, 1), n, getStdoutFilePtr()};
+        builder_->CreateCall(fwriteFn->getFunctionType(), fwriteFn, writeArgs);
+    }
+    else if (s.funcName == "__flush")
+    {
+        emitFlushStdout();
+    }
+}
+
+// ── The Display lowering for the primitives (__show_*) ───────────────────────
+//
+// Emitted by monomorphization, never written by a user: `print(x)` calls
+// `x.show()`, and for a primitive that becomes __show_<type>(x). The formats are
+// the ones the language has always used (%d / %lld / %f / %c), so printing a
+// primitive produces exactly the text the retired print_int/print_float/... did.
+
+bool LLVMIRBuilder::isShowBuiltin(const std::string &name)
+{
+    return classifyBuiltin(name) == BuiltinCategory::Internal;
+}
+
+void LLVMIRBuilder::emitShowCall(FunctionState &fs, const MIRStmtCall &s, const std::vector<llvm::Value *> &args)
+{
+    (void)fs;
+    llvm::Function *printfFn = getOrDeclarePrintf();
+    llvm::Value *val = args.empty() ? nullptr : args[0];
+
+    const char *format = "%d";
+    std::vector<llvm::Value *> callArgs;
+    if (s.funcName == "__show_str")
+    {
+        format = "%s";
+        callArgs = {val};
+    }
+    else if (s.funcName == "__show_i64")
+    {
+        format = "%lld";
+        callArgs = {val};
+    }
+    else if (s.funcName == "__show_f64")
+    {
+        format = "%f";
+        callArgs = {val};
+    }
+    else if (s.funcName == "__show_f32")
+    {
+        // Variadic printf takes a double: promote, do not reinterpret.
+        format = "%f";
+        callArgs = {builder_->CreateFPExt(val, llvm::Type::getDoubleTy(ctx_))};
+    }
+    else if (s.funcName == "__show_char")
+    {
+        format = "%c";
+        callArgs = {val};
+    }
+    else if (s.funcName == "__show_bool")
+    {
+        format = "%d";
+        callArgs = {builder_->CreateZExt(val, builder_->getInt32Ty())};
+    }
+    else if (s.funcName == "__show_i8" || s.funcName == "__show_i16")
+    {
+        format = "%d";
+        callArgs = {builder_->CreateSExt(val, builder_->getInt32Ty())};
+    }
+    else // __show_i32
+    {
+        format = "%d";
+        callArgs = {val};
+    }
+
+    std::vector<llvm::Value *> printfArgs{builder_->CreateGlobalStringPtr(format, ".fmt")};
+    printfArgs.insert(printfArgs.end(), callArgs.begin(), callArgs.end());
+    builder_->CreateCall(printfFn->getFunctionType(), printfFn, printfArgs);
+}
+
 // ── Builtin to_string: malloc + sprintf + strlen → String ────────────────────
 
 bool LLVMIRBuilder::isToStringBuiltin(const std::string &name)
@@ -1614,9 +1622,9 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFprintf()
 
 llvm::Value *LLVMIRBuilder::getStderrFilePtr()
 {
-    // Same split as the read builtins' stdin (see emitInputCall): MinGW/UCRT
-    // exposes stderr as the macro `__acrt_iob_func(2)` (no `stderr` data
-    // symbol → linking against one fails); other libcs export a global.
+    // Same split as getStdinFilePtr / getStdoutFilePtr: MinGW/UCRT exposes stderr
+    // as the macro `__acrt_iob_func(2)` (no `stderr` data symbol → linking
+    // against one fails); other libcs export a global.
 #ifdef _WIN32
     llvm::Function *iob = getOrDeclareAcrtIobFunc();
     return builder_->CreateCall(iob->getFunctionType(), iob, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 2)});
@@ -1640,6 +1648,9 @@ void LLVMIRBuilder::emitPanicMessage(llvm::Value *msgPtr)
     llvm::Value *fmt = builder_->CreateGlobalStringPtr("panicked: %s\n", ".panicfmt");
     builder_->CreateCall(fprintfFn->getFunctionType(), fprintfFn, {stream, fmt, msgPtr});
 
+    // Flush stdout first: abort() does not, so without this a panic swallows
+    // everything the program printed before it.
+    emitFlushStdout();
     llvm::Function *abortFn = getOrDeclareAbort();
     builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
 }
@@ -1669,6 +1680,7 @@ void LLVMIRBuilder::emitAssertFailCall(FunctionState &fs,
     llvm::Value *fmt = builder_->CreateGlobalStringPtr("%s: assertion failed: %s\n", ".assertfmt");
     builder_->CreateCall(fprintfFn->getFunctionType(), fprintfFn, {stream, fmt, loc, msg});
 
+    emitFlushStdout();
     llvm::Function *abortFn = getOrDeclareAbort();
     builder_->CreateCall(abortFn->getFunctionType(), abortFn, {});
 }

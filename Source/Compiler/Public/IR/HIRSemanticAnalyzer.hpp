@@ -180,18 +180,6 @@ private:
         size_t paramOffset,
         HIRCall &call,
         bool explainUninferredGeneric);
-    /** Recognize a builtin print call (`print_str/int/float/bool/char`, `println`)
-     *  by callee name, validate its args, set the call's type to VOID, and return
-     *  true if `node` is such a builtin call (skipping normal call resolution).
-     *  These lower to libc `printf` in LLVMIRBuilder. */
-    bool handlePrintBuiltin(HIRCall *node, const std::string &name);
-
-    /** Recognize a builtin input call (`read_line` → &i8, `read_int` → i32,
-     *  `read_f64` → f64) by callee name, set the call's return type, and return
-     *  true if `node` is such a builtin (skipping normal call resolution).
-     *  These lower to libc `fgets` + parse in LLVMIRBuilder. */
-    bool handleInputBuiltin(HIRCall *node, const std::string &name);
-
     /** Recognize a builtin heap call (`__alloc` → `*mut i8`, `__free`,
      *  `__memcpy`, `__strlen`) by callee name, validate args, and return true
      *  if `node` is such a builtin. These lower to libc malloc/free/memcpy/
@@ -233,6 +221,13 @@ private:
     /** Builtin C-string helpers: `str_len(s: &i8) -> i32` and
      *  `str_cmp(a: &i8, b: &i8) -> i32` (libc strlen/strcmp semantics). */
     bool handleStrBuiltin(HIRCall *node, const std::string &name);
+
+    /** The byte-stream IO primitives the standard library's `io` module is
+     *  built on: `__read_byte() -> i32`, `__write(*i8, i32)`, `__flush()`.
+     *  Stdlib-only, exactly like the heap primitives — tokenizing, number
+     *  parsing, line handling and `print`/`println` are ordinary Lis code in
+     *  Source/Std/io.lis, and user code goes through that API. */
+    bool handleIoBuiltin(HIRCall *node, const std::string &name);
 
     /** True if `ty` is the `never` primitive (the return type of `panic`). A
      *  `never`-typed expression coerces to ANY expected type — it produces no

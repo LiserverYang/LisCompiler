@@ -718,11 +718,21 @@ void HIRSemanticAnalyzer::preRegisterMethodType(HIRImpl *impl, HIRFunction *m, c
     m->isTraitMethod = impl->traitName.has_value();
     if (impl->traitName.has_value())
         m->associatedTrait = impl->traitName.value();
+    // The MIR-visible owner is the RESOLVED type too (see the symbol key below),
+    // so MIRBuilder mangles the body under the name the call sites use.
+    if (auto *sym = lookupModuleAware(impl->structName))
+        if (auto ct = std::dynamic_pointer_cast<CustomType>(sym->type))
+            m->associatedStruct = ct->getName();
 
-    // The method SYMBOL is keyed `Struct::name` (visit(HIRImpl) uses the same
-    // rule). The HIR function's own `name` is the bare method name, so the
-    // top-level pre-registration helper cannot be reused for it directly.
-    const std::string funcName = impl->structName + "::" + m->name;
+    // The method SYMBOL is keyed <resolved type>::name -- the type's REAL name,
+    // which for a cross-module impl differs from the impl's module-qualified
+    // spelling (see visit(HIRImpl)). The HIR function's own `name` is the bare
+    // method name, so the top-level pre-registration helper cannot be reused.
+    std::string resolvedStructName = impl->structName;
+    if (auto *sym = lookupModuleAware(impl->structName))
+        if (auto ct = std::dynamic_pointer_cast<CustomType>(sym->type))
+            resolvedStructName = ct->getName();
+    const std::string funcName = resolvedStructName + "::" + m->name;
     if (!SymbolTable::getInstance().lookupSymbol(funcName))
     {
         auto sym = std::make_unique<Symbol>();
@@ -1820,7 +1830,8 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
     //          key would need a cast it does not emit yet.
     if (displayName(node->name) == "Numeric" || displayName(node->name) == "Integer"
         || displayName(node->name) == "Copy" || displayName(node->name) == "Ord"
-        || displayName(node->name) == "Hash" || isOperatorTrait(displayName(node->name)))
+        || displayName(node->name) == "Hash" || displayName(node->name) == "Display"
+        || isOperatorTrait(displayName(node->name)))
     {
         auto traitTy = std::static_pointer_cast<TraitType>(sym->type);
         auto seed = [&](PrimitiveType::PrimKind k)
@@ -1838,6 +1849,7 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
         bool isCopyMarker = (n == "Copy");
         bool isOrd = (n == "Ord");
         bool isHash = (n == "Hash");
+        bool isDisplay = (n == "Display");
 
         // ints get every family (Numeric/Integer markers + all operator traits).
         if (isNumeric || isInteger || isCmp || isArith || isBitwise || isCopyMarker || isOrd)
@@ -1860,6 +1872,30 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
         // Hash: i32 only (see the rules above).
         if (isHash)
             seed(PrimitiveType::PrimKind::I32);
+
+        // Display (2026-09-25): every primitive prints itself, and so does '&i8',
+        // the language's C-string spelling. A primitive cannot carry a method
+        // body, so the implementation is a backend lowering keyed by the concrete
+        // type (see the __show_* retarget in MIRMonomorphization); this seed is
+        // what makes the Display BOUND satisfiable at a call site.
+        if (isDisplay)
+        {
+            seed(PrimitiveType::PrimKind::I8);
+            seed(PrimitiveType::PrimKind::I16);
+            seed(PrimitiveType::PrimKind::I32);
+            seed(PrimitiveType::PrimKind::I64);
+            seed(PrimitiveType::PrimKind::F32);
+            seed(PrimitiveType::PrimKind::F64);
+            seed(PrimitiveType::PrimKind::BOOL);
+            seed(PrimitiveType::PrimKind::CHAR);
+
+            // '&i8' is a REFERENCE type: it is interned by TypeContext and carries
+            // its own implTrait, so seeding it here is enough for print("hi").
+            auto i8RefTy = context->typeContext->getReference(
+                context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
+            if (!i8RefTy->implementsTrait("Display"))
+                i8RefTy->implTrait.push_back(traitTy);
+        }
     }
 
     isInTraitMethod = false;
@@ -1985,6 +2021,17 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
 
         visit(method.get());
 
+        // Methods BELONG to the type, so their identity is the type's real
+        // (resolved) name -- not the impl's own module-qualified spelling. For an
+        // impl written in the type's module the two are identical; for a
+        // cross-module impl (the `impl Display for String` in io.lis, whose
+        // structName resolves through a selective import) they are not, while
+        // every CALL site looks the method up under the TYPE's name
+        // (string$String::show). Registering it as io$String::show left the calls
+        // pointing at a symbol that does not exist -- in the JIT that is a call
+        // through a null address (0xC0000005).
+        method->associatedStruct = baseStruct->getName();
+
         std::vector<CustomType::Field> paramFields;
         for (auto &[pname, ptype] : method->params)
             paramFields.emplace_back(pname, ptype);
@@ -1999,7 +2046,7 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
         methods.push_back(cm);
         methodMap[method->name] = cm;
 
-        std::string funcName = node->structName + "::" + method->name;
+        std::string funcName = baseStruct->getName() + "::" + method->name;
         // Register the symbol with the type visit(HIRFunction) built — that is
         // generic-aware for methods of generic structs (their genericParams
         // include the struct's gParams). Rebuilding via getFunction here would
@@ -2086,6 +2133,31 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
 
             if (tm.isStatic != sm.isStatic)
                 log(*node, "method '" + tm.name + "' static modifier mismatch.");
+        }
+
+        // ── `Copy` / `Drop` are real semantic markers (2026-09-26) ─────────────
+        // `impl Copy for P {}` makes Type::isCopyable() true for P (see
+        // Type.cpp), which is what gives a plain-data struct primitive-like copy
+        // semantics — `[P; N]` arrays, reading it out of a container twice,
+        // passing it to a function and still using it. A primitive cannot carry a
+        // method body, so for a user type this impl IS the copy semantics; the
+        // two checks below are what keep it sound.
+        //
+        // Order-independent: preRegisterImplTrait has already mirrored every
+        // impl into the type's implTrait, so whichever of the pair is visited
+        // second sees the other.
+        const std::string traitBare = displayName(tn);
+        if (traitBare == "Copy")
+        {
+            for (const auto &f : baseStruct->getFields())
+                if (!f.type->isCopyable())
+                    log(*node, "type '" + displayName(baseStruct->getName()) + "' cannot implement 'Copy': field '" + f.name + "' has type '" + f.type->toString() + "', which is not Copy.");
+            if (baseStruct->implementsTrait("Drop"))
+                log(*node, "type '" + displayName(baseStruct->getName()) + "' cannot implement 'Copy': it also implements 'Drop' (a Copy value is duplicated freely and owns nothing to release).");
+        }
+        else if (traitBare == "Drop" && baseStruct->implementsTrait("Copy"))
+        {
+            log(*node, "type '" + displayName(baseStruct->getName()) + "' cannot implement 'Drop': it is a 'Copy' type (a Copy value is duplicated freely and owns nothing to release).");
         }
 
         structSym->implementedTraits.push_back(tn);
@@ -3669,12 +3741,42 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
             break;
         }
         case PrimitiveType::PrimKind::F32:
-            if (node->targetType->getKind() != Type::Kind::Primitive || std::dynamic_pointer_cast<PrimitiveType>(node->targetType)->getPrimKind() != PrimitiveType::PrimKind::F64)
-                log(*node, "f32 can only be cast to f64.");
-            break;
         case PrimitiveType::PrimKind::F64:
-            log(*node, "f64 cannot be cast.");
+        {
+            // Float -> integer (2026-09-26): `x as i32` truncates toward zero.
+            // Before this the language had NO way to turn an f64 into an integer
+            // at all ("f64 cannot be cast."), which blocked every geometry /
+            // number-theory / FFT program that needs `(int)(x + 0.5)`.
+            //
+            // Out of range is UNDEFINED (LLVM's fptosi yields poison), exactly
+            // like C's `(int)x`: the value must fit the target type. No runtime
+            // check — an OJ program wants the zero-cost conversion.
+            if (node->targetType->getKind() != Type::Kind::Primitive)
+            {
+                log(*node, "float can only be cast to float or integer.");
+                break;
+            }
+            auto tType = std::dynamic_pointer_cast<PrimitiveType>(node->targetType);
+            if (tType->isInteger())
+                break;
+            if (!tType->isFloat())
+            {
+                log(*node, "float can only be cast to float or integer.");
+                break;
+            }
+            // Float -> float: f32 -> f64 widens, f64 -> f32 NARROWS. Same rule as
+            // the integer narrowing above, `#[i_know]` downgrade included.
+            const bool srcIsF64 = rType->getPrimKind() == PrimitiveType::PrimKind::F64;
+            const bool dstIsF64 = tType->getPrimKind() == PrimitiveType::PrimKind::F64;
+            if (srcIsF64 && !dstIsF64)
+            {
+                if (node->iKnow)
+                    log(*node, "high-to-low cast suppressed by #[i_know]; data may overflow.", E_SemanticError, Logger::LogLevel::WARNING);
+                else
+                    log(*node, "cannot cast float to a smaller float type.");
+            }
             break;
+        }
         case PrimitiveType::PrimKind::BOOL:
         case PrimitiveType::PrimKind::CHAR:
             if (node->targetType->getKind() != Type::Kind::Primitive || !std::dynamic_pointer_cast<PrimitiveType>(node->targetType)->isInteger())
@@ -3820,80 +3922,6 @@ void HIRSemanticAnalyzer::dispatchGenericParamMethod(
         node->callee = std::move(callee);
         return;
     }
-}
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-bool HIRSemanticAnalyzer::handlePrintBuiltin(HIRCall *node, const std::string &name)
-{
-    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
-    auto f64Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
-    auto boolTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::BOOL);
-    auto charTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::CHAR);
-    auto i8PtrTy = context->typeContext->getReference(
-        context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
-
-    std::shared_ptr<Type> argTy = nullptr;
-    size_t argCount = 1;
-    if (name == "print_str")
-        argTy = i8PtrTy;
-    else if (name == "print_int")
-        argTy = i32Ty;
-    else if (name == "print_float")
-        argTy = f64Ty;
-    else if (name == "print_bool")
-        argTy = boolTy;
-    else if (name == "print_char")
-        argTy = charTy;
-    else if (name == "println")
-    {
-        argTy = nullptr;
-        argCount = 0;
-    }
-    else
-        return false; // not a builtin print
-
-    if (node->args.size() != argCount)
-    {
-        log(*node, "builtin '" + name + "' expects " + std::to_string(argCount) + " argument(s), got " + std::to_string(node->args.size()) + ".");
-    }
-
-    for (auto &arg : node->args)
-    {
-        analyzeExpr(arg.get());
-        if (argTy && arg->type && !typesCompatible(argTy, arg->type))
-            log(*arg, "builtin '" + name + "' expects an argument of type '" + argTy->toString() + "', got '" + arg->type->toString() + "'.");
-    }
-
-    node->type = voidTy;
-    // A non-null (Copy) type so MIR's buildNameRef/makeTempPlace is safe.
-    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
-        nr->type = voidTy;
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-bool HIRSemanticAnalyzer::handleInputBuiltin(HIRCall *node, const std::string &name)
-{
-    std::shared_ptr<Type> retTy;
-    if (name == "read_line")
-        retTy = context->typeContext->getReference(
-            context->typeContext->getPrimitive(PrimitiveType::PrimKind::I8), false);
-    else if (name == "read_int")
-        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
-    else if (name == "read_f64")
-        retTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
-    else
-        return false; // not an input builtin
-
-    if (!node->args.empty())
-        log(*node, "builtin '" + name + "' takes no arguments.");
-    node->type = retTy;
-    // A non-null type so MIR's buildNameRef/makeTempPlace is safe.
-    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
-        nr->type = retTy;
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4271,6 +4299,71 @@ bool HIRSemanticAnalyzer::handleStrBuiltin(HIRCall *node, const std::string &nam
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// The IO primitives (standard library only): one byte in, a byte block out, one
+// flush. Everything a program actually uses -- tokenizing, number parsing, line
+// handling, print/println -- is ordinary Lis code in Source/Std/io.lis; the
+// compiler contributes the byte stream and nothing else. Keeping the raw stream
+// behind the same stdlib gate as the heap primitives (E3013) is what lets the
+// safe API above it stay auditable.
+// ---------------------------------------------------------------------------
+bool HIRSemanticAnalyzer::handleIoBuiltin(HIRCall *node, const std::string &name)
+{
+    auto i32Ty = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+
+    if (!inStdLib())
+    {
+        log(*node, "the IO primitive '" + name + "' can only be called from the standard library (user code goes through the 'io' module's readers and print/println).", E_UnsafeBuiltinOutsideStdlib);
+        node->type = voidTy;
+        if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+            nr->type = voidTy;
+        return true;
+    }
+
+    size_t expected = 0;
+    std::shared_ptr<Type> retTy = voidTy;
+    if (name == "__read_byte")
+    {
+        expected = 0;
+        retTy = i32Ty; // the byte, or -1 at end of input
+    }
+    else if (name == "__write")
+    {
+        expected = 2;
+    }
+    else if (name == "__flush")
+    {
+        expected = 0;
+    }
+    else
+        return false; // not an IO primitive
+
+    if (node->args.size() != expected)
+        log(*node, "builtin '" + name + "' expects " + std::to_string(expected) + " argument(s), got " + std::to_string(node->args.size()) + ".");
+
+    for (auto &arg : node->args)
+        analyzeExpr(arg.get());
+
+    if (name == "__write")
+    {
+        if (!node->args.empty() && node->args[0]->type)
+        {
+            const auto kind = node->args[0]->type->getKind();
+            if (kind != Type::Kind::Pointer && kind != Type::Kind::Reference)
+                log(*node->args[0], "builtin '__write' expects a pointer argument (the bytes to write), got '" + node->args[0]->type->toString() + "'.");
+        }
+        if (node->args.size() > 1 && node->args[1]->type && !node->args[1]->type->equals(i32Ty))
+            log(*node->args[1], "builtin '__write' expects the byte count to be an 'i32', got '" + node->args[1]->type->toString() + "'.");
+    }
+
+    node->type = retTy;
+    // A non-null type so MIR's buildNameRef/makeTempPlace is safe.
+    if (auto *nr = dynamic_cast<HIRNameRef *>(node->callee.get()))
+        nr->type = retTy;
+    return true;
+}
+
 void HIRSemanticAnalyzer::visit(HIRCall *node)
 {
     // Idempotency: once a call is resolved, re-analysis is a no-op. This
@@ -4290,6 +4383,13 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
     // ---- Regular function call -------------------------------------------
     case HIRCall::CallKind::Regular:
     {
+        // NOTE (2026-09-25): the io entry points are ORDINARY stdlib functions —
+        // `print<T: Display>(x)`, `println()` (newline + flush), `flush()`, the
+        // `read_*` family — resolved through the normal name path. The compiler
+        // neither recognises their names nor dispatches on their argument count;
+        // the only IO it knows is the byte stream behind them (__read_byte /
+        // __write / __flush) and the Display lowering for the primitives.
+
         // Builtin print/input/heap functions — recognized by name before the
         // normal callee resolution (a NameRef to `print_int` has no symbol, so
         // it would log "undefined identifier").
@@ -4297,12 +4397,6 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         {
             switch (classifyBuiltin(nr->name))
             {
-            case BuiltinCategory::Print:
-                handlePrintBuiltin(node, nr->name);
-                return;
-            case BuiltinCategory::Input:
-                handleInputBuiltin(node, nr->name);
-                return;
             case BuiltinCategory::Heap:
                 handleHeapBuiltin(node, nr->name);
                 return;
@@ -4321,6 +4415,15 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             case BuiltinCategory::Str:
                 handleStrBuiltin(node, nr->name);
                 return;
+            case BuiltinCategory::IO:
+                handleIoBuiltin(node, nr->name);
+                return;
+            case BuiltinCategory::Internal:
+                // Compiler-generated entries (the Display lowering): NOT callable
+                // from source. Fall through to normal name resolution, which
+                // reports "undefined identifier" — the honest answer for a name
+                // that only monomorphization may emit.
+                break;
             case BuiltinCategory::NotBuiltin:
                 break;
             }

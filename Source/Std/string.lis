@@ -47,9 +47,16 @@ struct String
 impl String
 {
     // An empty String with capacity for 16 bytes.
+    //
+    // The buffer is NUL-terminated at index 0 even though it is empty:
+    // `to_cstr` hands the raw pointer out as a C string, and printf("%s") on a
+    // freshly malloc'd (uninitialized) block would print whatever bytes happen to
+    // be there. `push_char` maintains the terminator after every append, so this
+    // is the only place the invariant has to be established by hand.
     fn new() -> String
     {
         let data = __alloc(16);
+        data[0] = '\0' as i8;
         ret String { data: data, len: 0, cap: 16 };
     }
 

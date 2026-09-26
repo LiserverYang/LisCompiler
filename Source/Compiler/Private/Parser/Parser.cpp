@@ -325,7 +325,13 @@ std::unique_ptr<ImportStmt> Parser::parseImptStatement()
             const std::string localName = internalName(currentModule_, symName);
             if (context->knownEnums.count(sourceName))
                 context->knownEnums.insert(localName);
-            if (knownTypes.count(sourceName))
+            // `knownTypes` is this INSTANCE's set (it holds the declarations of
+            // the file being parsed); a type declared by an earlier file lives in
+            // the shared knownNamedTypes. Both are consulted: without the second
+            // one a module could not promote a type it imports, and
+            // `impl Display for String` in io.lis was rejected as an unknown
+            // struct even though the enum half of the same promotion worked.
+            if (knownTypes.count(sourceName) || context->knownNamedTypes.count(sourceName))
                 promotedTypes.insert(localName);
         }
     }
@@ -461,6 +467,7 @@ std::unique_ptr<StructDef> Parser::parseStructDefinition()
     }
 
     knownTypes.insert(internalName(currentModule_, structDef->name));
+    context->knownNamedTypes.insert(internalName(currentModule_, structDef->name));
     return structDef;
 }
 
@@ -503,6 +510,7 @@ std::unique_ptr<EnumDef> Parser::parseEnumDefinition()
 
     knownTypes.insert(internalName(currentModule_, enumDef->name));
     context->knownEnums.insert(internalName(currentModule_, enumDef->name));
+    context->knownNamedTypes.insert(internalName(currentModule_, enumDef->name));
     return enumDef;
 }
 
@@ -592,6 +600,7 @@ std::unique_ptr<TraitDef> Parser::parseTraitDefinition()
     // same name is caught (previously this set was never written, making the
     // mutidefined check above a no-op).
     knownTraits.insert(internalName(currentModule_, traitDef->name));
+    context->knownNamedTypes.insert(internalName(currentModule_, traitDef->name));
     return traitDef;
 }
 

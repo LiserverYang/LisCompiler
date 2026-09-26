@@ -1,0 +1,231 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// fft_bigint.lis
+//
+// FFT 大整数乘法 —— 一份 C++ 参考实现的 Lis 转写：用来在 OJ 上跑更复杂的程序，并对比性能。
+//
+// 输入：两个十进制大整数（空白分隔，同一行或各占一行都可以）。输出：它们的乘积，无末尾换行。
+//
+// 与 C++ 版几乎逐行对应：complex 是 struct + impl Copy（所以可以按值反复传、可以放进
+// 数组里），cos/sin/PI 来自标准库 math，f64 -> i32 直接 as，数组是堆上的 Vec（C++ 用
+// 静态 MAXN=4e6，那 4e6 个 complex 是 144 MB 的 BSS，这里按输入大小动态开）。
+//
+// 三处语言能力对照（都是 2026-09-26 补齐的）：
+//   * impl Copy for C {}   —— 让 C 像原语一样可复制：[C] 数组元素、cmul(w, wn) 反复按值传参；
+//   * x as i32             —— (int)(x + 0.5) 的取整；
+//   * math 的 cos/sin/PI   —— 纯 Lis 实现（区间归约 + 泰勒），精度与 libm 同级。
+
+impt io { print, read_word };
+impt string { String };
+impt vec { Vec };
+impt math { cos, sin, PI, Copy, Add, Sub, Mul };   // trait 都在 math 模块里
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 复数：只有标量用 struct —— 加上 impl Copy 之后它像原语一样可以随意复制
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct C
+{
+    pub re: f64,
+    pub im: f64
+}
+
+impl Copy for C {}
+
+// 运算符重载：C++ 的 `complex operator+(complex)` 就是这三个 impl。因为 C 是 Copy，
+// 按值接收者只是复制 —— 操作数不会像非 Copy 类型那样被移走。
+//
+// （`+=` / `-=` / `*=` 目前仍不支持重载类型，所以下面点乘写的是 `a[i] = a[i] * b[i]`
+// 而不是 C++ 的 `a[i] *= b[i]`。）
+impl Add for C
+{
+    fn add(self, other: Self) -> C
+    {
+        ret C { re: self.re + other.re, im: self.im + other.im };
+    }
+}
+
+impl Sub for C
+{
+    fn sub(self, other: Self) -> C
+    {
+        ret C { re: self.re - other.re, im: self.im - other.im };
+    }
+}
+
+impl Mul for C
+{
+    fn mul(self, other: Self) -> C
+    {
+        ret C { re: self.re * other.re - self.im * other.im, im: self.re * other.im + self.im * other.re };
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FFT
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 二进制位反转置换（C++ 的 std::swap(y[i], y[j]) 在这里是三次 struct 赋值）
+fn change(a: &mut Vec<C>, len: i32)
+{
+    let mut j = len / 2;
+    let mut i = 1;
+    while i < len - 1
+    {
+        if i < j
+        {
+            let t = a[i];
+            a[i] = a[j];
+            a[j] = t;
+        }
+
+        let mut k = len / 2;
+        while j >= k
+        {
+            j = j - k;
+            k = k / 2;
+        }
+        if j < k { j = j + k; }
+
+        i = i + 1;
+    }
+}
+
+fn fft(a: &mut Vec<C>, len: i32, flag: i32)
+{
+    change(a, len);
+
+    // h 是合并的层数
+    let mut h = 2;
+    while h <= len
+    {
+        // 单位根
+        let wn = C {
+            re: cos(2.0 * PI / (h as f64)),
+            im: sin((flag as f64) * 2.0 * PI / (h as f64))
+        };
+
+        // j 是合并的位置
+        let mut j = 0;
+        while j < len
+        {
+            // 遍历时的单位根
+            let mut w = C { re: 1.0, im: 0.0 };
+
+            // 遍历左半部分，右半部分 O(1) 求出
+            let mut k = j;
+            while k < j + h / 2
+            {
+                // 蝴蝶变换
+                let u = a[k];
+                let t = w * a[k + h / 2];
+                a[k] = u + t;
+                a[k + h / 2] = u - t;
+                w = w * wn;
+                k = k + 1;
+            }
+
+            j = j + h;
+        }
+
+        h = h * 2;
+    }
+
+    if flag < 0
+    {
+        let mut i = 0;
+        while i < len
+        {
+            a[i] = C { re: a[i].re / (len as f64), im: a[i].im / (len as f64) };
+            i = i + 1;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn main() -> i32
+{
+    let sa = read_word();
+    let sb = read_word();
+
+    let lena = sa.len();
+    let lenb = sb.len();
+
+    // 结果长度是 lena + lenb，补到 2 的幂（C++ 用 y <<= 1）
+    let mut y = 1;
+    while y < 2 * lena || y < 2 * lenb
+    {
+        y = y * 2;
+    }
+
+    // 两块堆数组（Vec<C>：元素 Copy，所以 from_elem 能复制填充）
+    let zero = C { re: 0.0, im: 0.0 };
+    let mut a = Vec<C>::from_elem(zero, y);
+    let mut b = Vec<C>::from_elem(zero, y);
+
+    // 数字反转后放进实部
+    let mut i = 0;
+    while i < lena
+    {
+        let c = sa.index(lena - 1 - i).unwrap();
+        a[i] = C { re: ((c as i32) - ('0' as i32)) as f64, im: 0.0 };
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < lenb
+    {
+        let c = sb.index(lenb - 1 - i).unwrap();
+        b[i] = C { re: ((c as i32) - ('0' as i32)) as f64, im: 0.0 };
+        i = i + 1;
+    }
+
+    fft(&mut a, y, 1);
+    fft(&mut b, y, 1);
+
+    // 点乘
+    i = 0;
+    while i < y
+    {
+        a[i] = a[i] * b[i];
+        i = i + 1;
+    }
+
+    fft(&mut a, y, 0 - 1);
+
+    // 进位：ans[i] += (int)(a[i].a + 0.5)，然后逐位取模
+    let mut ans = Vec<i32>::from_elem(0, y + 4);
+    i = 0;
+    while i < y
+    {
+        let cur = ans[i] + (a[i].re + 0.5) as i32;
+        ans[i + 1] = ans[i + 1] + cur / 10;
+        ans[i] = cur % 10;
+        i = i + 1;
+    }
+
+    // 找最高非零位。&& 现在是短路的，所以守卫写法（先判 h >= 0 再取 ans[h]）是安全的
+    // —— ans 是 Vec，越界会 panic（C++ 版同样的写法是越界读全局数组，UB）。
+    let mut h = lena + lenb + 2;
+    while h >= 0 && ans[h] == 0
+    {
+        h = h - 1;
+    }
+
+    if h < 0
+    {
+        print(0);
+    }
+    else
+    {
+        while h >= 0
+        {
+            print(ans[h]);
+            h = h - 1;
+        }
+    }
+
+    ret 0;
+}

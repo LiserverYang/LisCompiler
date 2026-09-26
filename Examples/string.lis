@@ -12,6 +12,7 @@ impt drop { Drop };
 impt option { Option, unwrap_or };
 impt string { String };
 
+impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };
 fn main() -> i32
 {
     // Build a String by appending; print it.
@@ -19,19 +20,19 @@ fn main() -> i32
     let mut name = s;            // s is MOVED into name
     name.push_char(' ');
     name.push_str("语言");
-    print_str(name.to_cstr());
+    print(name.to_cstr());
     println();
-    print_int(name.len());
+    print(name.len());
     println();
 
     // Indexed access returns Option<char> (None when out of bounds).
     let f0 = unwrap_or(name.index(0), '?');
-    print_char(f0);
+    print(f0);
     println();
 
     // to_string_* formats a number into a heap String.
     let n = to_string_i32(42 * 2);
-    print_str(n.to_cstr());
+    print(n.to_cstr());
     println();
 
     // Arrays: literal, indexed read/write, while-loop sum.
@@ -43,7 +44,7 @@ fn main() -> i32
         i = i + 1;
     }
     a[3] = 40;
-    print_int(total + a[3]);
+    print(total + a[3]);
     println();
 
     ret 0;

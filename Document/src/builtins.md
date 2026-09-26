@@ -2,9 +2,15 @@
 
 <!-- grammar_name: builtins, search_name: 内置函数,print,read,堆,to_string -->
 
-编译器内置函数（不在标准库声明）。这些名字**保留**：用户 `fn` 与内置名或 libc 名同名
-（`malloc`/`free`/`memcpy`/`strlen`/`sprintf`/`printf`/`fgets`/`strcspn`/`atoi`/`strtod`/`abort`）
-会被拒绝（「function name 'X' is reserved by the compiler」）。
+编译器内置函数。这些名字**保留**：用户 `fn` 与内置名或 libc 名同名
+（`malloc`/`free`/`memcpy`/`strlen`/`strcmp`/`sprintf`/`printf`/`fgets`/`strcspn`/
+`atoi`/`strtod`/`abort`/`fprintf`）会被拒绝（「function name 'X' is reserved by the compiler」）。
+
+> **打印与读取不在这个列表里了（2026-09-25）**。`print`/`println`/`flush` 与 `read_*` 现在是
+> **标准库 `io` 模块里的普通函数**（`Source/Std/io.lis`），`Display` 在 `fmt` 模块里。
+> 编译器只为它们提供**字节流原语**（`__read_byte`/`__write`/`__flush`）与原语的 `Display`
+> 下降，词法/数字解析/分行/格式化策略全部是 Lis 代码。见[内置 IO 原语](#内置-io-原语-read_byte--write--flush)
+> 与[标准库](./stdlib.md)。
 ## 终止 panic
 
 | 函数 | 签名 | 行为 |
@@ -17,8 +23,8 @@
 反过来，**声明返回 `never` 的函数必须发散**：函数体里必须至少有一个发散调用（直接或间接
 调用 `panic`），否则编译期报错。
 
-注意：`abort()` **不会刷新 stdio**，所以 `panic` 之前打印到 stdout 的内容会丢失；panic 的
-可观测输出只有 stderr。
+注意：`abort()` 自己**不会刷新 stdio**，所以 panic 路径会先显式 `fflush(stdout)`（2026-09-25）：
+崩溃之前打印的内容不会丢。数组越界（`idx_oob`）与 `assert_fail` 同理。
 
 ## 断言 assert
 
@@ -28,7 +34,7 @@
 | `assert(cond: bool, msg: &i8)` | `-> void` | 同上，消息追加在冒号后 |
 
 与 `panic` 的关键差别：`assert` 返回 **void**，条件成立时**继续执行**（不会把后续语句判成不可达），
-所以它可以当作测试断言用。失败路径与 `panic` 完全一致（stderr + `abort()`，不刷新 stdio），
+所以它可以当作测试断言用。失败路径与 `panic` 完全一致（stderr + `abort()`，同样先 flush stdout），
 并且**带上源码位置**——这是 `panic` 没有的。参数个数只接受 1 或 2 个；条件必须是 `bool`，
 消息必须是 `&i8`。
 
@@ -43,39 +49,56 @@ assert(str_len(line) > 0, "empty input");
 | `str_len(s: &i8) -> i32` | libc `strlen` | C 串长度（不含结尾 NUL） |
 | `str_cmp(a: &i8, b: &i8) -> i32` | libc `strcmp` | `< 0` / `0` / `> 0`，与 libc 一致 |
 
-`&i8` 是本语言的 C 串写法（`print_str`、`panic`、`String::from_lit` 都收它），所以长度与内容
+`&i8` 是本语言的 C 串写法（`print`、`panic`、`String::from_lit` 都收它），所以长度与内容
 比较就挂在它上面；在没有这两个内建之前，`strlen` 是保留名（标准库专用），用户想拿长度只能先
 `String::from_lit` 复制一份。两个字符串字面量之间的 `==` / `!=` 会下降为 `str_cmp(a, b) == 0`
 （见[表达式](./expression.md)），无需显式调用。
 
-## 输出 print
+## 输出与输入：io 模块（2026-09-25）
 
-| 函数 | 签名 | 输出 |
+`print_*` / `read_*` 一系列内置函数**已全部退役**。打印与读取现在是标准库 `io` 模块
+（`Source/Std/io.lis`）里的普通 Lis 函数，编译器只提供下面的字节流原语与原语 `Display`
+的下降。完整 API 表见[标准库](./stdlib.md)；这里只记设计。
+
+```lis
+impt fmt { Display };                       // 想给自己的类型实现打印时才需要
+impt io  { print, println, read_i32, read_line };
+
+print(42); print(' '); print(3.5);          // 一个入口，任意实现 Display 的类型
+println();                                  // 换行 + flush（相当于 std::endl）
+print("hi"); print("\n");                   // 普通换行：只入缓冲，不 flush
+let n = read_i32();                         // 空白分隔的 token，任意长行
+let s = read_line();                        // -> String，当前行的剩余部分
+```
+
+**为什么只有一个 `print`**：语言没有重载也没有变参，每加一种类型就加一个 `print_xxx` 是唯一
+的扩张方式——于是有了 `Display` trait（`fmt` 模块）加一个泛型 `print<T: Display>(x: T)`。
+原语（i8/i16/i32/i64/f32/f64/bool/char）与 `&i8`（C 串）由编译器**播种** `Display` 并由后端
+下降（`__show_i32` 等，格式与旧 `print_int` 完全一致）；`String` 与用户类型用普通 `impl`
+实现，`impl Display for P { fn show(self: &Self) { ... } }`。
+
+**`println()` 是有代价的**：它是本语言的 `std::endl` —— 零参、写换行**并 flush**。日常换行
+写 `print("\n")`（只入缓冲）；`print(x); println();` 是「值 + 换行」的合并写法。
+语言没有重载，所以一参的 `println` 需要编译器特判名字，而"flush"正是让零参形式**不是**
+`print("\n")` 同义词的理由。（交互题每行 `println()`；批量输出用 `print`。）
+
+**输入是 token 化的**：`read_i32`/`read_i64`/`read_f64` 跳过任意空白（空格/制表/换行）并消费
+**一个** token，所以 `"3 4"` 在同一行、一行一个、或者任意混合都对。`read_line() -> String`
+返回**当前行的剩余部分**（保留空格，去掉 LF/CRLF），长度不限（旧实现经一个 256 字节静态缓冲，
+长行会在 255 处截断并把余下字符留在流里，后续读取全部错位）。EOF 时数字读返回 0、`read_line`
+返回空串；要区分「值 0」和「没有输入」用 `try_read_*`（返回 `Option`）。
+
+## 内置 IO 原语 `__read_byte` / `__write` / `__flush`
+
+| 函数 | 签名 | 下降 |
 |---|---|---|
-| `print_str(s: &i8)` | 打印 C 字符串 | `printf("%s")` |
-| `print_int(x: i32)` | 打印整数 | `printf("%d")` |
-| `print_float(x: f64)` | 打印浮点 | `printf("%f")` |
-| `print_bool(b: bool)` | 打印 `0`/`1` | `printf("%d")` |
-| `print_char(c: char)` | 打印字符 | `printf("%c")` |
-| `println()` | 换行 | `printf("\n")` |
+| `__read_byte() -> i32` | 读取下一个字节（EOF 为 `-1`） | libc `fgetc(stdin)` |
+| `__write(buf: *i8, n: i32)` | 写出 n 个字节 | libc `fwrite(buf, 1, n, stdout)` |
+| `__flush()` | 刷新 stdout | libc `fflush(stdout)` |
 
-全部返回 `void`。
-
-## 输入 read
-
-| 函数 | 签名 | 说明 |
-|---|---|---|
-| `read_line() -> &i8` | 读一行（去 `\r\n`），返回缓冲指针 | |
-| `read_int() -> i32` | `atoi` 解析当前输入 | |
-| `read_f64() -> f64` | `strtod` 解析当前输入 | |
-
-所有读操作共用**同一个 256 字节全局缓冲** `__lis_input_buf`：每次 read 覆盖上一次结果，
-所以 `read_line()` 返回的 `&i8` 在下一次 read 后失效。无参数。
-
-**EOF 行为（2026-09-18 修）**：输入耗尽后 `read_line()` 返回**空串**、`read_int()`/`read_f64()`
-返回 **0**。此前 `fgets` 的失败返回值被丢掉，缓冲区保持上一行内容，于是
-`while true { read_line() }` 会永远读到同一行、永不结束。对 `read_line` 而言**空行与 EOF
-不可区分**（与 Rust 的 `read_line` 返回 0 字节一致），所以结束条件写 `s.len() == 0`。
+流缓冲由 libc 的 `stdin`/`stdout` 负责（进程退出自动 flush），所以标准库不需要自己维护缓冲区，
+也就不需要指针类型的模块级状态。**与堆原语同一道闸：只能在标准库内调用**（E3013），
+用户代码走 `io` 的安全 API。
 
 ## 堆 __alloc 系
 

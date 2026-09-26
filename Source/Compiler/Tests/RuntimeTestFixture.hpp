@@ -66,7 +66,7 @@ namespace
 /// longer auto-preloaded — selective imports promote the public API's bare
 /// names (the internal names stay `math$max` etc.).
 static const char *kStdlibPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n"
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr, PI, TWO_PI, HALF_PI, sqrt, floor, ceil, round, trunc, fract, cos, sin, tan };\n"
     "impt hash { Hash };\n"
     "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
     "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
@@ -77,7 +77,9 @@ static const char *kStdlibPrologue =
     // and two selective imports of the same bare name are a deliberate conflict.
     // Tests that want Result::unwrap_or by bare name use kResultPrologue, or call
     // it qualified (`impt result;` + `result::unwrap_or`).
-    "impt result { Result, is_ok, is_err };\n";
+    "impt result { Result, is_ok, is_err };\n"
+    "impt fmt { Display };\n"
+    "impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };\n";
 
 /// Math-only prologue for snippets that DEFINE their own `fn sum` (which would
 /// clash with the iterator module's promoted `sum`).
@@ -87,10 +89,14 @@ static const char *kStdlibPrologue =
 static const char *kResultPrologue =
     "impt result { Result, is_ok, is_err, unwrap_or };\n"
     "impt string { String };\n"
-    "impt drop { Drop };\n";
+    "impt drop { Drop };\n"
+    "impt fmt { Display };\n"
+    "impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };\n";
 
 static const char *kMathPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr };\n";
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr, PI, TWO_PI, HALF_PI, sqrt, floor, ceil, round, trunc, fract, cos, sin, tan };\n"
+    "impt fmt { Display };\n"
+    "impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };\n";
 
 /// Exit status of a child process that reached the builtin panic: libc
 /// abort(). UCRT maps its __fastfail(FAST_FAIL_FATAL_APP_EXIT) to 0xC0000409;
@@ -421,6 +427,7 @@ protected:
 #ifdef _WIN32
         // Redirect the child's stdout to a pipe so the caller can read it back.
         int saved = -1;
+        bool outPipe = false;
         int fds[2] = {-1, -1};
         if (out)
         {
@@ -428,6 +435,7 @@ protected:
             saved = dup(_fileno(stdout));
             if (_pipe(fds, 65536, _O_BINARY) == 0)
             {
+                outPipe = true;
                 dup2(fds[1], _fileno(stdout));
                 close(fds[1]); // child inherits the write end; we close ours
             }
@@ -437,6 +445,7 @@ protected:
         // until the child exits, so a shared pipe would lose whichever stream
         // was still unread. The builtin panic writes its message here.
         int savedErr = -1;
+        bool errPipe = false;
         int fdsErr[2] = {-1, -1};
         if (err)
         {
@@ -444,6 +453,7 @@ protected:
             savedErr = dup(_fileno(stderr));
             if (_pipe(fdsErr, 65536, _O_BINARY) == 0)
             {
+                errPipe = true;
                 dup2(fdsErr[1], _fileno(stderr));
                 close(fdsErr[1]);
             }
@@ -472,21 +482,31 @@ protected:
         {
             dup2(saved, _fileno(stdout));
             close(saved);
-            char buf[4096];
-            ssize_t n;
-            while ((n = read(fds[0], buf, sizeof(buf))) > 0)
-                out->append(buf, (size_t)n);
-            close(fds[0]);
+            // NOTE the `outPipe` guard: if _pipe failed above the fd stayed -1,
+            // and read(-1, ...) runs the CRT invalid-parameter handler, which
+            // TERMINATES the test process (seen as a silent shard death with
+            // exit 1 on the only call site that passes all three streams).
+            if (outPipe)
+            {
+                char buf[4096];
+                ssize_t n;
+                while ((n = read(fds[0], buf, sizeof(buf))) > 0)
+                    out->append(buf, (size_t)n);
+                close(fds[0]);
+            }
         }
         if (err && savedErr != -1)
         {
             dup2(savedErr, _fileno(stderr));
             close(savedErr);
-            char buf[4096];
-            ssize_t n;
-            while ((n = read(fdsErr[0], buf, sizeof(buf))) > 0)
-                err->append(buf, (size_t)n);
-            close(fdsErr[0]);
+            if (errPipe)
+            {
+                char buf[4096];
+                ssize_t n;
+                while ((n = read(fdsErr[0], buf, sizeof(buf))) > 0)
+                    err->append(buf, (size_t)n);
+                close(fdsErr[0]);
+            }
         }
         if (in && savedIn != -1)
         {
