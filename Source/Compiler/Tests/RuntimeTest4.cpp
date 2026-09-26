@@ -2509,3 +2509,127 @@ TEST_F(RuntimeTest, HashMapKeyWithoutHashRejected)
                       "fn main() -> i32 { let mut h = HashMap<K, i32>::new(); ret h.len(); }\n",
         "does not implement trait");
 }
+
+// ── order statistics on the ordered Map (2026-09-26) ─────────────────────────
+// count_less/rank/kth/pred/succ are one O(log n) descent over the subtree sizes
+// the rotations maintain; check_invariants() verifies those sizes too.
+
+TEST_F(RuntimeTest, MapOrderStatistics)
+{
+    expectRun("impt map { Map };\n"
+              "fn main() -> i32 { let mut m = Map<i32, i32>::new();\n"
+              "    m.insert(30, 0); m.insert(10, 0); m.insert(20, 0); m.insert(50, 0);\n"
+              "    if m.count_less(&25) != 2 { ret 1; }\n"
+              "    if m.rank(&20) != 2 { ret 2; }\n"
+              "    if m.rank(&5) != 1 { ret 3; }\n"
+              "    if *m.kth(1).unwrap() != 10 { ret 4; }\n"
+              "    if *m.kth(4).unwrap() != 50 { ret 5; }\n"
+              "    if *m.pred(&50).unwrap() != 30 { ret 6; }\n"
+              "    if *m.succ(&30).unwrap() != 50 { ret 7; }\n"
+              "    if !is_none(m.pred(&10)) { ret 8; }\n"
+              "    if !m.check_invariants() { ret 9; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MapOrderStatisticsSurviveRemovals)
+{
+    // Keys are exactly 0..499, inserted in a scrambled order, so the queries have
+    // a closed-form answer: kth(i+1) == i and count_less(i) == i. Then every even
+    // key is removed and only the 250 odd ones remain, in order.
+    expectRun("impt map { Map };\n"
+              "fn main() -> i32 { let mut m = Map<i32, i32>::new();\n"
+              "    let n = 500;\n"
+              "    let mut i = 0;\n"
+              "    while i < n { m.insert((i * 7919) % n, 0); i = i + 1; }\n"
+              "    if !m.check_invariants() { ret 1; }\n"
+              "    if m.len() != n { ret 2; }\n"
+              "    i = 0;\n"
+              "    while i < n { if *m.kth(i + 1).unwrap() != i { ret 3; } if m.count_less(&i) != i { ret 4; } i = i + 1; }\n"
+              "    i = 1;\n"
+              "    while i < n - 1 { if *m.pred(&i).unwrap() != i - 1 { ret 5; } if *m.succ(&i).unwrap() != i + 1 { ret 6; } i = i + 1; }\n"
+              "    i = 0;\n"
+              "    while i < n { if i % 2 == 0 { m.remove(&i); } i = i + 1; }\n"
+              "    if !m.check_invariants() { ret 7; }\n"
+              "    if m.len() != n / 2 { ret 8; }\n"
+              "    i = 0;\n"
+              "    while i < n / 2 { if *m.kth(i + 1).unwrap() != i * 2 + 1 { ret 9; } if m.count_less(&(i * 2 + 1)) != i { ret 10; } i = i + 1; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MapAsMultisetWithPairKeys)
+{
+    // The balanced-tree template problem in multiset form (insert / delete one /
+    // rank / k-th / predecessor / successor). A Map key is UNIQUE, so each
+    // occurrence gets its own (value, id) key — the usual competitive-programming
+    // idiom, and the reason the rank/k-th here count OCCURRENCES. Duplicates of 5
+    // make the difference visible: rank(5) is the FIRST occurrence's rank.
+    expectOutputWithInput(
+        // (Copy/Ord/PartialOrd are already promoted by the test prologue.)
+        "impt map { Map };\n"
+        "struct Pair { pub v: i32, pub id: i32 }\n"
+        "impl Copy for Pair {}\n"
+        "impl Ord for Pair {}\n"
+        "impl PartialOrd for Pair {\n"
+        "    fn lt(self: &Pair, other: &Pair) -> bool {\n"
+        "        if self.v != other.v { ret self.v < other.v; }\n"
+        "        ret self.id < other.id;\n"
+        "    }\n"
+        "    fn gt(self: &Pair, other: &Pair) -> bool {\n"
+        "        if self.v != other.v { ret self.v > other.v; }\n"
+        "        ret self.id > other.id;\n"
+        "    }\n"
+        "    fn le(self: &Pair, other: &Pair) -> bool { ret !self.gt(other); }\n"
+        "    fn ge(self: &Pair, other: &Pair) -> bool { ret !self.lt(other); }\n"
+        "}\n"
+        "fn main() -> i32 { let mut m = Map<Pair, bool>::new();\n"
+        "    let n = read_i32();\n"
+        "    let mut nextId = 0;\n"
+        "    let mut i = 0;\n"
+        "    while i < n {\n"
+        "        let opt = read_i32();\n"
+        "        let x = read_i32();\n"
+        "        let lo = Pair { v: x, id: 0 - 1 };\n"
+        "        let hi = Pair { v: x, id: 2147483647 };\n"
+        "        if opt == 1 { m.insert(Pair { v: x, id: nextId }, true); nextId = nextId + 1; }\n"
+        "        else if opt == 2 { let victim = *m.kth(m.count_less(&lo) + 1).unwrap(); m.remove(&victim); }\n"
+        "        else if opt == 3 { print(m.count_less(&lo) + 1); print(\"\\n\"); }\n"
+        "        else if opt == 4 { print(m.kth(x).unwrap().v); print(\"\\n\"); }\n"
+        "        else if opt == 5 { print(m.pred(&lo).unwrap().v); print(\"\\n\"); }\n"
+        "        else { print(m.succ(&hi).unwrap().v); print(\"\\n\"); }\n"
+        "        i = i + 1;\n"
+        "    }\n"
+        "    ret 0; }",
+        "10\n"
+        "1 106465\n"
+        "4 1\n"
+        "1 317721\n"
+        "1 460929\n"
+        "1 644985\n"
+        "1 84185\n"
+        "1 89851\n"
+        "6 81968\n"
+        "1 492737\n"
+        "5 493598\n",
+        "106465\n84185\n492737\n",
+        0);
+}
+
+TEST_F(RuntimeTest, ExampleBalancedTree)
+{
+    // The balanced-tree template solution (Examples/balanced_tree.lis), with the
+    // problem's own 10-operation sample inlined. Needs no prologue: the file
+    // imports what it uses.
+    std::ifstream in("Examples/balanced_tree.lis");
+    ASSERT_TRUE(in.good()) << "cannot open Examples/balanced_tree.lis";
+    std::stringstream ss;
+    ss << in.rdbuf();
+    ASSERT_TRUE(compile(ss.str(), "")) << "compilation failed";
+    std::string out;
+    EXPECT_EQ(jitRun(&out), 0);
+    std::string normalized;
+    for (char c : out)
+        if (c != '\r') normalized += c;
+    EXPECT_EQ(normalized, "106465\n84185\n492737\n");
+}

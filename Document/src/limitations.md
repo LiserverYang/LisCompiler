@@ -154,6 +154,8 @@
 - **`get_ref`/`at_ref` 返回的借用不被借用检查追踪**（与 `Vec::at_ref` 同类）：
   `insert` 触发扩容、或 `remove` 之后再使用该借用即悬垂。
 - **无序容器的迭代顺序未定义**（桶序），不要依赖；有序容器才是按键升序。
+- **Map 的键唯一**（是「有序集合」不是多重集）。多重集 + 排名/第 k 小用 ~(值, id)~ 键的
+  标准技巧实现，见[标准库](./stdlib.md)的容器章节；~Examples/balanced_tree.lis~ 是完整题解。
 - 没有 `keys()`/`values()` 迭代器（走 `iter()` 拿 `EntryRef` 的 `key`/`value` 借用）。
 - **`Vec::with_capacity` 仍缺**：需要类型级 `__sizeof_type<T>()`（`from_elem` 覆盖了
   "开一块 n 元素缓冲"的实际需要）。

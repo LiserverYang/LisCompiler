@@ -10,6 +10,8 @@
 //     m.insert(2, String::from_lit("two"));
 //     m.insert(1, String::from_lit("one"));
 //     for e in m { print_int(*e.key); }         // 1 2 — iteration is IN ORDER
+//     let r = m.rank(&2);                       // 1-based rank (order statistics)
+//     let k = m.kth(1);                         // Option<&K>: the smallest key
 //     let x = m.get_ref(&2);                    // Option<&String>
 //     let n = *m.get_ref(&1).unwrap();          // Copy values: deref the borrow
 //     let taken = m.remove(&2).unwrap();        // ...or move the value OUT
@@ -71,7 +73,11 @@ struct Link
     pub left: i32,
     pub right: i32,
     pub parent: i32,
-    pub color: i32
+    pub color: i32,
+    // Nodes in this subtree, including the node itself. Maintained by
+    // insert/remove/rotations so the ORDER-STATISTICS queries (count_less, rank,
+    // kth, pred, succ) are O(log n) instead of a walk over the whole map.
+    pub size: i32
 }
 
 // A growable heap array of T, indexed by i32. INTERNAL. It has NO Drop impl:
@@ -260,6 +266,36 @@ impl Map
         if i != -1 { self.links.atMut(i).parent = p; }
     }
 
+    fn sizeOf(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret 0; }
+        ret self.links.at(i).size;
+    }
+
+    fn setSize(self: &mut Map, i: i32, n: i32)
+    {
+        if i != -1 { self.links.atMut(i).size = n; }
+    }
+
+    // Recompute one node's size from its children (a rotation calls this on the
+    // two nodes it rebuilt).
+    fn pull(self: &mut Map, i: i32)
+    {
+        if i != -1 { self.setSize(i, 1 + self.sizeOf(self.leftOf(i)) + self.sizeOf(self.rightOf(i))); }
+    }
+
+    // Recompute the sizes from 'i' up to the root. 'i' must be the DEEPEST node
+    // whose subtree changed; bottom-up order is the parent chain.
+    fn pullUp(self: &mut Map, i: i32)
+    {
+        let mut cur = i;
+        while cur != -1
+        {
+            self.pull(cur);
+            cur = self.parentOf(cur);
+        }
+    }
+
     // The key/value of slot 'i', lent. Public because the iterator is a
     // different type.
     fn keyAt(self: &Map, i: i32) -> &K
@@ -314,6 +350,86 @@ impl Map
     }
 
     // Insert or REPLACE. Returns the previous value when the key was present.
+    // ── order statistics (2026-09-26) ─────────────────────────────────────────
+    // A balanced-tree template problem (insert / delete / rank / k-th /
+    // predecessor / successor) needs these; before them the only way to reach the
+    // i-th entry was walking the iterator, which is O(n) per query and dies on
+    // hack data. All five are one O(log n) descent, using the subtree sizes the
+    // rotations and insert/remove maintain.
+
+    // How many keys are STRICTLY LESS than 'k' (0 when k is the smallest).
+    fn count_less(self: &Map, k: &K) -> i32
+    {
+        let mut acc = 0;
+        let mut cur = self.root;
+        while cur != -1
+        {
+            if *self.keyAt(cur) < *k
+            {
+                acc = acc + self.sizeOf(self.leftOf(cur)) + 1;
+                cur = self.rightOf(cur);
+            }
+            else { cur = self.leftOf(cur); }
+        }
+        ret acc;
+    }
+
+    // The rank of 'k': one plus the number of strictly smaller keys. For a key
+    // stored with a multiplicity (the multiset idiom below) this is the rank of
+    // its FIRST occurrence, which is what the template asks for.
+    fn rank(self: &Map, k: &K) -> i32
+    {
+        ret self.count_less(k) + 1;
+    }
+
+    // The i-th smallest key, 1-based; none when i is out of range.
+    fn kth(self: &Map, i: i32) -> Option<&K>
+    {
+        if i < 1 || i > self.count { ret Option::None; }
+        let mut want = i;
+        let mut cur = self.root;
+        while cur != -1
+        {
+            let leftSize = self.sizeOf(self.leftOf(cur));
+            if want <= leftSize { cur = self.leftOf(cur); }
+            else if want == leftSize + 1 { ret Option::Some(self.keyAt(cur)); }
+            else
+            {
+                want = want - leftSize - 1;
+                cur = self.rightOf(cur);
+            }
+        }
+        ret Option::None;
+    }
+
+    // The largest key strictly less than 'k' (none when there is none).
+    fn pred(self: &Map, k: &K) -> Option<&K>
+    {
+        let mut best = -1;
+        let mut cur = self.root;
+        while cur != -1
+        {
+            if *self.keyAt(cur) < *k { best = cur; cur = self.rightOf(cur); }
+            else { cur = self.leftOf(cur); }
+        }
+        if best == -1 { ret Option::None; }
+        ret Option::Some(self.keyAt(best));
+    }
+
+    // The smallest key strictly greater than 'k' (none when there is none).
+    fn succ(self: &Map, k: &K) -> Option<&K>
+    {
+        let mut best = -1;
+        let mut cur = self.root;
+        while cur != -1
+        {
+            if *k < *self.keyAt(cur) { best = cur; cur = self.leftOf(cur); }
+            else { cur = self.rightOf(cur); }
+        }
+        if best == -1 { ret Option::None; }
+        ret Option::Some(self.keyAt(best));
+    }
+
     fn insert(self: &mut Map, k: K, v: V) -> Option<V>
     {
         // Descend first: 'k' is still owned by this frame. 'wentLeft' remembers
@@ -346,6 +462,9 @@ impl Map
 
         self.count = self.count + 1;
         self.insertFixup(z);
+        // The new node is size 1 (newSlot); every ancestor grew by one. Sizes are
+        // structural, so this runs AFTER the rotations, which repaired their own.
+        self.pullUp(self.parentOf(z));
         ret Option::None;
     }
 
@@ -357,12 +476,12 @@ impl Map
         {
             let i = self.freeHead;
             self.freeHead = self.leftOf(i);
-            self.links.put(i, Link { left: -1, right: -1, parent: -1, color: 1 });
+            self.links.put(i, Link { left: -1, right: -1, parent: -1, color: 1, size: 1 });
             self.keys.put(i, k);
             self.values.put(i, v);
             ret i;
         }
-        let i = self.links.push(Link { left: -1, right: -1, parent: -1, color: 1 });
+        let i = self.links.push(Link { left: -1, right: -1, parent: -1, color: 1, size: 1 });
         let j = self.keys.push(k);
         let m = self.values.push(v);
         // The three arenas grow together, so the indices agree. Checked rather
@@ -450,6 +569,9 @@ impl Map
         else { self.setRight(self.parentOf(x), y); }
         self.setLeft(y, x);
         self.setParent(x, y);
+        // x's children changed first, then y's: recompute in that order.
+        self.pull(x);
+        self.pull(y);
     }
 
     // Right rotation around slot 'x' (CLRS 13.2).
@@ -464,6 +586,8 @@ impl Map
         else { self.setLeft(self.parentOf(x), y); }
         self.setRight(y, x);
         self.setParent(x, y);
+        self.pull(x);
+        self.pull(y);
     }
 
     // Move 'v' into 'u's place in the tree (CLRS 13.4).
@@ -528,6 +652,10 @@ impl Map
 
         self.count = self.count - 1;
         if yColor == 0 { self.deleteFixup(x, xParent); }
+        // xParent is the deepest node whose subtree lost an entry ('x' itself may
+        // be nil). Sizes are structural: restore them after the rotations.
+        if x != -1 { self.pullUp(x); }
+        else { self.pullUp(xParent); }
         ret Option::Some(removedValue);
     }
 
@@ -666,7 +794,18 @@ impl Map
         if self.colorOf(self.root) != 0 { ret false; }
         if self.parentOf(self.root) != -1 { ret false; }
         if self.blackHeight(self.root) < 0 { ret false; }
+        if !self.checkSizes(self.root) { ret false; }
         ret self.countNodes(self.root) == self.count;
+    }
+
+    // Every node's stored size must be one plus the sizes of its children — the
+    // invariant count_less/kth rely on.
+    fn checkSizes(self: &Map, i: i32) -> bool
+    {
+        if i == -1 { ret true; }
+        if self.sizeOf(i) != 1 + self.sizeOf(self.leftOf(i)) + self.sizeOf(self.rightOf(i)) { ret false; }
+        if !self.checkSizes(self.leftOf(i)) { ret false; }
+        ret self.checkSizes(self.rightOf(i));
     }
 
     // Black height of the subtree at 'i', or -1 when an invariant is broken.
