@@ -1,0 +1,471 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// hashmap.lis
+//
+// An UNORDERED map (and set) on a chained hash table, plus the `HashSet` wrapper
+// at the bottom.
+//
+//     let mut m = HashMap<i32, String>::new();
+//     m.insert(1, String::from_lit("one"));
+//     let v = m.get_ref(&1);                    // Option<&String>
+//     for e in m { print_int(*e.key); }         // bucket order, NOT sorted
+//
+// ── design notes ─────────────────────────────────────────────────────────────
+//
+// The table is the same shape as map.lis's arena tree, for the same language
+// reasons (see the header there): nodes live in AERAS and are linked by i32
+// INDEX, because a pointer to a struct cannot be indexed and pointers cannot be
+// compared. Slot i holds links[i] + keys[i] + values[i]; a free list in the
+// links' own 'next' field recycles removed slots.
+//
+// Bucket heads live in 'Arena<i32>' — one i32 per bucket, -1 for empty. The
+// capacity is a power of two, so the bucket is 'hash & (cap - 1)'; the hash is
+// first masked to 31 bits because '&' keeps the sign bit of a negative hash.
+//
+// Keys need 'Hash' (the hashing protocol, hash.lis) and 'PartialEq' (the
+// comparison used to resolve collisions). i32 and String implement both, so
+// 'HashMap<i32, V>' works out of the box.
+
+impt math { PartialEq, Ord, PartialOrd, Copy };
+impt hash { Hash };
+impt drop { Drop };
+impt option { Option, is_none };
+impt iterator { Iterator };
+impt map { EntryRef };
+
+// Chaining link of one slot.
+struct HLink
+{
+    pub next: i32
+}
+
+// The same growable-indexed store as map.lis: a generic element type is what
+// makes data[i] legal inside its own methods.
+struct Arena<T>
+{
+    pub data: *mut T,
+    pub len: i32,
+    pub cap: i32
+}
+
+impl Arena
+{
+    fn new() -> Arena
+    {
+        ret Arena { data: __alloc<T>(0), len: 0, cap: 0 };
+    }
+
+    fn len(self: &Arena) -> i32
+    {
+        ret self.len;
+    }
+
+    fn push(self: &mut Arena, v: T) -> i32
+    {
+        if self.len >= self.cap
+        {
+            let mut newCap = self.cap * 2;
+            if newCap == 0 { newCap = 4; }
+            let fresh = __alloc<T>(newCap * __sizeof(v));
+            __memcpy(fresh, self.data, self.len * __sizeof(v));
+            __free(self.data);
+            self.data = fresh;
+            self.cap = newCap;
+        }
+        self.data[self.len] = v;
+        self.len = self.len + 1;
+        ret self.len - 1;
+    }
+
+    fn at(self: &Arena, i: i32) -> &T
+    {
+        ret &self.data[i];
+    }
+
+    fn atMut(self: &mut Arena, i: i32) -> &mut T
+    {
+        ret &mut self.data[i];
+    }
+
+    fn take(self: &mut Arena, i: i32) -> T
+    {
+        let v = self.data[i];
+        ret v;
+    }
+
+    // Re-initialize a slot whose element was already released by take().
+    fn put(self: &mut Arena, i: i32, v: T)
+    {
+        self.data[i] = v;
+    }
+
+    fn freeBuffer(self: &mut Arena)
+    {
+        __free(self.data);
+        self.data = __alloc<T>(0);
+        self.len = 0;
+        self.cap = 0;
+    }
+}
+
+struct HashMap<K: Hash + PartialEq, V>
+{
+    links: Arena<HLink>,
+    keys: Arena<K>,
+    values: Arena<V>,
+    // One i32 per bucket: the head slot index, or -1.
+    buckets: Arena<i32>,
+    count: i32,
+    freeHead: i32
+}
+
+struct HashMapIter<K, V>
+{
+    pub links: &Arena<HLink>,
+    pub keys: &Arena<K>,
+    pub values: &Arena<V>,
+    pub buckets: &Arena<i32>,
+    pub bucket: i32,
+    pub cur: i32,
+    pub remaining: i32
+}
+
+impl HashMap
+{
+    // Nothing is allocated until the first insert.
+    fn new() -> HashMap
+    {
+        ret HashMap { links: Arena<HLink>::new(), keys: Arena<K>::new(), values: Arena<V>::new(), buckets: Arena<i32>::new(), count: 0, freeHead: -1 };
+    }
+
+    fn len(self: &HashMap) -> i32
+    {
+        ret self.count;
+    }
+
+    fn is_empty(self: &HashMap) -> bool
+    {
+        ret self.count == 0;
+    }
+
+    // The bucket a KEY hashes to. 31-bit mask first: '&' would otherwise keep
+    // the sign bit of a negative hash and produce a negative index.
+    fn bucketOfKey(self: &HashMap, k: &K) -> i32
+    {
+        ret (k.hash() & 2147483647) & (self.buckets.len() - 1);
+    }
+
+    fn bucketOfSlot(self: &HashMap, i: i32) -> i32
+    {
+        ret (self.keys.at(i).hash() & 2147483647) & (self.buckets.len() - 1);
+    }
+
+    // The slot holding 'k', or -1.
+    fn find(self: &HashMap, k: &K) -> i32
+    {
+        if self.count == 0 { ret -1; }
+        let mut cur = *self.buckets.at(self.bucketOfKey(k));
+        while cur != -1
+        {
+            if *k == *self.keys.at(cur) { ret cur; }
+            cur = self.links.at(cur).next;
+        }
+        ret -1;
+    }
+
+    fn contains_key(self: &HashMap, k: &K) -> bool
+    {
+        ret self.find(k) != -1;
+    }
+
+    // The value stored under 'k', LENT (see the warning on Map::get_ref in
+    // map.lis: the borrow is not tracked, and a rehash or remove invalidates it).
+    fn get_ref(self: &HashMap, k: &K) -> Option<&V>
+    {
+        let i = self.find(k);
+        if i == -1 { ret Option::None; }
+        ret Option::Some(self.values.at(i));
+    }
+
+    // The value under 'k', LENT MUTABLY (the write counterpart of get_ref).
+    fn get_mut(self: &mut HashMap, k: &K) -> Option<&mut V>
+    {
+        let i = self.find(k);
+        if i == -1 { ret Option::None; }
+        ret Option::Some(self.values.atMut(i));
+    }
+
+    // Insert or REPLACE. Returns the previous value when the key was present.
+    fn insert(self: &mut HashMap, k: K, v: V) -> Option<V>
+    {
+        let i = self.find(&k);
+        if i != -1
+        {
+            let old = self.values.take(i);
+            self.values.put(i, v);
+            __drop(k);
+            ret Option::Some(old);
+        }
+
+        // A new key: make room first, because the rehash moves the buckets.
+        if self.buckets.len() == 0 { self.initBuckets(8); }
+        else if (self.count + 1) * 4 > self.buckets.len() * 3 { self.rehash(); }
+
+        let idx = self.bucketOfKey(&k);
+        let slot = self.newSlot(k, v);
+        self.links.put(slot, HLink { next: *self.buckets.at(idx) });
+        self.buckets.put(idx, slot);
+        self.count = self.count + 1;
+        ret Option::None;
+    }
+
+    fn initBuckets(self: &mut HashMap, cap: i32)
+    {
+        let mut i = 0;
+        while i < cap
+        {
+            self.buckets.push(-1);
+            i = i + 1;
+        }
+    }
+
+    // Double the bucket array and relink every node. A node of old bucket j can
+    // only land in j or j + oldCap (the table is a power of two), so walking the
+    // OLD buckets from low to high never clobbers an unprocessed one.
+    fn rehash(self: &mut HashMap)
+    {
+        let oldCap = self.buckets.len();
+        self.initBuckets(oldCap);
+        let mut j = 0;
+        while j < oldCap
+        {
+            let mut cur = *self.buckets.at(j);
+            self.buckets.put(j, -1);
+            while cur != -1
+            {
+                let nxt = self.links.at(cur).next;
+                let idx = self.bucketOfSlot(cur);
+                self.links.put(cur, HLink { next: *self.buckets.at(idx) });
+                self.buckets.put(idx, cur);
+                cur = nxt;
+            }
+            j = j + 1;
+        }
+    }
+
+    // A slot for a new entry: a recycled one, or a fresh index in ALL arenas.
+    fn newSlot(self: &mut HashMap, k: K, v: V) -> i32
+    {
+        if self.freeHead != -1
+        {
+            let i = self.freeHead;
+            self.freeHead = self.links.at(i).next;
+            self.links.put(i, HLink { next: -1 });
+            self.keys.put(i, k);
+            self.values.put(i, v);
+            ret i;
+        }
+        let i = self.links.push(HLink { next: -1 });
+        let j = self.keys.push(k);
+        let m = self.values.push(v);
+        if i != j || j != m { panic("hashmap: arena desync"); }
+        ret i;
+    }
+
+    fn recycle(self: &mut HashMap, i: i32)
+    {
+        self.links.put(i, HLink { next: self.freeHead });
+        self.freeHead = i;
+    }
+
+    // Remove 'k' and hand its value over.
+    fn remove(self: &mut HashMap, k: &K) -> Option<V>
+    {
+        if self.count == 0 { ret Option::None; }
+        let bucket = self.bucketOfKey(k);
+        let mut cur = *self.buckets.at(bucket);
+        let mut prev = -1;
+        while cur != -1
+        {
+            if *k == *self.keys.at(cur)
+            {
+                // Unlink: the head, or the predecessor's next.
+                if prev == -1 { self.buckets.put(bucket, self.links.at(cur).next); }
+                else { self.links.put(prev, HLink { next: self.links.at(cur).next }); }
+
+                let removedKey = self.keys.take(cur);
+                let removedValue = self.values.take(cur);
+                __drop(removedKey);
+                self.recycle(cur);
+                self.count = self.count - 1;
+                ret Option::Some(removedValue);
+            }
+            prev = cur;
+            cur = self.links.at(cur).next;
+        }
+        ret Option::None;
+    }
+
+    fn clear(self: &mut HashMap)
+    {
+        if self.count == 0 { ret; }
+        let mut b = 0;
+        while b < self.buckets.len()
+        {
+            let mut cur = *self.buckets.at(b);
+            while cur != -1
+            {
+                let nxt = self.links.at(cur).next;
+                let key = self.keys.take(cur);
+                let value = self.values.take(cur);
+                __drop(key);
+                __drop(value);
+                self.recycle(cur);
+                cur = nxt;
+            }
+            self.buckets.put(b, -1);
+            b = b + 1;
+        }
+        self.count = 0;
+    }
+
+    // 'for e in m' — bucket order (unspecified).
+    fn iter(self: &HashMap<K, V>) -> HashMapIter<K, V>
+    {
+        ret HashMapIter { links: &self.links, keys: &self.keys, values: &self.values, buckets: &self.buckets, bucket: 0, cur: -1, remaining: self.count };
+    }
+}
+
+impl<K, V> HashMapIter<K, V>
+{
+    // The next occupied slot: continue the current chain, else scan forward.
+    fn advance(self: &mut HashMapIter)
+    {
+        if self.cur != -1
+        {
+            self.cur = self.links.at(self.cur).next;
+            if self.cur != -1 { ret; }
+        }
+        while self.bucket < self.buckets.len()
+        {
+            let head = *self.buckets.at(self.bucket);
+            self.bucket = self.bucket + 1;
+            if head != -1
+            {
+                self.cur = head;
+                ret;
+            }
+        }
+        self.cur = -1;
+    }
+}
+
+impl<K, V> Iterator<EntryRef<K, V>> for HashMapIter<K, V>
+{
+    fn next(self: &mut Self) -> Option<EntryRef<K, V>>
+    {
+        if self.remaining == 0 { ret Option::None; }
+        self.advance();
+        if self.cur == -1 { ret Option::None; }
+        let i = self.cur;
+        self.remaining = self.remaining - 1;
+        ret Option::Some(EntryRef { key: self.keys.at(i), value: self.values.at(i) });
+    }
+}
+
+// Releasing the map: every live entry (the free list holds nothing), then the
+// four buffers.
+impl Drop for HashMap
+{
+    fn drop(self)
+    {
+        let mut b = 0;
+        while b < self.buckets.len()
+        {
+            let mut cur = *self.buckets.at(b);
+            while cur != -1
+            {
+                let nxt = self.links.at(cur).next;
+                let key = self.keys.take(cur);
+                let value = self.values.take(cur);
+                __drop(key);
+                __drop(value);
+                cur = nxt;
+            }
+            b = b + 1;
+        }
+        self.links.freeBuffer();
+        self.keys.freeBuffer();
+        self.values.freeBuffer();
+        self.buckets.freeBuffer();
+    }
+}
+
+// ── HashSet: the same wrapper as Set has over Map ────────────────────────────
+
+struct HashSet<K: Hash + PartialEq>
+{
+    map: HashMap<K, bool>
+}
+
+struct HashSetIter<K: Hash + PartialEq>
+{
+    pub inner: HashMapIter<K, bool>
+}
+
+impl HashSet
+{
+    fn new() -> HashSet
+    {
+        ret HashSet { map: HashMap<K, bool>::new() };
+    }
+
+    fn len(self: &HashSet) -> i32
+    {
+        ret self.map.len();
+    }
+
+    fn is_empty(self: &HashSet) -> bool
+    {
+        ret self.map.is_empty();
+    }
+
+    // True when the key was NOT present before this call.
+    fn insert(self: &mut HashSet, k: K) -> bool
+    {
+        ret is_none(self.map.insert(k, true));
+    }
+
+    fn contains(self: &HashSet, k: &K) -> bool
+    {
+        ret self.map.contains_key(k);
+    }
+
+    fn remove(self: &mut HashSet, k: &K) -> bool
+    {
+        ret !is_none(self.map.remove(k));
+    }
+
+    fn clear(self: &mut HashSet)
+    {
+        self.map.clear();
+    }
+
+    fn iter(self: &HashSet<K>) -> HashSetIter<K>
+    {
+        ret HashSetIter { inner: self.map.iter() };
+    }
+}
+
+impl Iterator<&K> for HashSetIter<K>
+{
+    fn next(self: &mut Self) -> Option<&K>
+    {
+        let entry = self.inner.next();
+        match entry {
+            Some(e) => { ret Option::Some(e.key); },
+            None => { ret Option::None; },
+        }
+    }
+}

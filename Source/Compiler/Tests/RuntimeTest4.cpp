@@ -2252,3 +2252,260 @@ TEST_F(RuntimeTest, LetElseRejectedShapes)
                       "fn main() -> i32 { ret 0; }\n",
         "cannot use 'else'");
 }
+
+// ── ordered containers: map.lis / set.lis ────────────────────────────────────
+//
+// Map/Set/HashMap/HashSet are ordinary Lis code in the standard library, not
+// compiler builtins, so they are NOT in the test prologue: every snippet below
+// imports what it uses. These are also the only tests that reach the `__drop`
+// builtin's ownership hand-off (map.lis releases entries with
+// `let key = keys.take(i); __drop(key);`), which is why the String-keyed cases
+// run through the subprocess path: a regression there is a double free, and an
+// abort would take the whole JIT shard down with it.
+
+TEST_F(RuntimeTest, MapBasicOperations)
+{
+    expectRun("impt map { Map };\n"
+              "fn main() -> i32 { let mut m = Map<i32, i32>::new();\n"
+              "    if !m.is_empty() { ret 1; }\n"
+              "    if !is_none(m.insert(1, 10)) { ret 2; }\n"
+              "    if !is_none(m.insert(2, 20)) { ret 3; }\n"
+              "    if m.insert(2, 21).unwrap() != 20 { ret 4; }\n"
+              "    if m.len() != 2 { ret 5; }\n"
+              "    if !m.contains_key(&1) { ret 6; }\n"
+              "    if m.contains_key(&3) { ret 7; }\n"
+              "    if *m.get_ref(&2).unwrap() != 21 { ret 8; }\n"
+              "    *m.get_mut(&2).unwrap() = 99;\n"
+              "    if *m.get_ref(&2).unwrap() != 99 { ret 9; }\n"
+              "    if m.remove(&2).unwrap() != 99 { ret 10; }\n"
+              "    if !is_none(m.remove(&2)) { ret 11; }\n"
+              "    if m.contains_key(&2) { ret 12; }\n"
+              "    if m.len() != 1 { ret 13; }\n"
+              "    if !m.check_invariants() { ret 14; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MapIteratesInKeyOrder)
+{
+    // The tree walk is an IN-ORDER traversal, so iteration yields sorted keys
+    // even though the insertion order is scrambled.
+    expectOutput("impt map { Map };\n"
+                 "fn main() -> i32 { let mut m = Map<i32, i32>::new();\n"
+                 "    m.insert(3, 30); m.insert(1, 10); m.insert(2, 20);\n"
+                 "    let mut it = m.iter();\n"
+                 "    while true {\n"
+                 "        match it.next() {\n"
+                 "            Some(e) => { print(*e.key); print(\" \"); },\n"
+                 "            None => { break; },\n"
+                 "        }\n"
+                 "    }\n"
+                 "    ret 0; }",
+        "1 2 3 ", 0);
+}
+
+TEST_F(RuntimeTest, MapForLoopVisitsEveryEntryInOrder)
+{
+    // 'for e in m' is the desugar's borrowing form: it binds '&m', so the map is
+    // still owned afterwards.
+    expectOutput("impt map { Map };\n"
+                 "fn main() -> i32 { let mut m = Map<i32, i32>::new();\n"
+                 "    m.insert(2, 20); m.insert(1, 10);\n"
+                 "    let mut acc = 0;\n"
+                 "    for e in m { acc = acc + *e.key * 100 + *e.value; }\n"
+                 "    print(acc);\n"
+                 "    ret 0; }",
+        "330", 0);
+}
+
+TEST_F(RuntimeTest, MapIterationSortedForManyKeys)
+{
+    // 500 keys inserted in a scrambled order: the walk must be strictly
+    // increasing, visit every key exactly once, and survive the removals.
+    expectRun("impt map { Map };\n"
+              "fn main() -> i32 { let mut m = Map<i32, i32>::new();\n"
+              "    let mut i = 0;\n"
+              "    while i < 500 { m.insert((i * 7919) % 500, i); i = i + 1; }\n"
+              "    if m.len() != 500 { ret 1; }\n"
+              "    if !m.check_invariants() { ret 2; }\n"
+              "    let mut prev = 0 - 1;\n"
+              "    let mut seen = 0;\n"
+              "    let mut it = m.iter();\n"
+              "    while true {\n"
+              "        match it.next() {\n"
+              "            Some(e) => {\n"
+              "                if *e.key <= prev { ret 3; }\n"
+              "                prev = *e.key;\n"
+              "                seen = seen + 1;\n"
+              "            },\n"
+              "            None => { break; },\n"
+              "        }\n"
+              "    }\n"
+              "    if seen != 500 { ret 4; }\n"
+              "    if prev != 499 { ret 5; }\n"
+              "    let mut j = 0;\n"
+              "    while j < 500 { m.remove(&j).unwrap(); j = j + 1; }\n"
+              "    if !m.is_empty() { ret 6; }\n"
+              "    if !m.check_invariants() { ret 7; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MapStringKeysClearAndRefill)
+{
+    // Droppable keys AND values, released through __drop, then the buffer is
+    // reused: this is the case that double-freed before __drop learned to
+    // consume its place.
+    expectRunProc("impt map { Map };\n"
+                  "fn main() -> i32 { let mut m = Map<String, String>::new();\n"
+                  "    m.insert(String::from_lit(\"b\"), String::from_lit(\"two\"));\n"
+                  "    m.insert(String::from_lit(\"a\"), String::from_lit(\"one\"));\n"
+                  "    m.clear();\n"
+                  "    if !m.is_empty() { ret 1; }\n"
+                  "    m.insert(String::from_lit(\"c\"), String::from_lit(\"three\"));\n"
+                  "    if m.len() != 1 { ret 2; }\n"
+                  "    let v = m.remove(&String::from_lit(\"c\")).unwrap();\n"
+                  "    if v.len() != 5 { ret 3; }\n"
+                  "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MapStringKeysIterateInOrder)
+{
+    expectOutput("impt map { Map };\n"
+                 "fn main() -> i32 { let mut m = Map<String, i32>::new();\n"
+                 "    m.insert(String::from_lit(\"b\"), 2);\n"
+                 "    m.insert(String::from_lit(\"a\"), 1);\n"
+                 "    let mut it = m.iter();\n"
+                 "    while true {\n"
+                 "        match it.next() {\n"
+                 "            Some(e) => { print(e.key.to_cstr()); print(\" \"); },\n"
+                 "            None => { break; },\n"
+                 "        }\n"
+                 "    }\n"
+                 "    ret 0; }",
+        "a b ", 0);
+}
+
+TEST_F(RuntimeTest, SetBasicOperations)
+{
+    expectRun("impt set { Set };\n"
+              "fn main() -> i32 { let mut s = Set<i32>::new();\n"
+              "    if !s.insert(3) { ret 1; }\n"
+              "    if s.insert(3) { ret 2; }\n"
+              "    if s.len() != 1 { ret 3; }\n"
+              "    if !s.contains(&3) { ret 4; }\n"
+              "    if s.contains(&4) { ret 5; }\n"
+              "    if !s.remove(&3) { ret 6; }\n"
+              "    if s.remove(&3) { ret 7; }\n"
+              "    if !s.is_empty() { ret 8; }\n"
+              "    if !s.check_invariants() { ret 9; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, SetIteratesInKeyOrder)
+{
+    expectOutput("impt set { Set };\n"
+                 "fn main() -> i32 { let mut s = Set<i32>::new();\n"
+                 "    s.insert(5); s.insert(1); s.insert(3); s.insert(5);\n"
+                 "    let mut acc = 0;\n"
+                 "    for k in s { print(*k); print(\" \"); acc = acc + *k; }\n"
+                 "    print(acc);\n"
+                 "    ret 0; }",
+        "1 3 5 9", 0);
+}
+
+// ── hash table: hashmap.lis ─────────────────────────────────────────────────
+
+TEST_F(RuntimeTest, HashMapBasicOperations)
+{
+    expectRun("impt hashmap { HashMap };\n"
+              "fn main() -> i32 { let mut h = HashMap<i32, i32>::new();\n"
+              "    if !is_none(h.insert(1, 10)) { ret 1; }\n"
+              "    if h.insert(1, 11).unwrap() != 10 { ret 2; }\n"
+              "    if h.len() != 1 { ret 3; }\n"
+              "    if !h.contains_key(&1) { ret 4; }\n"
+              "    if *h.get_ref(&1).unwrap() != 11 { ret 5; }\n"
+              "    *h.get_mut(&1).unwrap() = 12;\n"
+              "    if *h.get_ref(&1).unwrap() != 12 { ret 6; }\n"
+              "    if h.remove(&1).unwrap() != 12 { ret 7; }\n"
+              "    if !h.is_empty() { ret 8; }\n"
+              "    if h.contains_key(&1) { ret 9; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, HashMapIterationVisitsEveryEntry)
+{
+    // The walk order is the bucket order (deliberately unspecified), so the test
+    // accumulates instead of printing: 50 distinct keys, values 0..49.
+    expectRun("impt hashmap { HashMap };\n"
+              "fn main() -> i32 { let mut h = HashMap<i32, i32>::new();\n"
+              "    let mut i = 0;\n"
+              "    while i < 50 { h.insert((i * 7) % 50, i); i = i + 1; }\n"
+              "    if h.len() != 50 { ret 1; }\n"
+              "    let mut total = 0;\n"        // 'sum' is the iterator module's
+              "    let mut seen = 0;\n"          // promoted name in the prologue
+              "    let mut it = h.iter();\n"
+              "    while true {\n"
+              "        match it.next() {\n"
+              "            Some(e) => { total = total + *e.value; seen = seen + 1; },\n"
+              "            None => { break; },\n"
+              "        }\n"
+              "    }\n"
+              "    if seen != 50 { ret 2; }\n"
+              "    if total != 1225 { ret 3; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, HashMapStringKeysSurviveRemoval)
+{
+    // String keys hash through Hash and compare through PartialEq; the removal
+    // path releases them with __drop (subprocess: a double free would abort).
+    expectRunProc("impt hashmap { HashMap };\n"
+                  "fn main() -> i32 { let mut h = HashMap<String, i32>::new();\n"
+                  "    h.insert(String::from_lit(\"a\"), 1);\n"
+                  "    h.insert(String::from_lit(\"b\"), 2);\n"
+                  "    if h.remove(&String::from_lit(\"a\")).unwrap() != 1 { ret 1; }\n"
+                  "    if h.len() != 1 { ret 2; }\n"
+                  "    if *h.get_ref(&String::from_lit(\"b\")).unwrap() != 2 { ret 3; }\n"
+                  "    h.clear();\n"
+                  "    if !h.is_empty() { ret 4; }\n"
+                  "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, HashSetBasicOperations)
+{
+    expectRun("impt hashmap { HashSet };\n"
+              "fn main() -> i32 { let mut s = HashSet<i32>::new();\n"
+              "    if !s.insert(4) { ret 1; }\n"
+              "    if s.insert(4) { ret 2; }\n"
+              "    if s.len() != 1 { ret 3; }\n"
+              "    if !s.contains(&4) { ret 4; }\n"
+              "    if !s.remove(&4) { ret 5; }\n"
+              "    if s.remove(&4) { ret 6; }\n"
+              "    if !s.is_empty() { ret 7; }\n"
+              "    ret 0; }",
+        0);
+}
+
+TEST_F(RuntimeTest, MapKeyWithoutOrdRejected)
+{
+    // The order bounds live on the Map declaration, so instantiating it with a
+    // type that has no Ord is rejected at the call site.
+    expectCompileFail("impt map { Map };\n"
+                      "struct K { pub v: i32 }\n"
+                      "fn main() -> i32 { let mut m = Map<K, i32>::new(); ret m.len(); }\n",
+        "does not implement trait");
+}
+
+TEST_F(RuntimeTest, HashMapKeyWithoutHashRejected)
+{
+    expectCompileFail("impt hashmap { HashMap };\n"
+                      "struct K { pub v: i32 }\n"
+                      "fn main() -> i32 { let mut h = HashMap<K, i32>::new(); ret h.len(); }\n",
+        "does not implement trait");
+}

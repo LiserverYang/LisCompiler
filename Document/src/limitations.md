@@ -144,6 +144,20 @@
   `(x as i16) as i32`）；`+=` 等复合赋值不支持重载运算符的类型（`a[i] = a[i] * b[i]`
   可以，`a[i] *= b[i]` 不行）；抽象类/函数式接口（trait object）与 `extern/FFI` 仍缺。
 
+### 标准库容器（2026-09-26）
+
+`map`/`set`（红黑树，有序）与 `hashmap`（链式哈希表 + `HashSet`，无序）已可用，
+见[标准库](./stdlib.md)。已知边界：
+
+- **没有按值 `get`**：按值交出只有 Copy 元素才安全，而这个 bound 无法表达（见标准库章节）。
+  Copy 值写 `*m.get_ref(&k).unwrap()`，非 Copy 值用 `get_ref` / `remove`。
+- **`get_ref`/`at_ref` 返回的借用不被借用检查追踪**（与 `Vec::at_ref` 同类）：
+  `insert` 触发扩容、或 `remove` 之后再使用该借用即悬垂。
+- **无序容器的迭代顺序未定义**（桶序），不要依赖；有序容器才是按键升序。
+- 没有 `keys()`/`values()` 迭代器（走 `iter()` 拿 `EntryRef` 的 `key`/`value` 借用）。
+- **`Vec::with_capacity` 仍缺**：需要类型级 `__sizeof_type<T>()`（`from_elem` 覆盖了
+  "开一块 n 元素缓冲"的实际需要）。
+
 ## 路线图
 
 按可用性优先级：

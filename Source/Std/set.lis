@@ -1,0 +1,97 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// set.lis
+//
+// An ORDERED set: a thin wrapper over the red-black tree in map.lis, with the
+// value slot carrying a bool. All the tree work lives there; this file only
+// fixes the API (insert/contains/remove/iteration) and the key protocol.
+//
+//     let mut s = Set<i32>::new();
+//     s.insert(3); s.insert(1); s.insert(3);      // the second 3 is a no-op
+//     for k in s { print_int(*k); }               // 1 3 — iteration is IN ORDER
+//
+// A key needs Ord + PartialOrd (seeded by the compiler for i32/String), exactly
+// like Map.
+
+impt math { Ord, PartialOrd };
+impt option { Option, is_none };
+impt iterator { Iterator };
+impt map { Map, MapIter, EntryRef };
+
+struct Set<K: Ord + PartialOrd>
+{
+    map: Map<K, bool>
+}
+
+// Yields '&K'. The bounds sit on THIS declaration because the Iterator impl is
+// written without header parameters (a header that re-declares a bounded
+// struct's parameters is rejected — see the note in map.lis).
+struct SetIter<K: Ord + PartialOrd>
+{
+    pub inner: MapIter<K, bool>
+}
+
+impl Set
+{
+    fn new() -> Set
+    {
+        ret Set { map: Map<K, bool>::new() };
+    }
+
+    fn len(self: &Set) -> i32
+    {
+        ret self.map.len();
+    }
+
+    fn is_empty(self: &Set) -> bool
+    {
+        ret self.map.is_empty();
+    }
+
+    // True when the key was NOT present before this call.
+    fn insert(self: &mut Set, k: K) -> bool
+    {
+        ret is_none(self.map.insert(k, true));
+    }
+
+    fn contains(self: &Set, k: &K) -> bool
+    {
+        ret self.map.contains_key(k);
+    }
+
+    // True when the key was present (and is now gone).
+    fn remove(self: &mut Set, k: &K) -> bool
+    {
+        ret !is_none(self.map.remove(k));
+    }
+
+    fn clear(self: &mut Set)
+    {
+        self.map.clear();
+    }
+
+    // The red-black invariants of the underlying tree (tests/debugging).
+    fn check_invariants(self: &Set) -> bool
+    {
+        ret self.map.check_invariants();
+    }
+
+    // 'for k in s' — an IN-ORDER walk.
+    fn iter(self: &Set<K>) -> SetIter<K>
+    {
+        ret SetIter { inner: self.map.iter() };
+    }
+}
+
+impl Iterator<&K> for SetIter<K>
+{
+    fn next(self: &mut Self) -> Option<&K>
+    {
+        let entry = self.inner.next();
+        match entry {
+            Some(e) => { ret Option::Some(e.key); },
+            None => { ret Option::None; },
+        }
+    }
+}

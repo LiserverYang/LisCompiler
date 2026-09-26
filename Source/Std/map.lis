@@ -1,0 +1,771 @@
+// Copyright 2026, LiserverYang. All rights reserved.
+// MIT License.
+//
+// map.lis
+//
+// An ORDERED map and set, built on a red-black tree implemented here from
+// scratch (CLRS shape: parent links, insert fixup, full delete fixup).
+//
+//     let mut m = Map<i32, String>::new();
+//     m.insert(2, String::from_lit("two"));
+//     m.insert(1, String::from_lit("one"));
+//     for e in m { print_int(*e.key); }         // 1 2 — iteration is IN ORDER
+//     let x = m.get_ref(&2);                    // Option<&String>
+//     let n = *m.get_ref(&1).unwrap();          // Copy values: deref the borrow
+//     let taken = m.remove(&2).unwrap();        // ...or move the value OUT
+//
+// There is deliberately NO by-value 'get' method: handing a value over is only
+// sound for a Copy element, and a 'V: Copy' bound cannot be attached to a Map
+// method — a bound declared in a method/impl/function signature does not reach
+// the arena's element type (rule 3), so the gate cannot be expressed. Reading
+// through the returned borrow ('*m.get_ref(k).unwrap()') is the supported way
+// to copy a Copy value out.
+//
+// ── the four language rules that shape this implementation ───────────────────
+//
+//  1. A self-referential GENERIC struct is rejected by E3018 even when the
+//     recursion goes through a pointer, so 'Node<K,V> { left: *mut Node<K,V> }'
+//     cannot be written. Nodes are linked by i32 INDEX instead, which is also
+//     the only way to compare node identity — pointers cannot be compared.
+//  2. 'p[i]' is legal only when the pointee is a PRIMITIVE, an ARRAY or a bare
+//     GENERIC PARAMETER, so '*mut Node<K, V>' cannot be indexed. Storage goes
+//     through 'Arena<T>' (generic in its element type, so data[i] is legal in
+//     its own methods), whose elements are Link records / K / V — never a
+//     pointer to a struct.
+//  3. A field read or a method result carries the parameter of the type that
+//     DECLARED it, together with that declaration's bounds. That is why the key
+//     and the value live in 'Arena<K>' / 'Arena<V>' (substituted at the CALL
+//     site) instead of in one generic node struct, and why the ORDER bounds sit
+//     on the STRUCT declarations ('struct Map<K: Ord + PartialOrd, V>',
+//     'impl Map { .. }' with no header parameters): an impl-level bound does not
+//     reach a field or a method result, and a header that re-declares a bounded
+//     struct's parameters is rejected outright.
+//  4. Moving a value out of a place reached through a REFERENCE is E3017, but a
+//     raw-pointer index place may be moved out of (that is how Vec::next works).
+//     Arena::take is that move, which is how 'remove' hands its value over.
+//     The by-value read needs the element to be Copy, and that bound cannot be
+//     put on a Map method (rule 3) — nor on a free function, whose own bound
+//     would not be checked either. There is therefore no by-value 'get':
+//     'get_ref' + '*' for Copy values, 'remove' to take ownership.
+//
+// Nil is index -1 — there is no sentinel node, and every link access goes
+// through colorOf/leftOf/rightOf/parentOf, which answer for -1, so nothing
+// uninitialized is ever stored.
+//
+// KEY REQUIREMENTS: 'Ord' (the total-order marker) and 'PartialOrd' (the
+// comparison the tree performs). The compiler seeds i32 and String with both,
+// so 'Map<i32, V>' works out of the box; a struct opts in with an empty
+// 'impl Ord for T { }' plus a real 'impl PartialOrd for T'.
+
+impt math { Ord, PartialOrd, Copy };
+impt drop { Drop };
+impt option { Option };
+impt iterator { Iterator };
+
+// ── storage ──────────────────────────────────────────────────────────────────
+
+// The tree structure of one slot: links and colour, no payload. Non-generic, so
+// it never drags a parameter (and a missing bound) into a field read.
+struct Link
+{
+    pub left: i32,
+    pub right: i32,
+    pub parent: i32,
+    pub color: i32
+}
+
+// A growable heap array of T, indexed by i32. INTERNAL. It has NO Drop impl:
+// the owner decides when an element is released, because removed elements are
+// moved out and their slots reused — dropping the buffer's elements would
+// release those twice. The owner calls freeBuffer().
+struct Arena<T>
+{
+    pub data: *mut T,
+    pub len: i32,
+    pub cap: i32
+}
+
+impl Arena
+{
+    fn new() -> Arena
+    {
+        ret Arena { data: __alloc<T>(0), len: 0, cap: 0 };
+    }
+
+    fn len(self: &Arena) -> i32
+    {
+        ret self.len;
+    }
+
+    // Append 'v' and return its index. Doubles: 0 → 4 → 8 → ...
+    fn push(self: &mut Arena, v: T) -> i32
+    {
+        if self.len >= self.cap
+        {
+            let mut newCap = self.cap * 2;
+            if newCap == 0 { newCap = 4; }
+            let fresh = __alloc<T>(newCap * __sizeof(v));
+            __memcpy(fresh, self.data, self.len * __sizeof(v));
+            __free(self.data);
+            self.data = fresh;
+            self.cap = newCap;
+        }
+        self.data[self.len] = v;
+        self.len = self.len + 1;
+        ret self.len - 1;
+    }
+
+    // The element at 'i', LENT. Do not hold it across a push (which may
+    // reallocate) or a take/put of that slot.
+    fn at(self: &Arena, i: i32) -> &T
+    {
+        ret &self.data[i];
+    }
+
+    fn atMut(self: &mut Arena, i: i32) -> &mut T
+    {
+        ret &mut self.data[i];
+    }
+
+    // Move the element at 'i' out. The slot is left moved-from and must be
+    // re-initialized with put() before it is read again.
+    fn take(self: &mut Arena, i: i32) -> T
+    {
+        let v = self.data[i];
+        ret v;
+    }
+
+    // Re-initialize the slot at 'i'. The caller must have released what the slot
+    // held: writing a whole raw-pointer index place does NOT drop the old
+    // contents (only a whole local or a single Deref place does).
+    fn put(self: &mut Arena, i: i32, v: T)
+    {
+        self.data[i] = v;
+    }
+
+    // Release the buffer; the elements are the owner's business.
+    fn freeBuffer(self: &mut Arena)
+    {
+        __free(self.data);
+        self.data = __alloc<T>(0);
+        self.len = 0;
+        self.cap = 0;
+    }
+}
+
+// One iteration step: the key and the value LENT by the tree.
+struct EntryRef<K, V>
+{
+    pub key: &K,
+    pub value: &V
+}
+
+// ── the map ──────────────────────────────────────────────────────────────────
+//
+// Three arenas in lockstep: slot i holds links[i], keys[i], values[i]. A slot is
+// reused through the free list, so the arrays always agree (checked in newSlot).
+//
+// The ORDER bounds live on this declaration (rule 3): methods are then written
+// in an 'impl Map' block without header parameters.
+struct Map<K: Ord + PartialOrd, V>
+{
+    // pub so MapIter (and the module's own free functions) can reach the
+    // arenas; the module is the real boundary.
+    pub links: Arena<Link>,
+    pub keys: Arena<K>,
+    pub values: Arena<V>,
+    root: i32,
+    freeHead: i32,
+    count: i32
+}
+
+// The in-order walker. It holds RAW pieces of the arenas rather than '&Map', so
+// that this struct needs no bounds and its Iterator impl can be written without
+// header parameters (a header that re-declares a bounded struct's parameters is
+// rejected — rule 3). The loop still cannot mutate the map: the for-desugar
+// binds 'let __src = &m;' first, and that borrow is live across the body.
+struct MapIter<K, V>
+{
+    pub keys: &Arena<K>,
+    pub values: &Arena<V>,
+    pub links: &Arena<Link>,
+    pub cur: i32,
+    pub remaining: i32
+}
+
+impl Map
+{
+    // An empty map. Nothing is allocated until the first insert.
+    fn new() -> Map
+    {
+        ret Map { links: Arena<Link>::new(), keys: Arena<K>::new(), values: Arena<V>::new(), root: -1, freeHead: -1, count: 0 };
+    }
+
+    fn len(self: &Map) -> i32
+    {
+        ret self.count;
+    }
+
+    fn is_empty(self: &Map) -> bool
+    {
+        ret self.count == 0;
+    }
+
+    // ── link accessors: the ONLY place -1 (nil) is interpreted ─────────────────
+
+    // NOTE: every access goes through Arena::at/atMut. Indexing the arena's raw
+    // buffer from HERE is illegal (its pointee is the Link struct, and only a
+    // primitive, an array or a bare parameter may be indexed — rule 2).
+    fn colorOf(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret 0; } // nil is black
+        ret self.links.at(i).color;
+    }
+
+    fn leftOf(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret -1; }
+        ret self.links.at(i).left;
+    }
+
+    fn rightOf(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret -1; }
+        ret self.links.at(i).right;
+    }
+
+    fn parentOf(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret -1; }
+        ret self.links.at(i).parent;
+    }
+
+    fn setColor(self: &mut Map, i: i32, c: i32)
+    {
+        if i != -1 { self.links.atMut(i).color = c; }
+    }
+
+    fn setLeft(self: &mut Map, i: i32, child: i32)
+    {
+        if i != -1 { self.links.atMut(i).left = child; }
+    }
+
+    fn setRight(self: &mut Map, i: i32, child: i32)
+    {
+        if i != -1 { self.links.atMut(i).right = child; }
+    }
+
+    fn setParent(self: &mut Map, i: i32, p: i32)
+    {
+        if i != -1 { self.links.atMut(i).parent = p; }
+    }
+
+    // The key/value of slot 'i', lent. Public because the iterator is a
+    // different type.
+    fn keyAt(self: &Map, i: i32) -> &K
+    {
+        ret self.keys.at(i);
+    }
+
+    fn valueAt(self: &Map, i: i32) -> &V
+    {
+        ret self.values.at(i);
+    }
+
+    // The slot holding 'k', or -1 when the key is absent. Comparison goes through
+    // the < / > operators (see the Ord note in math.lis).
+    fn find(self: &Map, k: &K) -> i32
+    {
+        let mut cur = self.root;
+        while cur != -1
+        {
+            if *k < *self.keyAt(cur) { cur = self.leftOf(cur); }
+            else if *self.keyAt(cur) < *k { cur = self.rightOf(cur); }
+            else { ret cur; }
+        }
+        ret -1;
+    }
+
+    fn contains_key(self: &Map, k: &K) -> bool
+    {
+        ret self.find(k) != -1;
+    }
+
+    // The value stored under 'k', LENT to the caller — the only way to look at a
+    // non-Copy value without taking it out of the map.
+    //
+    // WARNING: the returned borrow is NOT tracked by the compiler (the same
+    // compromise as Vec::at_ref). It stays valid only while the arenas are not
+    // touched: an insert that GROWS an arena reallocates that array (like
+    // Vec::push), and remove/clear/drop release the slot it points into.
+    fn get_ref(self: &Map, k: &K) -> Option<&V>
+    {
+        let i = self.find(k);
+        if i == -1 { ret Option::None; }
+        ret Option::Some(self.valueAt(i));
+    }
+
+    // The value stored under 'k', mutably lent (see the warning on get_ref).
+    fn get_mut(self: &mut Map, k: &K) -> Option<&mut V>
+    {
+        let i = self.find(k);
+        if i == -1 { ret Option::None; }
+        ret Option::Some(self.values.atMut(i));
+    }
+
+    // Insert or REPLACE. Returns the previous value when the key was present.
+    fn insert(self: &mut Map, k: K, v: V) -> Option<V>
+    {
+        // Descend first: 'k' is still owned by this frame. 'wentLeft' remembers
+        // the last decision for the attach below, which happens after 'k' has
+        // moved into the arena.
+        let mut parent = -1;
+        let mut cur = self.root;
+        let mut wentLeft = false;
+        while cur != -1
+        {
+            parent = cur;
+            if k < *self.keyAt(cur) { wentLeft = true; cur = self.leftOf(cur); }
+            else if *self.keyAt(cur) < k { wentLeft = false; cur = self.rightOf(cur); }
+            else
+            {
+                // The key is already here: hand the stored value over and install
+                // the new one. 'k' is a duplicate and is released.
+                let old = self.values.take(cur);
+                self.values.put(cur, v);
+                __drop(k);
+                ret Option::Some(old);
+            }
+        }
+
+        let z = self.newSlot(k, v);
+        self.setParent(z, parent);
+        if parent == -1 { self.root = z; }
+        else if wentLeft { self.setLeft(parent, z); }
+        else { self.setRight(parent, z); }
+
+        self.count = self.count + 1;
+        self.insertFixup(z);
+        ret Option::None;
+    }
+
+    // A slot for a new entry: a recycled one when the free list is non-empty,
+    // otherwise a fresh index in ALL THREE arenas (they stay in lockstep).
+    fn newSlot(self: &mut Map, k: K, v: V) -> i32
+    {
+        if self.freeHead != -1
+        {
+            let i = self.freeHead;
+            self.freeHead = self.leftOf(i);
+            self.links.put(i, Link { left: -1, right: -1, parent: -1, color: 1 });
+            self.keys.put(i, k);
+            self.values.put(i, v);
+            ret i;
+        }
+        let i = self.links.push(Link { left: -1, right: -1, parent: -1, color: 1 });
+        let j = self.keys.push(k);
+        let m = self.values.push(v);
+        // The three arenas grow together, so the indices agree. Checked rather
+        // than assumed: a divergence would silently cross-wire two entries.
+        if i != j || j != m { panic("map: arena desync"); }
+        ret i;
+    }
+
+    // Return a slot to the free list. Its key/value were already released; the
+    // link record is reused (the free-list link lives in 'left').
+    fn recycle(self: &mut Map, i: i32)
+    {
+        self.setLeft(i, self.freeHead);
+        self.freeHead = i;
+    }
+
+    // Restore the red-black invariants after an insert (CLRS 13.3): the new node
+    // is red, so only a red parent can break them.
+    fn insertFixup(self: &mut Map, node: i32)
+    {
+        let mut z = node;
+        while self.colorOf(self.parentOf(z)) == 1
+        {
+            let parent = self.parentOf(z);
+            let grand = self.parentOf(parent);
+            if parent == self.leftOf(grand)
+            {
+                let uncle = self.rightOf(grand);
+                if self.colorOf(uncle) == 1
+                {
+                    self.setColor(parent, 0);
+                    self.setColor(uncle, 0);
+                    self.setColor(grand, 1);
+                    z = grand;
+                }
+                else
+                {
+                    if z == self.rightOf(parent)
+                    {
+                        z = parent;
+                        self.rotateLeft(z);
+                    }
+                    let p2 = self.parentOf(z);
+                    self.setColor(p2, 0);
+                    self.setColor(self.parentOf(p2), 1);
+                    self.rotateRight(self.parentOf(p2));
+                }
+            }
+            else
+            {
+                let uncle = self.leftOf(grand);
+                if self.colorOf(uncle) == 1
+                {
+                    self.setColor(parent, 0);
+                    self.setColor(uncle, 0);
+                    self.setColor(grand, 1);
+                    z = grand;
+                }
+                else
+                {
+                    if z == self.leftOf(parent)
+                    {
+                        z = parent;
+                        self.rotateRight(z);
+                    }
+                    let p2 = self.parentOf(z);
+                    self.setColor(p2, 0);
+                    self.setColor(self.parentOf(p2), 1);
+                    self.rotateLeft(self.parentOf(p2));
+                }
+            }
+        }
+        self.setColor(self.root, 0);
+    }
+
+    // Left rotation around slot 'x' (CLRS 13.2).
+    fn rotateLeft(self: &mut Map, x: i32)
+    {
+        let y = self.rightOf(x);
+        self.setRight(x, self.leftOf(y));
+        if self.leftOf(y) != -1 { self.setParent(self.leftOf(y), x); }
+        self.setParent(y, self.parentOf(x));
+        if self.parentOf(x) == -1 { self.root = y; }
+        else if x == self.leftOf(self.parentOf(x)) { self.setLeft(self.parentOf(x), y); }
+        else { self.setRight(self.parentOf(x), y); }
+        self.setLeft(y, x);
+        self.setParent(x, y);
+    }
+
+    // Right rotation around slot 'x' (CLRS 13.2).
+    fn rotateRight(self: &mut Map, x: i32)
+    {
+        let y = self.leftOf(x);
+        self.setLeft(x, self.rightOf(y));
+        if self.rightOf(y) != -1 { self.setParent(self.rightOf(y), x); }
+        self.setParent(y, self.parentOf(x));
+        if self.parentOf(x) == -1 { self.root = y; }
+        else if x == self.rightOf(self.parentOf(x)) { self.setRight(self.parentOf(x), y); }
+        else { self.setLeft(self.parentOf(x), y); }
+        self.setRight(y, x);
+        self.setParent(x, y);
+    }
+
+    // Move 'v' into 'u's place in the tree (CLRS 13.4).
+    fn transplant(self: &mut Map, u: i32, v: i32)
+    {
+        if self.parentOf(u) == -1 { self.root = v; }
+        else if u == self.leftOf(self.parentOf(u)) { self.setLeft(self.parentOf(u), v); }
+        else { self.setRight(self.parentOf(u), v); }
+        self.setParent(v, self.parentOf(u));
+    }
+
+    // Remove 'k' and hand its value over, restoring the invariants (CLRS 13.4).
+    // nil is -1, so the extra-black walk carries the parent of the removed slot
+    // explicitly instead of relying on a sentinel's parent field.
+    fn remove(self: &mut Map, k: &K) -> Option<V>
+    {
+        let z = self.find(k);
+        if z == -1 { ret Option::None; }
+
+        let mut y = z;
+        let mut yColor = self.colorOf(y);
+        let mut x = -1;
+        let mut xParent = self.parentOf(z);
+        if self.leftOf(z) == -1
+        {
+            x = self.rightOf(z);
+            self.transplant(z, x);
+        }
+        else if self.rightOf(z) == -1
+        {
+            x = self.leftOf(z);
+            self.transplant(z, x);
+        }
+        else
+        {
+            y = self.minimum(self.rightOf(z));
+            yColor = self.colorOf(y);
+            x = self.rightOf(y);
+            if self.parentOf(y) == z
+            {
+                xParent = y;
+            }
+            else
+            {
+                xParent = self.parentOf(y);
+                self.transplant(y, x);
+                self.setRight(y, self.rightOf(z));
+                self.setParent(self.rightOf(z), y);
+            }
+            self.transplant(z, y);
+            self.setLeft(y, self.leftOf(z));
+            self.setParent(self.leftOf(z), y);
+            self.setColor(y, self.colorOf(z));
+        }
+
+        // Release the removed entry: move key and value out of the arenas, hand
+        // the value over, release the key, recycle the slot.
+        let removedKey = self.keys.take(z);
+        let removedValue = self.values.take(z);
+        __drop(removedKey);
+        self.recycle(z);
+
+        self.count = self.count - 1;
+        if yColor == 0 { self.deleteFixup(x, xParent); }
+        ret Option::Some(removedValue);
+    }
+
+    // The extra black on slot 'x' (possibly nil = -1, whose parent is passed in)
+    // is pushed up until it can be absorbed.
+    fn deleteFixup(self: &mut Map, x: i32, xParent: i32)
+    {
+        let mut cur = x;
+        let mut curParent = xParent;
+        while cur != self.root && self.colorOf(cur) == 0
+        {
+            if cur == self.leftOf(curParent)
+            {
+                let mut w = self.rightOf(curParent);
+                if self.colorOf(w) == 1
+                {
+                    self.setColor(w, 0);
+                    self.setColor(curParent, 1);
+                    self.rotateLeft(curParent);
+                    w = self.rightOf(curParent);
+                }
+                if self.colorOf(self.leftOf(w)) == 0 && self.colorOf(self.rightOf(w)) == 0
+                {
+                    self.setColor(w, 1);
+                    cur = curParent;
+                    curParent = self.parentOf(curParent);
+                }
+                else
+                {
+                    if self.colorOf(self.rightOf(w)) == 0
+                    {
+                        self.setColor(self.leftOf(w), 0);
+                        self.setColor(w, 1);
+                        self.rotateRight(w);
+                        w = self.rightOf(curParent);
+                    }
+                    self.setColor(w, self.colorOf(curParent));
+                    self.setColor(curParent, 0);
+                    self.setColor(self.rightOf(w), 0);
+                    self.rotateLeft(curParent);
+                    cur = self.root;
+                }
+            }
+            else
+            {
+                let mut w = self.leftOf(curParent);
+                if self.colorOf(w) == 1
+                {
+                    self.setColor(w, 0);
+                    self.setColor(curParent, 1);
+                    self.rotateRight(curParent);
+                    w = self.leftOf(curParent);
+                }
+                if self.colorOf(self.rightOf(w)) == 0 && self.colorOf(self.leftOf(w)) == 0
+                {
+                    self.setColor(w, 1);
+                    cur = curParent;
+                    curParent = self.parentOf(curParent);
+                }
+                else
+                {
+                    if self.colorOf(self.leftOf(w)) == 0
+                    {
+                        self.setColor(self.rightOf(w), 0);
+                        self.setColor(w, 1);
+                        self.rotateLeft(w);
+                        w = self.leftOf(curParent);
+                    }
+                    self.setColor(w, self.colorOf(curParent));
+                    self.setColor(curParent, 0);
+                    self.setColor(self.leftOf(w), 0);
+                    self.rotateRight(curParent);
+                    cur = self.root;
+                }
+            }
+        }
+        self.setColor(cur, 0);
+    }
+
+    // The leftmost slot of the subtree at 'i' (-1 when the subtree is empty).
+    fn minimum(self: &Map, i: i32) -> i32
+    {
+        let mut cur = i;
+        while self.leftOf(cur) != -1 { cur = self.leftOf(cur); }
+        ret cur;
+    }
+
+    // The in-order successor of 'i' (-1 at the end of the walk).
+    fn successor(self: &Map, i: i32) -> i32
+    {
+        if self.rightOf(i) != -1 { ret self.minimum(self.rightOf(i)); }
+        let mut cur = i;
+        let mut up = self.parentOf(cur);
+        while up != -1 && cur == self.rightOf(up)
+        {
+            cur = up;
+            up = self.parentOf(cur);
+        }
+        ret up;
+    }
+
+    // Release every entry, keeping the arenas (the map stays usable).
+    fn clear(self: &mut Map)
+    {
+        if self.count > 0
+        {
+            self.releaseSubtree(self.root);
+            self.root = -1;
+            self.count = 0;
+        }
+    }
+
+    // Post-order: children first, then the entry, then recycle the slot.
+    fn releaseSubtree(self: &mut Map, i: i32)
+    {
+        if i != -1
+        {
+            self.releaseSubtree(self.leftOf(i));
+            self.releaseSubtree(self.rightOf(i));
+            // __drop needs a PLACE, so the moved-out values land in locals first.
+            let key = self.keys.take(i);
+            let value = self.values.take(i);
+            __drop(key);
+            __drop(value);
+            self.recycle(i);
+        }
+    }
+
+    // ── invariants (tests / debugging) ─────────────────────────────────────────
+
+    // True when the red-black invariants hold: black root, no red-red, equal
+    // black height on every path, BST order, and 'count' equal to the node count.
+    fn check_invariants(self: &Map) -> bool
+    {
+        if self.count == 0 { ret self.root == -1; }
+        if self.colorOf(self.root) != 0 { ret false; }
+        if self.parentOf(self.root) != -1 { ret false; }
+        if self.blackHeight(self.root) < 0 { ret false; }
+        ret self.countNodes(self.root) == self.count;
+    }
+
+    // Black height of the subtree at 'i', or -1 when an invariant is broken.
+    fn blackHeight(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret 1; }
+        let nodeColor = self.colorOf(i);
+        let left = self.leftOf(i);
+        let right = self.rightOf(i);
+        if nodeColor == 1
+        {
+            if self.colorOf(left) == 1 { ret -1; }
+            if self.colorOf(right) == 1 { ret -1; }
+        }
+        if left != -1 && !(*self.keyAt(left) < *self.keyAt(i)) { ret -1; }
+        if right != -1 && !(*self.keyAt(i) < *self.keyAt(right)) { ret -1; }
+        let lh = self.blackHeight(left);
+        let rh = self.blackHeight(right);
+        if lh < 0 || rh < 0 || lh != rh { ret -1; }
+        if nodeColor == 0 { ret lh + 1; }
+        ret lh;
+    }
+
+    fn countNodes(self: &Map, i: i32) -> i32
+    {
+        if i == -1 { ret 0; }
+        ret 1 + self.countNodes(self.leftOf(i)) + self.countNodes(self.rightOf(i));
+    }
+
+    // 'for e in m' — an IN-ORDER walk. The iterator carries raw arena pieces;
+    // the borrow that keeps the map alive for the loop is the desugar's
+    // 'let __src = &m;'.
+    fn iter(self: &Map<K, V>) -> MapIter<K, V>
+    {
+        ret MapIter { keys: &self.keys, values: &self.values, links: &self.links, cur: self.minimum(self.root), remaining: self.count };
+    }
+}
+
+impl<K, V> Iterator<EntryRef<K, V>> for MapIter<K, V>
+{
+    fn next(self: &mut Self) -> Option<EntryRef<K, V>>
+    {
+        if self.remaining == 0 { ret Option::None; }
+        let i = self.cur;
+        self.remaining = self.remaining - 1;
+        self.cur = self.successorOf(i);
+        ret Option::Some(EntryRef { key: self.keys.at(i), value: self.values.at(i) });
+    }
+}
+
+// The walk needs the tree links, which live in the links arena — the iterator
+// stores that array itself, so this is the same algorithm as Map::successor
+// written against the raw arrays.
+impl<K, V> MapIter<K, V>
+{
+    fn successorOf(self: &MapIter, i: i32) -> i32
+    {
+        if self.links.at(i).right != -1 { ret self.minimumOf(self.links.at(i).right); }
+        let mut cur = i;
+        let mut up = self.links.at(cur).parent;
+        while up != -1 && cur == self.links.at(up).right
+        {
+            cur = up;
+            up = self.links.at(cur).parent;
+        }
+        ret up;
+    }
+
+    fn minimumOf(self: &MapIter, i: i32) -> i32
+    {
+        let mut cur = i;
+        while self.links.at(cur).left != -1 { cur = self.links.at(cur).left; }
+        ret cur;
+    }
+}
+
+// Releasing the map: the live entries, then the three buffers. Recycled slots
+// hold nothing (their entry was released by remove/clear), so they are not
+// touched — and Arena has no Drop, so the buffers are freed here explicitly.
+impl Drop for Map
+{
+    fn drop(self)
+    {
+        if self.count > 0 { self.releaseAll(self.root); }
+        self.links.freeBuffer();
+        self.keys.freeBuffer();
+        self.values.freeBuffer();
+    }
+
+    fn releaseAll(self: &mut Map, i: i32)
+    {
+        if i != -1
+        {
+            self.releaseAll(self.leftOf(i));
+            self.releaseAll(self.rightOf(i));
+            let key = self.keys.take(i);
+            let value = self.values.take(i);
+            __drop(key);
+            __drop(value);
+        }
+    }
+}

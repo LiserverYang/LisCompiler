@@ -20,7 +20,7 @@ impt vec { Vec };            // v[i] / v[i] = x 额外需要 Index / IndexMut，
 `drop`（Drop trait）、`option`（Option<T>）、`result`（Result<T, E> + `?` 传播协议）、
 `iterator`（Iterator/Range/for 协议）、`math`（Numeric/算子 trait + 数值函数）、`chars`
 （字符分类）、`string`（String 堆字符串）、`vec`（Vec<T> 堆数组 + Index/IndexMut trait）、
-`hash`（Hash trait）、`map`/`set`（红黑树有序容器）、`hashmap`（链式哈希表 + HashSet）。
+`hash`（Hash trait）、`map`/`set`（红黑树有序容器）、`hashmap`（链式哈希表 + HashSet）——见下面的容器章节。
 模块间依赖已显式声明（iterator 导入 option；string 导入 drop 与 option；
 vec 导入 math/option/iterator/drop；io 导入 fmt/string/option）—— 只需导入你直接使用的模块。
 
@@ -105,6 +105,55 @@ print(floor(sqrt(2.0) * 100.0));   // 141.000000
 
 `with_capacity` 仍缺失：扩容需要**类型级**的元素大小，而 `__sizeof` 需要一个 T 的值；
 `from_elem` 已覆盖"开一块 n 元素缓冲"的实际需要。
+
+## Map / Set —— 红黑树有序容器（2026-09-26）
+
+```lis
+impt map { Map };            // Set 在 set.lis：impt set { Set };
+impt option { Option, is_none };
+
+let mut m = Map<i32, String>::new();
+m.insert(2, String::from_lit("two"));
+m.insert(1, String::from_lit("one"));
+m.insert(2, String::from_lit("TWO"));      // 替换，返回旧的 Option<String>
+for e in m { print(*e.key); }              // 12 —— 迭代按**键升序**
+```
+
+| API | 说明 |
+|---|---|
+| `Map<K, V>::new()` | 空表（不预分配） |
+| `insert(k, v) -> Option<V>` | 插入或**替换**；返回被替换掉的旧值 |
+| `get_ref(&k) -> Option<&V>` | 借出值（非 Copy 值的唯一只读通道） |
+| `get_mut(&mut self, &k) -> Option<&mut V>` | 借出可写 |
+| `remove(&k) -> Option<V>` | 摘除并**把值交出来**（取走非 Copy 值的正道） |
+| `contains_key(&k)` / `len()` / `is_empty()` / `clear()` | |
+| `iter() -> MapIter` | 中序遍历（`for e in m` 也走它；`e: EntryRef<K,V>`，字段 `key`/`value` 是借用） |
+| `check_invariants() -> bool` | 红黑性质自检（测试/调试用） |
+
+- **平衡树，不是哈希**：迭代有序，`find/insert/remove` 都是 O(log n)。
+- **键的要求**：`K: Ord + PartialOrd`（编译器给 i32/String 播种；用户类型写
+  `impl Ord for T { }` + `impl PartialOrd for T`）。缺了它**在实例化处**报
+  「type 'K' does not implement trait ... required by 'Map'」。
+- **没有按值 get**：按值交出只有 Copy 元素才安全，而这个约束**无法表达**（方法/自由函数上的
+  bound 到不了 arena 的元素类型）。Copy 值用 `*m.get_ref(&k).unwrap()`，非 Copy 值用
+  `get_ref` / `remove`。
+- `get_ref` 返回的借用**不被借用检查追踪**：`insert`（扩容）/ `remove` 之后再使用即悬垂。
+
+`Set<K>` 是同一棵树上的薄包装（值槽放 bool）：`insert(k) -> bool`（true = 之前不在）、
+`contains` / `remove(&k) -> bool` / `len` / `is_empty` / `clear` / `iter` / `check_invariants`。
+
+## HashMap / HashSet —— 链式哈希表（2026-09-26）
+
+```lis
+impt hashmap { HashMap, HashSet };   // HashSet 也在 hashmap.lis 里
+let mut h = HashMap<String, i32>::new();
+h.insert(String::from_lit("k"), 1);
+let v = *h.get_ref(&String::from_lit("k")).unwrap();
+```
+
+API 与 Map 对齐（`new/insert/get_ref/get_mut/remove/contains_key/len/is_empty/clear/iter`），
+但**迭代顺序是桶序、未定义**（不要依赖它）。键的要求是 `K: Hash + PartialEq`
+（`hash.lis` 的 `Hash` trait + 相等比较）；容量按 2 的幂增长，桶号 = `hash & (cap - 1)`。
 
 ## Drop
 
