@@ -75,14 +75,21 @@ print(Point { x: 1, y: 2 });   // 1,2
 
 ## math 的浮点函数（2026-09-26）
 
-纯 Lis 实现（区间归约 + 泰勒 / 牛顿迭代），精度与 libm 同级（相对误差 ~1e-16）：
+两类实现：**手写**的（`sqrt` 归一化 + 牛顿、`cos/sin/tan` 区间归约 + 12 项泰勒、取整族）与
+**libm 绑定**的（`exp/log/pow/...`：`extern "C"` + `#[link_name]`，见 [FFI](./ffi.md)）。
+两者精度同级（相对误差 ~1e-16）；手写的那批同时是绑定实现的对拍 oracle
+（`RuntimeTest.MathLibmMatchesTaylor`）。
 
 | 函数 | 说明 |
 |---|---|
 | `PI` / `TWO_PI` / `HALF_PI` | 模块级 f64 常量 |
 | `sqrt(x)` | 平方根（`x < 0` → panic） |
 | `floor/ceil/round/trunc/fract(x)` | 取整族（`round` 半数远离零；定义域 `|x| < 2^63`） |
-| `cos/sin/tan(x)` | 三角函数（弧度） |
+| `cos/sin/tan(x)` | 三角函数（弧度，手写泰勒展开） |
+| `exp/log/log2/log10(x)` | 指数与对数（libm） |
+| `pow(x, y)` | 幂（libm） |
+| `atan/atan2(y, x)/asin/acos(x)` | 反三角（弧度，libm） |
+| `sinh/cosh/tanh(x)` | 双曲函数（libm） |
 
 ```lis
 impt math { sqrt, floor, PI };

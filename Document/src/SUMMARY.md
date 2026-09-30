@@ -13,5 +13,6 @@
 - [运算符与类型转换](./operators.md)
 - [内置函数](./builtins.md)
 - [标准库](./stdlib.md)
+- [FFI：调用 C](./ffi.md)
 - [错误信息](./errors.md)
 - [已知限制与路线图](./limitations.md)

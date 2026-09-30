@@ -11,6 +11,12 @@
 > 编译器只为它们提供**字节流原语**（`__read_byte`/`__write`/`__flush`）与原语的 `Display`
 > 下降，词法/数字解析/分行/格式化策略全部是 Lis 代码。见[内置 IO 原语](#内置-io-原语-read_byte--write--flush)
 > 与[标准库](./stdlib.md)。
+>
+> **保留名有一个例外（2026-09-26）**：`extern "C"` 声明就是要绑定 libc 名，所以
+> `extern "C" fn strlen(...)` 合法（`fn strlen(...)` 仍然拒绝）。FFI 默认关闭，
+> 用户代码要加 `--allow-ffi`；标准库自己可以（`math.lis` 的 libm 绑定）。
+> 见 [FFI：调用 C](./ffi.md)。
+
 ## 终止 panic
 
 | 函数 | 签名 | 行为 |
