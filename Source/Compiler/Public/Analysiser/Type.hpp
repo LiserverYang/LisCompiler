@@ -277,6 +277,19 @@ public:
         return cRepr;
     }
 
+    /// #[repr(C, packed)]: the C layout with no padding at all. The LLVM struct is
+    /// emitted packed, which is what a C side using #pragma pack(1) sees; such a
+    /// struct is pointer-only across the FFI boundary (an unaligned field must not
+    /// be passed by value).
+    void setPacked(bool v)
+    {
+        packed = v;
+    }
+    bool isPacked() const
+    {
+        return packed;
+    }
+
     // --- enums (tagged unions) ---
     /// An enum is a CustomType whose `variants` is non-empty and whose fields are
     /// the synthetic `{ __tag, <variant>_<idx> ... }` fat layout. A struct has an
@@ -306,6 +319,7 @@ private:
     std::vector<std::shared_ptr<Type>> genericArgs;
     std::vector<EnumVariantInfo> variants;
     bool cRepr = false;
+    bool packed = false;
 };
 
 // --- 4. 函数类型 ---

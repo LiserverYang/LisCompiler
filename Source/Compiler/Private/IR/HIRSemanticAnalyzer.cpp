@@ -1641,6 +1641,7 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
         // The layout WITNESS (see StructDef::isReprC): set here, in the type-building
         // pass, so an extern signature analyzed later in pass 2 already sees it.
         ct->setCRepr(node->isReprC);
+        ct->setPacked(node->isPacked);
     }
 
     structGParams.clear();
@@ -4283,6 +4284,10 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
         auto ct = std::static_pointer_cast<CustomType>(ty);
         if (ct->isEnum())
             return bad("this language's enums are tagged unions, not C enums; pass an i32 and convert.");
+        if (ct->isPacked())
+            return bad("a #[repr(C, packed)] struct can only cross BEHIND A POINTER: its fields have no "
+                       "alignment, so passing one by value would hand C a layout the platform ABI does not "
+                       "describe. Pass &T / &mut T / *T / *mut T.");
         return bad("a struct must cross the C boundary BEHIND A POINTER: pass &T / &mut T (valid for the "
                    "duration of the call) or *T / *mut T (retained). Passing by value needs the platform "
                    "aggregate ABI, which this compiler does not implement yet -- and #[repr(C)] is what "

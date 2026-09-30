@@ -130,6 +130,7 @@ void HIRBuilder::visit(StructDef *node)
     result->position = node->position;
     result->length = node->length;
     result->isReprC = node->isReprC;
+    result->isPacked = node->isPacked;
 
     if (!node->genericParams.empty())
     {

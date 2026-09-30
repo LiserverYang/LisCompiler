@@ -93,6 +93,14 @@ struct Context
     /// llvm.linker.options (lld honours it; GNU ld ignores it, hence the docs).
     std::vector<std::string> linkOptions;
 
+    /// The target the module is built for: triple + data layout, resolved EARLY
+    /// (right after the arguments are parsed) because the FFI ABI rules need type
+    /// sizes and the ANALYZER enforces them -- long before the Emitter would have
+    /// created a TargetMachine. The Emitter builds its own from the same inputs,
+    /// so the two agree; FfiAbi takes these strings, not a module.
+    std::string targetTriple;
+    std::string dataLayout;
+
     /// Loaded file contents keyed by absolute path — for multi-file diagnostics
     /// (Context::filePath/fileValue is a single slot, restored after parsing).
     std::unordered_map<std::string, std::string> fileContents;

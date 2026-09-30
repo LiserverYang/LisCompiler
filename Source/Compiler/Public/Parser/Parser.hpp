@@ -95,6 +95,8 @@ protected:
     /// #[repr(C)] seen just before the current top-level item. Only a struct may
     /// consume it (see parseAttribute / parseGlobalStatement).
     bool pendingReprC_ = false;
+    /// `packed` inside #[repr(...)] — only meaningful together with C.
+    bool pendingReprPacked_ = false;
 
     /**
      * Nesting budget for the recursive-descent functions.

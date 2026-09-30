@@ -666,6 +666,8 @@ public:
     /// #[repr(C)] -- see StructDef::isReprC. Carried into CustomType so the FFI
     /// whitelist can answer "may this struct go to C by value?".
     bool isReprC = false;
+    /// #[repr(C, packed)] — no padding; see StructDef::isPacked.
+    bool isPacked = false;
 
     std::vector<std::shared_ptr<GenericParamType>> gParams;
     std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;

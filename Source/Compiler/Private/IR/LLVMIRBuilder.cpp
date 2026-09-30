@@ -25,10 +25,10 @@ LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ct
       ctx_(ctx),
       builder_(std::make_unique<llvm::IRBuilder<>>(ctx))
 {
+    // NOTE: the target is stamped in run(), not here. Every pass object is
+    // CONSTRUCTED before any of them runs, so at this point the early
+    // target-resolution pass has not filled Context yet.
     context->module = std::make_unique<llvm::Module>(name, ctx);
-    // The native triple, so the module is never target-less. The full data layout
-    // is filled in by the Emitter (which owns the TargetMachine) -- see its run().
-    context->module->setTargetTriple(llvm::sys::getDefaultTargetTriple());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +37,16 @@ LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ct
 
 void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
 {
+    // The target, resolved by an early pass (see CompilePipeline). It must be on
+    // the module before any type is lowered: LLVM derives the platform ABI (how a
+    // struct is passed by value) from the triple and the data layout, and FfiAbi
+    // classifies signatures against exactly these.
+    context->module->setTargetTriple(context->targetTriple.empty()
+                                         ? llvm::sys::getDefaultTargetTriple()
+                                         : context->targetTriple);
+    if (!context->dataLayout.empty())
+        context->module->setDataLayout(context->dataLayout);
+
     // Linker requests from #[link(name = "...")]: an object file can carry them
     // (llvm.linker.options), which lld reads and GNU ld ignores -- the docs keep
     // the "add -lm to the link line" recipe for that case.
@@ -143,7 +153,9 @@ void LLVMIRBuilder::declareStructTypes(const MIRProgram &prog)
         }
 
         structFields_[name] = std::move(_fields);
-        structTy->setBody(llvmFields, false);
+        // #[repr(C, packed)] => a PACKED body (this is the site that actually
+        // creates the type; TypeHelper's Custom case is the lazy fallback).
+        structTy->setBody(llvmFields, /*isPacked=*/ct->isPacked());
     }
 }
 

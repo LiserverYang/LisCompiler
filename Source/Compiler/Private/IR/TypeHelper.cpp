@@ -87,7 +87,9 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
         std::vector<llvm::Type *> fieldTys;
         for (const auto &f : ct->getFields())
             fieldTys.push_back(semanticTypeToLLVM(f.type, ctx));
-        st->setBody(fieldTys, /*isPacked=*/false);
+        // #[repr(C, packed)] emits a PACKED struct -- exactly what a C side with
+        // #pragma pack(1) sees.
+        st->setBody(fieldTys, /*isPacked=*/ct->isPacked());
         return st;
     }
 

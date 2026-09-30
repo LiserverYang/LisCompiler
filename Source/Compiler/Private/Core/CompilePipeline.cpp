@@ -16,6 +16,16 @@
 #include "IR/MIRBorrowCheck.hpp"
 #include "IR/MIRBuilder.hpp"
 #include "IR/MIRMonomorphization.hpp"
+
+// Resolving the target (triple + data layout) early: the FFI ABI rules need it,
+// and the analyzer enforces them long before the Emitter builds its own machine.
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/SubtargetFeature.h>
+
+#include "Core/TargetInit.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Parser/Parser.hpp"
 
@@ -103,7 +113,35 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
             // Examples/iterator.lis must not shadow the stdlib's iterator).
             fs::path mainDir = fs::path(ctx->filePath).parent_path();
             if (mainDir.empty()) mainDir = ".";
-            ctx->searchPaths.push_back(mainDir.string()); }));
+            ctx->searchPaths.push_back(mainDir.string());
+
+            // Resolve the TARGET here, once. The FFI ABI classification (how a
+            // struct is passed by value) is a function of type sizes, and the
+            // ANALYZER enforces it -- which runs long before the Emitter creates
+            // its TargetMachine. Same inputs as the Emitter's, so the module's
+            // data layout agrees with the one codegen uses.
+            {
+                initLLVMTargetsOnce(); // the registry must know the native target first
+                std::string triple = llvm::sys::getDefaultTargetTriple();
+                std::string errStr;
+                const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, errStr);
+                if (!target)
+                    throw std::runtime_error("LLVM target lookup failed for '" + triple + "': " + errStr);
+                llvm::TargetOptions to;
+                llvm::StringMap<bool> fm = llvm::sys::getHostCPUFeatures();
+                llvm::SubtargetFeatures sf;
+                for (auto &[name, enabled] : fm)
+                    sf.AddFeature(name, enabled);
+                std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
+                    triple, llvm::sys::getHostCPUName().str(), sf.getString(), to,
+                    llvm::Reloc::PIC_, llvm::CodeModel::Small, llvm::CodeGenOptLevel::Default));
+                if (tm)
+                {
+                    ctx->targetTriple = tm->getTargetTriple().str();
+                    ctx->dataLayout = tm->createDataLayout().getStringRepresentation();
+                }
+
+            } }));
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
     passes.emplace_back(std::make_unique<HIRBuilder>(context));

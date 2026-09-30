@@ -168,6 +168,10 @@ public:
     /// Custom case), so the attribute is not a new layout algorithm: it is the
     /// WITNESS that lets the struct cross the C boundary by value.
     bool isReprC = false;
+    /// `#[repr(C, packed)]`: the C layout with NO padding (the C side gets this
+    /// from #pragma pack(1)). Such a struct may only cross the FFI boundary behind
+    /// a pointer -- an unaligned field must not be handed to C by value.
+    bool isPacked = false;
 
     void accept(ASTVisitor *visitor) override
     {

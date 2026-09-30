@@ -147,8 +147,10 @@ TEST_F(RuntimeTest, FfiReprCMisuse)
         "generic struct");
     expectCompileFailFfi("#[repr(C)] struct Empty { }\nfn main() -> i32 { ret 0; }\n",
         "empty struct");
+    // #[repr(packed)] alone is refused by its OWN rule now (packed is accepted in
+    // the repr list, but needs C next to it -- see FfiPackedMisuse).
     expectCompileFailFfi("#[repr(packed)] struct S { pub v: i32 }\nfn main() -> i32 { ret 0; }\n",
-        "only #[repr(C)] is supported");
+        "alone is not supported");
 }
 
 // ── bool across the boundary (C _Bool is one byte, a Lis bool is one bit) ─────
@@ -457,4 +459,52 @@ TEST_F(RuntimeTest, FfiCallbackExternNamePassedThrough)
         "    ret 0;\n"
         "}\n",
         {{"helper.cpp", helper}}, 0);
+}
+
+// ── #[repr(C, packed)]: the layout WITHOUT padding ──────────────────────────
+
+TEST_F(RuntimeTest, FfiPackedStructLayoutMatchesC)
+{
+    // C gets the same thing from #pragma pack(1). Ordinar-#[repr(C)] would add
+    // padding (8 bytes, b at offset 4); packed is 7 bytes with b at 1.
+    const std::string helper =
+        "#include <cstdint>\n"
+        "#include <cstddef>\n"
+        "#pragma pack(push, 1)\n"
+        "struct Packed { int8_t a; int32_t b; int16_t c; };\n"
+        "#pragma pack(pop)\n"
+        "extern \"C\" int64_t packed_size() { return (int64_t)sizeof(Packed); }\n"
+        "extern \"C\" int64_t packed_off_b() { return (int64_t)offsetof(Packed, b); }\n"
+        "extern \"C\" int64_t packed_off_c() { return (int64_t)offsetof(Packed, c); }\n"
+        "extern \"C\" int64_t packed_sum(const Packed* p) { return (int64_t)p->a + p->b + p->c; }\n";
+    expectRunWithSources(
+        "#[repr(C, packed)] struct Packed { pub a: i8, pub b: i32, pub c: i16 }\n"
+        "extern \"C\" fn packed_size() -> i64;\n"
+        "extern \"C\" fn packed_off_b() -> i64;\n"
+        "extern \"C\" fn packed_off_c() -> i64;\n"
+        "extern \"C\" fn packed_sum(p: &Packed) -> i64;\n"
+        "fn main() -> i32 {\n"
+        "    if packed_size() != 7 as i64 { ret 1; }\n"
+        "    if packed_off_b() != 1 as i64 { ret 2; }\n"
+        "    if packed_off_c() != 5 as i64 { ret 3; }\n"
+        "    #[i_know = \"fits in an i16\"]\n"
+        "    let c = 3 as i16;\n"
+        "    #[i_know = \"fits in an i8\"]\n"
+        "    let a = 1 as i8;\n"
+        "    let p = Packed { a: a, b: 2, c: c };\n"
+        "    if packed_sum(&p) != 6 as i64 { ret 4; }\n"
+        "    ret 0;\n"
+        "}\n",
+        {{"helper.cpp", helper}}, 0);
+}
+
+TEST_F(RuntimeTest, FfiPackedMisuse)
+{
+    // packed alone has no layout promise to make; and a packed struct cannot go
+    // BY VALUE at all (its fields are unaligned).
+    expectCompileFailFfi("#[repr(packed)] struct P { pub a: i8 }\nfn main() -> i32 { ret 0; }\n",
+        "alone is not supported");
+    expectCompileFailFfi("#[repr(C, packed)] struct P { pub a: i8, pub b: i32 }\n"
+                         "extern \"C\" fn f(p: P) -> i32;\nfn main() -> i32 { ret 0; }\n",
+        "#[repr(C, packed)] struct can only cross BEHIND A POINTER");
 }
