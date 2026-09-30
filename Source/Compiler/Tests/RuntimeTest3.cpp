@@ -2152,3 +2152,59 @@ TEST_F(RuntimeTest, GenericComparisonRetargetsToTheStructMethod)
               " if eq { if ne { ret 2; } ret 1; } ret 0; }",
         1);
 }
+
+// ── libm bindings (2026-09-26) ──────────────────────────────────────────────
+// math.exp/log/pow/... are extern "C" calls now (the stdlib is inside the FFI
+// capability). The hand-written cos/sin above are the ORACLE for the binding:
+// MathLibmMatchesTaylor compares the two implementations.
+
+TEST_F(RuntimeTest, MathExpLogPow)
+{
+    expectOutput("fn main() -> i32 { print(exp(0.0)); ret 0; }", "1.000000", 0);
+    expectOutput("fn main() -> i32 { print(exp(1.0)); ret 0; }", "2.718282", 0);
+    expectOutput("fn main() -> i32 { print(log2(1024.0)); ret 0; }", "10.000000", 0);
+    expectOutput("fn main() -> i32 { print(log10(1000.0)); ret 0; }", "3.000000", 0);
+    expectOutput("fn main() -> i32 { print(pow(2.0, 10.0)); ret 0; }", "1024.000000", 0);
+    expectRun("fn main() -> i32 { if log(exp(1.0)) > 1.0000001 { ret 1; } ret 0; }", 0);
+    expectRun("fn main() -> i32 { if pow(2.0, 0.5) > 1.4142136 { ret 1; } ret 0; }", 0);
+    expectRun("fn main() -> i32 { if pow(0.0 - 2.0, 3.0) > 0.0 - 7.9 { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, MathInverseTrigAndHyperbolic)
+{
+    expectOutput("fn main() -> i32 { print(atan(1.0)); ret 0; }", "0.785398", 0);
+    expectOutput("fn main() -> i32 { print(asin(1.0)); ret 0; }", "1.570796", 0);
+    expectOutput("fn main() -> i32 { print(acos(1.0)); ret 0; }", "0.000000", 0);
+    expectOutput("fn main() -> i32 { print(cosh(0.0)); ret 0; }", "1.000000", 0);
+    // cosh^2 - sinh^2 == 1 is the identity that proves both are wired up.
+    expectRun("fn main() -> i32 { let d = cosh(1.0) * cosh(1.0) - sinh(1.0) * sinh(1.0) - 1.0;"
+              " if d < 0.0 { let e = 0.0 - d; if e > 0.000000001 { ret 1; } ret 0; }"
+              " if d > 0.000000001 { ret 2; } ret 0; }",
+        0);
+    expectRun("fn main() -> i32 { if tanh(0.0) > 0.0000001 { ret 1; } ret 0; }", 0);
+}
+
+TEST_F(RuntimeTest, MathLibmMatchesTaylor)
+{
+    // Differential test of the FFI binding: libm's cos/sin (declared HERE, with
+    // the capability on) against the stdlib's hand-written Taylor versions.
+    // Agreement to 1e-9 on six points is what pins the boundary's ABI.
+    expectRunFfi("#[link_name = \"cos\"] extern \"C\" fn cCos(x: f64) -> f64;\n"
+                 "#[link_name = \"sin\"] extern \"C\" fn cSin(x: f64) -> f64;\n"
+                 "fn close(a: f64, b: f64) -> bool {\n"
+                 "    let d = a - b;\n"
+                 "    if d < 0.0 { let e = 0.0 - d; if e > 0.000000001 { ret false; } ret true; }\n"
+                 "    if d > 0.000000001 { ret false; }\n"
+                 "    ret true;\n"
+                 "}\n"
+                 "fn main() -> i32 {\n"
+                 // libm on the left, this language's own Taylor series on the right.
+                 "    if !close(cCos(0.0), cos(0.0)) { ret 1; }\n"
+                 "    if !close(cCos(1.0), cos(1.0)) { ret 2; }\n"
+                 "    if !close(cCos(0.0 - 2.5), cos(0.0 - 2.5)) { ret 3; }\n"
+                 "    if !close(cSin(1.0), sin(1.0)) { ret 4; }\n"
+                 "    if !close(cSin(0.0 - 1.0), sin(0.0 - 1.0)) { ret 5; }\n"
+                 "    if !close(cSin(3.0), sin(3.0)) { ret 6; }\n"
+                 "    ret 0; }\n",
+        0);
+}

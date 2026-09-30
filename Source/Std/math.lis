@@ -235,15 +235,18 @@ fn lcm(a: i32, b: i32) -> i32
     ret (a / gcd(a, b)) * b;
 }
 
-// Integer power `base ^ exp` (repeated multiplication). `exp` must be
+// Integer power `base ^ n` (repeated multiplication). `n` must be
 // non-negative; `ipow(b, 0) == 1`. May overflow for large values.
 //
 //     ipow(2, 10)  // 1024
-fn ipow(base: i32, exp: i32) -> i32
+//
+// (The exponent is `n`, not `exp`: the module has a GLOBAL `fn exp` since the
+// libm bindings landed, and a parameter may not shadow an existing definition.)
+fn ipow(base: i32, n: i32) -> i32
 {
     let mut acc = 1;
     let mut k = 0;
-    while k < exp {
+    while k < n {
         acc = acc * base;
         k = k + 1;
     }
@@ -467,3 +470,94 @@ fn tan(x: f64) -> f64
     ret sin(x) / cos(x);
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// libm 绑定（2026-09-26）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 这些函数直接调 C 数学库，不再手写：extern "C" 声明 + 一层薄包装。
+// 手写的 sqrt/cos/sin/trunc/floor/ceil/round 保留 —— 它们确定、已被测试锁定，
+// 而且是对拍这些绑定的 oracle（见 RuntimeTest.MathLibmMatchesTaylor）。
+//
+// 为什么需要 #[link_name]：Lis 名不能与 C 符号同名，否则模块内 'fn exp' 会遮蔽
+// 自己的 extern 'exp'（包装体就会无限递归）。所以 C 符号显式写出，Lis 名加 c 前缀。
+//
+// 标准库在 FFI 能力闸之内（E3019），用户代码要用 FFI 得加 --allow-ffi。
+
+#[link_name = "exp"] extern "C" fn cExp(x: f64) -> f64;
+#[link_name = "log"] extern "C" fn cLog(x: f64) -> f64;
+#[link_name = "log2"] extern "C" fn cLog2(x: f64) -> f64;
+#[link_name = "log10"] extern "C" fn cLog10(x: f64) -> f64;
+#[link_name = "pow"] extern "C" fn cPow(x: f64, y: f64) -> f64;
+#[link_name = "atan"] extern "C" fn cAtan(x: f64) -> f64;
+#[link_name = "atan2"] extern "C" fn cAtan2(y: f64, x: f64) -> f64;
+#[link_name = "asin"] extern "C" fn cAsin(x: f64) -> f64;
+#[link_name = "acos"] extern "C" fn cAcos(x: f64) -> f64;
+#[link_name = "sinh"] extern "C" fn cSinh(x: f64) -> f64;
+#[link_name = "cosh"] extern "C" fn cCosh(x: f64) -> f64;
+#[link_name = "tanh"] extern "C" fn cTanh(x: f64) -> f64;
+
+// e 的 x 次幂。
+fn exp(x: f64) -> f64
+{
+    ret cExp(x);
+}
+
+// 自然对数（x <= 0 时返回 -inf / nan，与 libm 一致）。
+fn log(x: f64) -> f64
+{
+    ret cLog(x);
+}
+
+// 以 2 为底 / 以 10 为底的对数。
+fn log2(x: f64) -> f64
+{
+    ret cLog2(x);
+}
+
+fn log10(x: f64) -> f64
+{
+    ret cLog10(x);
+}
+
+// x 的 y 次幂（libm 的 pow：pow(0, 0) = 1，负底数的整数次幂也正确）。
+fn pow(x: f64, y: f64) -> f64
+{
+    ret cPow(x, y);
+}
+
+// 反三角与双曲函数（弧度）。
+fn atan(x: f64) -> f64
+{
+    ret cAtan(x);
+}
+
+fn atan2(y: f64, x: f64) -> f64
+{
+    ret cAtan2(y, x);
+}
+
+fn asin(x: f64) -> f64
+{
+    ret cAsin(x);
+}
+
+fn acos(x: f64) -> f64
+{
+    ret cAcos(x);
+}
+
+fn sinh(x: f64) -> f64
+{
+    ret cSinh(x);
+}
+
+fn cosh(x: f64) -> f64
+{
+    ret cCosh(x);
+}
+
+fn tanh(x: f64) -> f64
+{
+    ret cTanh(x);
+}
