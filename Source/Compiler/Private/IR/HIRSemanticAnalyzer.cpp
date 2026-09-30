@@ -4,6 +4,10 @@
  */
 
 #include "IR/HIRSemanticAnalyzer.hpp"
+
+#include "IR/FfiAbi.hpp"
+
+#include <llvm/IR/DataLayout.h>
 #include "IR/BuiltinNames.hpp"
 
 #include <algorithm>
@@ -4288,10 +4292,23 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
             return bad("a #[repr(C, packed)] struct can only cross BEHIND A POINTER: its fields have no "
                        "alignment, so passing one by value would hand C a layout the platform ABI does not "
                        "describe. Pass &T / &mut T / *T / *mut T.");
-        return bad("a struct must cross the C boundary BEHIND A POINTER: pass &T / &mut T (valid for the "
-                   "duration of the call) or *T / *mut T (retained). Passing by value needs the platform "
-                   "aggregate ABI, which this compiler does not implement yet -- and #[repr(C)] is what "
-                   "tells C the fields may be read through that pointer.");
+        if (!ct->isCRepr())
+            return bad("a struct must cross the C boundary BEHIND A POINTER: pass &T / &mut T (valid for the "
+                       "duration of the call) or *T / *mut T (retained). #[repr(C)] is the layout promise that "
+                       "lets C read the fields through that pointer -- and the promise that lets the struct "
+                       "cross BY VALUE where this target ABI allows it.");
+        // #[repr(C)] BY VALUE: allowed when this target ABI plan can express it. The
+        // plan is per SIGNATURE, so ask about one whose only parameter is this type
+        // (a void return never needs coercing).
+        {
+            auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+            auto probe = context->typeContext->getFunction({ty}, voidTy);
+            FfiAbi::Plan plan = FfiAbi::classify(*probe, context->targetTriple,
+                llvm::DataLayout(context->dataLayout), *context->llvmContext);
+            if (!plan.valid)
+                return bad(plan.why);
+        }
+        return true;
     }
     default:
         return bad("allowed are i8/i16/i32/i64/f32/f64, void (as a return type), "

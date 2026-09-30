@@ -20,6 +20,8 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/TargetParser/Host.h>
 
+#include "IR/FfiAbi.hpp"
+
 LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ctx, const std::string &name)
     : Pass(cnt),
       ctx_(ctx),
@@ -513,6 +515,53 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                 args[i] = coerceBoolToC(args[i], externSig->getParams()[i]);
     }
 
+    // ...and the same for an aggregate passed BY VALUE (FfiAbi). The coercion IS a
+    // load of a different type, which is exactly what clang emits: for a small
+    // struct it loads an integer of the same size, for a big one it hands C the
+    // address of a COPY (C may write to it).
+    FfiAbi::Plan externPlan;
+    std::shared_ptr<FunctionType> planSig;
+    if (s.isExtern)
+    {
+        if (auto *mv = std::get_if<MIRMove>(&s.callee))
+            planSig = std::dynamic_pointer_cast<FunctionType>(mv->place.type);
+        else if (auto *cp = std::get_if<MIRCopy>(&s.callee))
+            planSig = std::dynamic_pointer_cast<FunctionType>(cp->place.type);
+        if (planSig && FfiAbi::needsPlan(*planSig))
+        {
+            externPlan = FfiAbi::classify(*planSig, context->targetTriple,
+                context->module->getDataLayout(), ctx_);
+            if (externPlan.valid)
+            {
+                auto operandPlacePtr = [&](const MIROperand &op) -> llvm::Value *
+                {
+                    if (auto *mv = std::get_if<MIRMove>(&op))
+                        return placePtrOrNull(fs, mv->place);
+                    if (auto *cp = std::get_if<MIRCopy>(&op))
+                        return placePtrOrNull(fs, cp->place);
+                    return nullptr;
+                };
+                for (size_t i = 0; i < externPlan.args.size() && i < args.size(); ++i)
+                {
+                    llvm::Value *ptr = operandPlacePtr(s.args[i]);
+                    if (!ptr)
+                        continue;
+                    if (externPlan.args[i] == FfiAbi::ArgKind::AsInt)
+                        args[i] = builder_->CreateLoad(externPlan.argTys[i], ptr, "agg");
+                    else if (externPlan.args[i] == FfiAbi::ArgKind::ByAddr)
+                    {
+                        llvm::Type *sty = toLLVMType(planSig->getParams()[i]);
+                        llvm::Value *slot = emitEntryAlloca(builder_->GetInsertBlock()->getParent(), sty, "aggbuf");
+                        builder_->CreateStore(lowerOperand(fs, s.args[i]), slot);
+                        args[i] = slot;
+                    }
+                }
+                if (externPlan.ret == FfiAbi::RetKind::Sret && s.dest.has_value())
+                    args.insert(args.begin(), lowerPlaceAsPtr(fs, *s.dest));
+            }
+        }
+    }
+
     // Builtin heap calls lower to libc malloc/free/memcpy/strlen.
     if (isHeapBuiltin(s.funcName))
     {
@@ -687,7 +736,15 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         llvm::Value *result = coerceBoolFromC(call, externSig);
 
         if (s.dest.has_value() && !isVoid) // don't store a void result
-            storePlace(fs, *s.dest, result);
+        {
+            if (externPlan.valid && externPlan.ret == FfiAbi::RetKind::AsInt)
+                // The aggregate came back as an integer of the same size: its bytes
+                // go straight into the destination slot (the layout is the C one by
+                // construction, and both sides are little-endian here).
+                builder_->CreateStore(result, lowerPlaceAsPtr(fs, *s.dest));
+            else
+                storePlace(fs, *s.dest, result);
+        }
     }
 }
 
@@ -1315,11 +1372,28 @@ llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, con
     if (!sig)
         return getOrDeclareFn(name);
 
+    // The platform ABI (see FfiAbi): a struct passed BY VALUE is coerced here, and
+    // the call site has to do exactly the same -- lowerCall classifies the same
+    // signature. Without this the IR carried the struct type and C received only
+    // its first field.
+    const FfiAbi::Plan plan = FfiAbi::classify(*sig, context->targetTriple,
+        context->module->getDataLayout(), ctx_);
+
     std::vector<llvm::Type *> params;
-    params.reserve(sig->getParams().size());
-    for (const auto &p : sig->getParams())
-        params.push_back(toLLVMTypeForFfi(p));
+    params.reserve(sig->getParams().size() + 1);
+    const bool sret = plan.valid && plan.ret == FfiAbi::RetKind::Sret;
+    if (sret)
+        params.push_back(llvm::PointerType::getUnqual(ctx_)); // hidden result pointer
+    for (size_t i = 0; i < sig->getParams().size(); ++i)
+    {
+        const bool coerced = plan.valid && i < plan.args.size() && plan.args[i] != FfiAbi::ArgKind::Direct;
+        params.push_back(coerced ? plan.argTys[i] : toLLVMTypeForFfi(sig->getParams()[i]));
+    }
     llvm::Type *ret = toLLVMTypeForFfi(sig->getReturnType());
+    if (plan.valid && plan.ret == FfiAbi::RetKind::AsInt)
+        ret = plan.retTy;
+    else if (sret)
+        ret = llvm::Type::getVoidTy(ctx_);
     llvm::FunctionType *fty = llvm::FunctionType::get(ret, params, /*isVarArg=*/sig->isVarArg());
     return llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage, name, context->module.get());
 }

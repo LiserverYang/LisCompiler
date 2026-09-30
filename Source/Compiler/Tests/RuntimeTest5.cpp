@@ -100,10 +100,10 @@ TEST_F(RuntimeTest, FfiStructByValueRejected)
     // ABI in the IR: measured, even {i32,i32} reached C with its second field
     // zeroed. repr(C) or not makes no difference to THAT rule -- it is what
     // makes the pointer useful.
-    expectCompileFailFfi("#[repr(C)] struct S { pub v: i32 }\n"
-                         "extern \"C\" fn f(s: S) -> i32;\n"
-                         "fn main() -> i32 { ret 0; }\n",
-        "BEHIND A POINTER");
+    // A #[repr(C)] struct may now cross BY VALUE (the platform ABI is implemented
+    // in FfiAbi, and RuntimeTest6 holds the differential matrix); the pointer form
+    // stays available for everything else, and a struct WITHOUT the promise still
+    // has to use it.
     expectCompileFailFfi("struct S { pub v: i32 }\n"
                          "extern \"C\" fn f(s: S) -> i32;\n"
                          "fn main() -> i32 { ret 0; }\n",
