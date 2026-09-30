@@ -45,6 +45,7 @@ enum class TokenCode
     ENUM,     // "enum"
     MATCH,    // "match"
     EXTERN,   // "extern" (C declarations, 2026-09-26)
+    EXPORT,   // "export" (C definitions: the reverse boundary, 2026-09-26)
 
     /* Type keywords */
     I8,    // "i8"
@@ -146,6 +147,7 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "enum",
     "match",
     "extern",
+    "export",
     "i8",
     "i16",
     "i32",

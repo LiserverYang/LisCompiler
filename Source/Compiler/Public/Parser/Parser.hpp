@@ -371,6 +371,9 @@ protected:
     std::vector<std::unique_ptr<Param>> parseParameterList(bool *isVariadic = nullptr);
     /// `extern "C" fn ...;` — a C symbol declaration (no body).
     std::unique_ptr<ASTNode> parseExternFunctionDeclaration();
+    /// `export fn name(...) -> ret { ... }` — a definition C may call (the
+    /// reverse boundary). Requires a body; no generics, no variadics.
+    std::unique_ptr<ASTNode> parseExportFunctionDeclaration();
     std::unique_ptr<ASTNode> parseGlobalStatement();
     std::unique_ptr<ImportStmt> parseImptStatement();
     std::unique_ptr<ModulePath> parseModulePath();

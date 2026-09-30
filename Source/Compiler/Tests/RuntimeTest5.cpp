@@ -305,3 +305,103 @@ TEST_F(RuntimeTest, FfiOpaqueHandleFileIo)
         "}\n",
         0);
 }
+
+// ── export fn: the reverse boundary (C calls Lis) ───────────────────────────
+
+TEST_F(RuntimeTest, FfiExportCalledFromC)
+{
+    // The Lis side has NO main: the C++ side provides it and calls in. Two
+    // symbols are exported -- one under its own name, one renamed by
+    // #[link_name] -- which also pins that the emitted symbol is the C name.
+    const std::string helper =
+        "#include <cstdint>\n"
+        "extern \"C\" int32_t add(int32_t a, int32_t b);\n"
+        "extern \"C\" int32_t lis_mul(int32_t a, int32_t b);\n"
+        "int main() {\n"
+        "    if (add(2, 3) != 5) return 1;\n"
+        "    if (lis_mul(4, 5) != 20) return 2;\n"
+        "    return 0;\n"
+        "}\n";
+    expectRunWithSources(
+        "export fn add(a: i32, b: i32) -> i32 { ret a + b; }\n"
+        "#[link_name = \"lis_mul\"] export fn multiply(a: i32, b: i32) -> i32 { ret a * b; }\n",
+        {{"main.cpp", helper}}, 0);
+}
+
+TEST_F(RuntimeTest, FfiExportHandsOwnedBufferToC)
+{
+    // The ownership protocol from the C side: the export returns a buffer from
+    // String::into_raw, C reads it, and C releases it with lis_free (the stdlib
+    // ffi module), which is what keeps the allocator behind the boundary.
+    const std::string helper =
+        "#include <cstring>\n"
+        "extern \"C\" char* make_greeting(void);\n"
+        "extern \"C\" void lis_free(char* p);\n"
+        "int main() {\n"
+        "    char* g = make_greeting();\n"
+        "    if (std::strcmp(g, \"hello from Lis\") != 0) return 1;\n"
+        "    lis_free(g);\n"
+        "    return 0;\n"
+        "}\n";
+    expectRunWithSources(
+        // String arrives with the prologue; only ffi is ours to import.
+        "impt ffi;\n"
+        "export fn make_greeting() -> *mut i8 {\n"
+        "    let s = String::from_lit(\"hello from Lis\");\n"
+        "    let mut m = s;\n"
+        "    ret m.into_raw();\n"
+        "}\n",
+        {{"main.cpp", helper}}, 0);
+}
+
+TEST_F(RuntimeTest, FfiExportMustBeWellFormed)
+{
+    // Generic: C cannot name an instantiation. Variadic: C would have to know
+    // the promotions. Body-less: an export DEFINES the symbol.
+    expectCompileFailFfi("export fn f<T>(x: T) -> i32 { ret 0; }\n",
+        "cannot be generic");
+    expectCompileFailFfi("export fn f(x: i32, ...) -> i32 { ret x; }\n",
+        "cannot be variadic");
+    expectCompileFailFfi("export fn f() -> i32;\n",
+        "needs a body");
+}
+
+TEST_F(RuntimeTest, FfiExportSignatureMustBeFfiSafe)
+{
+    // The whitelist is the same in both directions: a String would hand C a
+    // layout it cannot use.
+    expectCompileFailFfi("impt string { String };\n"
+                         "export fn f(s: String) -> i32 { ret 0; }\n",
+        "cannot cross the C boundary");
+}
+
+TEST_F(RuntimeTest, FfiExportRequiresCapability)
+{
+    expectCompileFail("export fn f() -> i32 { ret 0; }\n",
+        "need the FFI capability");
+}
+
+TEST_F(RuntimeTest, FfiExportDuplicateAndReservedSymbols)
+{
+    // Two definitions of one C symbol would collide in the object file.
+    expectCompileFailFfi("#[link_name = \"same\"] export fn a() -> i32 { ret 0; }\n"
+                         "#[link_name = \"same\"] export fn b() -> i32 { ret 1; }\n",
+        "already exported");
+    // ... and the symbol must not be one the compiler already emits.
+    expectCompileFailFfi("#[link_name = \"assert_fail\"] export fn a() -> i32 { ret 0; }\n",
+        "reserved by the compiler");
+}
+
+TEST_F(RuntimeTest, FfiLinkAttribute)
+{
+    // #[link(name = "m")] records a linker request (emitted as
+    // llvm.linker.options). lld honours it; GNU ld ignores it, which is why the
+    // docs also keep the "add -lm to the link line" recipe.
+    expectRunFfi("#[link(name = \"m\")]\n"
+                 "fn main() -> i32 { ret 0; }\n",
+        0);
+    expectCompileFailFfi("#[link(name = 3)]\nfn main() -> i32 { ret 0; }\n",
+        "expected a library name");
+    expectCompileFailFfi("#[link(foo = \"m\")]\nfn main() -> i32 { ret 0; }\n",
+        "expected 'name'");
+}

@@ -637,7 +637,9 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
         sym->name = f->name;
         sym->type = nullptr;
         sym->isExtern = f->isExtern;
-        sym->cName = f->isExtern ? f->cName : std::string();
+        // Both directions carry the C symbol: for an extern it is what we CALL,
+        // for an export what C calls (and what MIR emits).
+        sym->cName = (f->isExtern || f->isExport) ? f->cName : std::string();
         SymbolTable::getInstance().insertSymbol(f->name, std::move(sym));
     }
     else if (auto *v = dynamic_cast<HIRVarDecl *>(item))
@@ -2421,6 +2423,11 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
             node->funcSymbol = sym;
         }
     }
+
+    // An export is a C entry point. Checked HERE, at the end of the function, so
+    // the signature is final (params and return type are both resolved).
+    if (node->isExport)
+        analyzeExportDeclaration(node);
 
     SymbolTable::getInstance().exitScope();
 }
@@ -4305,6 +4312,49 @@ void HIRSemanticAnalyzer::analyzeExternDeclaration(HIRFunction *f, const std::ve
         log(*f, "the C symbol '" + cName + "' is already declared with the signature '"
                 + it->second->toString() + "'.", E_NonFfiSafeType);
     }
+}
+
+// The reverse boundary: a DEFINITION C may call. Same three disciplines as the
+// calling direction (capability, whitelist, one declaration per symbol), applied
+// to a body the language owns. The body itself is ordinary Lis code, analyzed
+// above; what C depends on is the SIGNATURE and the symbol name.
+void HIRSemanticAnalyzer::analyzeExportDeclaration(HIRFunction *f)
+{
+    // 1. The capability. A C-callable entry point is the other half of the same
+    //    boundary, so it is gated the same way: the stdlib may, user code needs
+    //    --allow-ffi, and a judge hands out no flag.
+    if (!inStdLib() && !context->ffiAllowed)
+    {
+        log(*f, "export declarations need the FFI capability: the standard library has it, "
+                "anything else gets it from --allow-ffi. A C-callable entry point is the "
+                "reverse direction of the same boundary, so it is gated the same way.",
+            E_FFIOutsideAllowedScope);
+        return;
+    }
+
+    // 2. The symbol C will look up. It must not be one the compiler already emits
+    //    (assert_fail, __show_* ...), or the two would collide in the object.
+    const std::string symbol = f->cName.empty() ? f->name : f->cName;
+    if (isReservedFunctionName(symbol))
+    {
+        log(*f, "the exported symbol '" + symbol + "' is reserved by the compiler.", E_ExportMisuse);
+        return;
+    }
+
+    // 3. The type whitelist, parameter by parameter and then the return type.
+    bool ok = true;
+    for (size_t i = 0; i < f->params.size(); ++i)
+        if (!checkFfiSafeType(*f, f->params[i].second, "parameter '" + f->params[i].first + "'"))
+            ok = false;
+    if (!checkFfiSafeType(*f, f->returnType, "return type"))
+        ok = false;
+    if (!ok)
+        return;
+
+    // 4. One definition per exported symbol: two modules cannot both define it,
+    //    and the linker would only tell us after the fact.
+    if (!context->exportedSymbols.insert(symbol).second)
+        log(*f, "the C symbol '" + symbol + "' is already exported by another function.", E_ExportMisuse);
 }
 
 // ---------------------------------------------------------------------------

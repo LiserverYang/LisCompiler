@@ -629,6 +629,9 @@ public:
     std::string cName;
     /// A C variadic signature (the parameter list ended with `...`).
     bool isVariadic = false;
+    /// `export fn` (2026-09-26): a DEFINITION C may call. Like an extern it keeps
+    /// its bare name (the emitted symbol), unlike an extern it has a body.
+    bool isExport = false;
     std::string associatedStruct;
     std::string associatedTrait;
 

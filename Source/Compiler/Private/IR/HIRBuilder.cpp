@@ -324,12 +324,16 @@ void HIRBuilder::visit(FunctionDef *node)
     // Lis definition, so it must not be module-prefixed (codegen emits a call to
     // exactly this name) and every module that declares it shares one symbol.
     result->isExtern = node->isExtern;
+    result->isExport = node->isExport;
     result->cName = node->cName;
     result->isVariadic = node->isVariadic;
-    // An extern "C" declaration keeps its DECLARATION name visible (bare, no
-    // module prefix — it names a C symbol shared by every module); the C SYMBOL
-    // it binds travels separately in `cName` (they differ under #[link_name]).
-    result->name = node->isExtern ? node->name : internalName(currentModule_, node->name);
+    // Both FFI directions keep their DECLARATION name visible and BARE (no module
+    // prefix): an extern binds a C symbol shared by every module, and an export IS
+    // the symbol C looks up. The emitted name travels separately in `cName` (they
+    // differ under #[link_name]).
+    result->name = (node->isExtern || node->isExport)
+                       ? node->name
+                       : internalName(currentModule_, node->name);
     result->isMethod = false;
     result->isStatic = true;
     result->isTraitMethod = false;

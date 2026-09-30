@@ -85,6 +85,14 @@ struct Context
     /// silently merging (LLVM would keep the first one and mis-call the other).
     std::unordered_map<std::string, std::shared_ptr<FunctionType>> externDecls;
 
+    /// Every EXPORTED C symbol (see `export fn`), so two definitions of the same
+    /// symbol are reported instead of silently colliding in the object file.
+    std::unordered_set<std::string> exportedSymbols;
+
+    /// #[link(name = "...")] — libraries the object asks the LINKER for. Emitted as
+    /// llvm.linker.options (lld honours it; GNU ld ignores it, hence the docs).
+    std::vector<std::string> linkOptions;
+
     /// Loaded file contents keyed by absolute path — for multi-file diagnostics
     /// (Context::filePath/fileValue is a single slot, restored after parsing).
     std::unordered_map<std::string, std::string> fileContents;

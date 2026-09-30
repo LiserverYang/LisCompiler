@@ -1,0 +1,24 @@
+// FFI support (2026-09-26): the allocator behind the boundary.
+//
+// Inside the language, memory comes from the heap primitives __alloc/__free, which
+// only the standard library may call. Outside, C gets exactly two symbols, so the
+// allocator can change later without breaking any C side that already ships:
+//
+//     char* p = lis_alloc(64);   // 64 BYTES, not an element count
+//     ...
+//     lis_free(p);
+//
+// Buffers from String::into_raw / Vec::into_raw are ordinary Lis allocations, so
+// lis_free releases them too -- that is the recommended way to give one back.
+
+// Allocate `bytes` bytes. The block is uninitialized, like malloc.
+export fn lis_alloc(bytes: i32) -> *mut i8
+{
+    ret __alloc(bytes);
+}
+
+// Release a block from lis_alloc (or from into_raw).
+export fn lis_free(p: *mut i8)
+{
+    __free(p);
+}

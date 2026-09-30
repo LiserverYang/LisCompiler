@@ -900,6 +900,11 @@ MIRFunction MIRBuilder::buildFunction(HIRFunction *fn)
 
     out.name = mangleName(out);
 
+    // An export is C-callable, so the emitted symbol is the C name -- not the
+    // mangled one (#[link_name] may have renamed it).
+    if (fn->isExport && !fn->cName.empty())
+        out.name = fn->cName;
+
     for (auto &gParam : fn->gParams)
     {
         out.genericParams.push_back(gParam->getParamName());

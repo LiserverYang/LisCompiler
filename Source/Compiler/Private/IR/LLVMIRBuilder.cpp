@@ -37,6 +37,19 @@ LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ct
 
 void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
 {
+    // Linker requests from #[link(name = "...")]: an object file can carry them
+    // (llvm.linker.options), which lld reads and GNU ld ignores -- the docs keep
+    // the "add -lm to the link line" recipe for that case.
+    if (!context->linkOptions.empty())
+    {
+        // The shape LLVM 20 wants: NAMED metadata llvm.linker.options, each operand
+        // a node of strings. (The old "Linker Options" MODULE FLAG is rejected by
+        // the verifier with "'Linker Options' named metadata no longer supported".)
+        llvm::NamedMDNode *opts = context->module->getOrInsertNamedMetadata("llvm.linker.options");
+        for (const auto &lib : context->linkOptions)
+            opts->addOperand(llvm::MDNode::get(ctx_, {llvm::MDString::get(ctx_, "-l" + lib)}));
+    }
+
     // Pass 1 — struct types (needed for any field GEP to work).
     declareStructTypes(prog);
 

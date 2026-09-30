@@ -398,6 +398,9 @@ public:
     /// verify, so an extern declaration is fenced by a capability (stdlib or
     /// --allow-ffi), a type whitelist, and one signature per C symbol.
     void analyzeExternDeclaration(HIRFunction *f, const std::vector<std::shared_ptr<Type>> &paramTypes);
+    /// The reverse direction: an `export fn`'s contract with C (capability,
+    /// FFI-safe signature, one definition per symbol, no reserved name).
+    void analyzeExportDeclaration(HIRFunction *f);
     /// True when `ty` may be a field of a #[repr(C)] struct; logs otherwise.
     bool checkCReprField(HIRNode &owner, const std::shared_ptr<Type> &ty, const std::string &fieldName);
     /// True when `ty` may appear in an extern "C" signature; logs otherwise.

@@ -187,6 +187,10 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     {
         return parseExternFunctionDeclaration();
     }
+    if (check(TokenCode::EXPORT))
+    {
+        return parseExportFunctionDeclaration();
+    }
     if (check(TokenCode::STRUCT))
     {
         Token structTok = currentToken(); // the struct keyword: the honest position
@@ -790,6 +794,33 @@ std::unique_ptr<ASTNode> Parser::parseExternFunctionDeclaration()
     return func;
 }
 
+// `export fn name(params) -> ret { ... }` — a C entry point (2026-09-26).
+//
+// The mirror image of parseExternFunctionDeclaration: same FFI-safe rules, same
+// capability gate, but this one DEFINES the symbol -- so it needs a body, and it
+// rejects what a C caller could not use (generics, a variadic tail).
+std::unique_ptr<ASTNode> Parser::parseExportFunctionDeclaration()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    advance(); // 'export' — parseGlobalStatement checked it
+
+    auto func = parseFunctionDefinition();
+    FunctionDef *fd = func.get();
+    fd->isExport = true;
+    fd->cName = pendingLinkName_.empty() ? fd->name : pendingLinkName_;
+    pendingLinkName_.clear();
+
+    if (!fd->genericParams.empty())
+        logError(currentToken(), "an export declaration cannot be generic: C has no way to name an instantiation.", E_ExportMisuse);
+    if (fd->isVariadic)
+        logError(currentToken(), "an export declaration cannot be variadic; take a pointer and a count instead.", E_ExportMisuse);
+    if (!fd->body)
+        logError(currentToken(), "an export declaration needs a body: it DEFINES the C symbol.", E_ExportMisuse);
+
+    return func;
+}
+
 std::unique_ptr<GlobalVarDef> Parser::parseGlobalVariableDefinition()
 {
     PositionRecorder recorder(this, nullptr);
@@ -1169,6 +1200,28 @@ void Parser::parseAttribute()
             advance();
         }
     }
+    else if (check(TokenCode::IDENTIFIER) && currentToken().value == "link")
+    {
+        // #[link(name = "m")] — ask the LINKER for a library. Recorded on the
+        // Context (it is a property of the object file, not of a declaration) and
+        // emitted as llvm.linker.options: lld honours it, GNU ld does not, so the
+        // docs also keep the "add -lm to the link line" recipe.
+        advance();
+        consume(TokenCode::LPAREN, "expected '(' after 'link' (write #[link(name = \"m\")])", E_ExpectALPAREN);
+        if (!(check(TokenCode::IDENTIFIER) && currentToken().value == "name"))
+            logError(currentToken(), "expected 'name' in #[link(name = \"...\")]", E_ExpectedExpression);
+        else
+            advance();
+        consume(TokenCode::ASSIGN, "expected '=' in #[link(name = \"...\")]", E_ExpectAnASSIGN);
+        if (!check(TokenCode::STRING_LITERAL))
+            logError(currentToken(), "expected a library name in #[link(name = \"...\")]", E_ExpectedExpression);
+        else
+        {
+            context->linkOptions.push_back(currentToken().value);
+            advance();
+        }
+        consume(TokenCode::RPAREN, "expected ')' to close #[link(...)]", E_ExpectARPAREN);
+    }
     else if (check(TokenCode::IDENTIFIER) && currentToken().value == "repr")
     {
         // #[repr(C)] (2026-09-26): the C-layout witness for a struct that crosses
@@ -1191,7 +1244,7 @@ void Parser::parseAttribute()
     }
     else
     {
-        logError(currentToken(), "unknown attribute; only #[i_know], #[link_name] and #[repr(C)] are supported", E_UndefinedIdentifier);
+        logError(currentToken(), "unknown attribute; only #[i_know], #[link_name], #[repr(C)] and #[link(name = \"...\")] are supported", E_UndefinedIdentifier);
     }
 
     consume(TokenCode::RBRACKET, "expected ']' to close attribute", E_ExpectARBRACE);

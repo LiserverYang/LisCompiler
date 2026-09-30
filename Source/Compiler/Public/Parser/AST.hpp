@@ -291,6 +291,11 @@ public:
     std::string cName;
     /// A trailing `...` in the parameter list (a C variadic signature).
     bool isVariadic = false;
+    /// `export fn` (2026-09-26) — the reverse direction: this DEFINITION is
+    /// callable from C. It has a body, keeps its own (bare, un-prefixed) name as
+    /// the emitted symbol unless #[link_name] says otherwise, and its signature
+    /// must be FFI-safe.
+    bool isExport = false;
 
     void accept(ASTVisitor *visitor) override
     {
