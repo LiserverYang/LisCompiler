@@ -405,3 +405,56 @@ TEST_F(RuntimeTest, FfiLinkAttribute)
     expectCompileFailFfi("#[link(foo = \"m\")]\nfn main() -> i32 { ret 0; }\n",
         "expected 'name'");
 }
+
+// ── callbacks: C calls back into Lis ────────────────────────────────────────
+
+TEST_F(RuntimeTest, FfiCallbackQsort)
+{
+    // The canonical callback test: qsort drives a Lis comparator. The parameter
+    // type is written `fn(&i32, &i32) -> i32` -- the first way to NAME a
+    // function type, which is what an FFI declaration needs.
+    expectRunFfi(
+        // The declaration's parameter is NOT named cmp: a parameter may not shadow
+        // an existing definition, and the comparator below is a global function.
+        "extern \"C\" fn qsort(base: *mut i32, n: i64, size: i64, f: fn(&i32, &i32) -> i32) -> void;\n"
+        "fn cmp(a: &i32, b: &i32) -> i32 { ret *a - *b; }\n"
+        "fn main() -> i32 {\n"
+        "    let mut xs: [i32; 6] = [5, 3, 1, 6, 2, 4];\n"
+        "    qsort(&mut xs[0], 6 as i64, 4 as i64, cmp);\n"
+        "    let mut i = 0;\n"
+        "    while i < 6 { if xs[i] != i + 1 { ret 1; } i = i + 1; }\n"
+        "    ret 0;\n"
+        "}\n",
+        0);
+}
+
+TEST_F(RuntimeTest, FfiCallbackTypeMustBeFfiSafe)
+{
+    // A callback signature crosses too, so it obeys the same whitelist: C cannot
+    // receive a String, and a variadic signature would need the promotions of
+    // what C passes back.
+    expectCompileFailFfi("extern \"C\" fn f(cb: fn(String) -> i32) -> i32;\n"
+                         "fn main() -> i32 { ret 0; }\n",
+        "callback parameter");
+}
+
+TEST_F(RuntimeTest, FfiCallbackExternNamePassedThrough)
+{
+    // An extern "C" name is an ordinary function VALUE now (stage 0 refused it
+    // because the address used to materialise with the wrong signature), so a C
+    // function can be handed to C as a callback.
+    const std::string helper =
+        "#include <cstdint>\n"
+        "typedef int64_t (*strlen_fn)(const char*);\n"
+        "extern \"C\" int64_t call_it(strlen_fn f, const char* s) { return f(s); }\n";
+    expectRunWithSources(
+        "extern \"C\" fn strlen(s: &i8) -> i64;\n"
+        "extern \"C\" fn call_it(f: fn(&i8) -> i64, s: &i8) -> i64;\n"
+        "fn main() -> i32 {\n"
+        "    if call_it(strlen, \"abcd\") != 4 as i64 { ret 1; }\n"
+        "    let again = call_it(strlen, \"abcdef\");\n"
+        "    if again != 6 as i64 { ret 2; }\n"
+        "    ret 0;\n"
+        "}\n",
+        {{"helper.cpp", helper}}, 0);
+}

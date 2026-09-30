@@ -34,6 +34,14 @@ static HIRRawType toRaw(const TypeNode *n)
         r.isMutPtr = n->isMutPointer;
         r.element = std::make_shared<HIRRawType>(toRaw(n->pointee.get()));
     }
+    // Function type `fn(A, B) -> R` (r.paramTypes + r.element = return type).
+    if (n->kind == TypeNode::TypeKind::Function)
+    {
+        r.isFunction = true;
+        for (auto &p : n->paramTypes)
+            r.paramTypes.push_back(toRaw(p.get()));
+        r.element = std::make_shared<HIRRawType>(toRaw(n->returnType.get()));
+    }
     return r;
 }
 

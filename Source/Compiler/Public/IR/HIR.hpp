@@ -44,6 +44,11 @@ struct HIRRawType
     // Pointer type `*T` / `*mut T`: when isPtr, `element` is the pointee.
     bool isPtr = false;
     bool isMutPtr = false;
+
+    // Function type `fn(A, B) -> R`: parameter types, plus the return type in
+    // `element` (a shared_ptr so the struct stays usable while incomplete).
+    bool isFunction = false;
+    std::vector<HIRRawType> paramTypes;
 };
 
 /** A trait bound on a generic param, with optional concrete args. */

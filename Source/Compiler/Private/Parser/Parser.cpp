@@ -941,6 +941,26 @@ std::unique_ptr<TypeNode> Parser::parseType()
         return type;
     }
 
+    // Function type `fn(T, U) -> R` (2026-09-26) — a CALLBACK signature. Values of
+    // function type have always existed; this is the first way to NAME the type,
+    // which is what an FFI declaration needs (qsort's comparator).
+    if (match(TokenCode::FN))
+    {
+        type->kind = TypeNode::TypeKind::Function;
+        consume(TokenCode::LPAREN, "expect '(' in a function type", E_ExpectALPAREN);
+        if (!check(TokenCode::RPAREN))
+        {
+            do
+            {
+                type->paramTypes.push_back(std::move(parseType()));
+            } while (match(TokenCode::COMMA));
+        }
+        consume(TokenCode::RPAREN, "expect ')' in a function type", E_ExpectARPAREN);
+        if (match(TokenCode::ARROW))
+            type->returnType = parseType();
+        return type;
+    }
+
     if ((size_t)currentToken().code >= TYPE_KEYWORD_BEGIN && (size_t)currentToken().code <= TYPE_KEYWORD_END)
     {
         type->kind = TypeNode::TypeKind::Primitive;

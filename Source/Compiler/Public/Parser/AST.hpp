@@ -92,7 +92,11 @@ public:
     {
         Primitive,
         Custom,
-        ModuleQualified
+        ModuleQualified,
+        /// `fn(T, U) -> R` — a CALLBACK type (2026-09-26). The language has had
+        /// function-typed VALUES forever (`let f = foo;` infers one), but no way to
+        /// WRITE the type; an FFI declaration (qsort's comparator) needs to.
+        Function
     };
 
     bool isReference = false;
@@ -112,6 +116,11 @@ public:
     bool isPointer = false;
     bool isMutPointer = false;
     std::unique_ptr<TypeNode> pointee;
+
+    // Function type `fn(A, B) -> R`: when kind == Function, these hold the
+    // parameter and return types (an empty returnType means void).
+    std::vector<std::unique_ptr<TypeNode>> paramTypes;
+    std::unique_ptr<TypeNode> returnType;
 
     void accept(ASTVisitor *visitor) override
     {

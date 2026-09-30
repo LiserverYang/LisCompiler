@@ -2750,11 +2750,20 @@ TEST_F(RuntimeTest, FfiVariadicArgumentTypesRestricted)
         "passed through '...'");
 }
 
-TEST_F(RuntimeTest, FfiExternIsNotAValue)
+TEST_F(RuntimeTest, FfiExternIsAValue)
 {
-    expectCompileFailFfi("extern \"C\" fn strlen(s: &i8) -> i64;\n"
-                         "fn main() -> i32 { let f = strlen; ret 0; }\n",
-        "can be called, but not used as a value");
+    // Stage 0 refused this: the address of a C symbol materialised with the WRONG
+    // signature (an opaque i8(...) prototype), so a function-pointer call through
+    // it would have been a mis-call. lowerConst now declares the symbol from the
+    // callee's own FunctionType, so an extern name is an ordinary function value --
+    // which is what passing it as a CALLBACK (RuntimeTest5) needs.
+    expectRunFfi("extern \"C\" fn strlen(s: &i8) -> i64;\n"
+                 "fn main() -> i32 {\n"
+                 "    let f = strlen;\n"
+                 "    if f(\"abc\") != 3 as i64 { ret 1; }\n"
+                 "    ret 0;\n"
+                 "}\n",
+        0);
 }
 
 TEST_F(RuntimeTest, FfiConflictingRedeclarationRejected)

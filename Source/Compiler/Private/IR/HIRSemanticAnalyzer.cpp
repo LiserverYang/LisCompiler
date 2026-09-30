@@ -235,6 +235,21 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
     // the pointee, and the generic-instantiation path below (which is about
     // `Foo<T>` naming a CustomType) must never see a pointer. Returning early is
     // safe because a pointer never carries genericArgs of its own.
+    // Function type "fn(A, B) -> R" (2026-09-26): a CALLBACK signature. Resolved
+    // before the generic path below for the same reason pointers are -- it names
+    // no CustomType.
+    if (raw.isFunction)
+    {
+        std::vector<std::shared_ptr<Type>> params;
+        params.reserve(raw.paramTypes.size());
+        for (const auto &p : raw.paramTypes)
+            params.push_back(resolveType(p, errorNode));
+        std::shared_ptr<Type> ret = raw.element
+                                        ? resolveType(*raw.element, errorNode)
+                                        : context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return context->typeContext->getFunction(std::move(params), std::move(ret));
+    }
+
     if (raw.isPtr)
     {
         auto pointeeTy = raw.element ? resolveType(*raw.element, errorNode)
@@ -3302,18 +3317,11 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
-    // An extern "C" name is a C symbol, not a Lis value: strlen(x) is a call, but
-    // 'let f = strlen;' would have to materialise the address of a symbol this
-    // compiler never declared as a Lis function.
-    if (sym->isExtern && !analyzingCallCallee_)
-    {
-        log(*node, "'" + node->name + "' is an extern \"C\" declaration: it can be called, "
-                "but not used as a value (function pointers to C symbols are not supported yet).",
-            E_NonFfiSafeType);
-        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
-        return;
-    }
-
+    // Stage 0 refused to use an extern "C" name as a VALUE (strlen(x) was fine,
+    // `let f = strlen;` was not) because the address used to materialise with the
+    // WRONG signature. That root cause is fixed (lowerConst declares the C symbol
+    // from the callee's own FunctionType), so an extern name is now an ordinary
+    // function value -- which is what passing it as a CALLBACK needs.
     node->symbol = sym;
     node->type = sym->type;
     node->scope = SymbolTable::getInstance().getCurrentScope();
@@ -4242,6 +4250,22 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
     case Type::Kind::Pointer:
     case Type::Kind::Reference:
         return true;
+    // A FUNCTION type is a callback: C receives a pointer to a function with this
+    // signature. Allowed when the signature itself could cross -- no variadic tail
+    // (C would have to know the promotions of what it passes back) and every
+    // parameter and the return type FFI-safe. The recursive calls report the
+    // offending member themselves.
+    case Type::Kind::Function:
+    {
+        auto ft = std::static_pointer_cast<FunctionType>(ty);
+        if (ft->isVarArg())
+            return bad("a variadic signature cannot be a callback.");
+        for (const auto &p : ft->getParams())
+            if (!checkFfiSafeType(owner, p, "callback parameter"))
+                return false;
+        return checkFfiSafeType(owner, ft->getReturnType(), "callback return type");
+    }
+
     // A struct crosses the boundary BEHIND A POINTER, never by value (2026-09-26).
     //
     // By value would need the platform aggregate ABI to be materialised in the IR:
@@ -4721,15 +4745,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 break;
             }
         }
-        {
-        // The callee is the one position where a function NAME means "call this",
-        // so analyzingCallCallee_ lets visit(HIRNameRef) allow an extern symbol
-        // here and reject it everywhere else.
-        const bool savedAnalyzingCallee = analyzingCallCallee_;
-        analyzingCallCallee_ = true;
         analyzeExpr(node->callee.get());
-        analyzingCallCallee_ = savedAnalyzingCallee;
-    }
         auto funcType = std::dynamic_pointer_cast<FunctionType>(node->callee->type);
         if (!funcType)
         {

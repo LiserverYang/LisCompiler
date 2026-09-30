@@ -408,10 +408,7 @@ public:
     /// argument promotions apply — i8/i16 become int and f32 becomes double, so
     /// those are rejected instead of silently changing width.
     bool checkFfiSafeType(HIRNode &owner, const std::shared_ptr<Type> &ty, const std::string &what, bool variadic = false);
-    /// True while the CALLEE of a call is being analyzed. An extern "C" name is a
-    /// C symbol with no Lis definition, so it may be CALLED but not used as a
-    /// value (materialising the address of a C symbol is not supported yet).
-    bool analyzingCallCallee_ = false;
+
     virtual void visit(HIRBlock *node) override;
     virtual void visit(HIRVarDecl *node) override;
     virtual void visit(HIRAssign *node) override;
