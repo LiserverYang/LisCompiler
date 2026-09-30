@@ -2716,11 +2716,13 @@ TEST_F(RuntimeTest, FfiCharBoolAndStructRejected)
 {
     expectCompileFailFfi("extern \"C\" fn f(c: char) -> i32;\nfn main() -> i32 { ret 0; }\n",
         "cannot cross the C boundary");
-    expectCompileFailFfi("extern \"C\" fn f(b: bool) -> i32;\nfn main() -> i32 { ret 0; }\n",
-        "cannot cross the C boundary");
+    // A SCALAR bool is allowed since stage 1 (it crosses as C's _Bool; see
+    // RuntimeTest5.cpp's FfiBoolScalarUsesCAbi) — only a bool FIELD of a
+    // #[repr(C)] struct stays refused, where a size difference would shift every
+    // later field.
     expectCompileFailFfi("struct S { pub v: i32 }\n"
                          "extern \"C\" fn f(s: S) -> i32;\nfn main() -> i32 { ret 0; }\n",
-        "cannot cross the C boundary");
+        "BEHIND A POINTER");
     // (A void RETURN is legal — that is C's "returns nothing" signature — but a
     // library type by value is not: String owns a buffer, and handing ownership of
     // it to C needs the explicit raw-pointer API of a later stage.)

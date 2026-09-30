@@ -153,6 +153,13 @@ public:
     std::vector<std::unique_ptr<GenericParam>> genericParams;
     Symbol *symbol;
 
+    /// #[repr(C)] (2026-09-26): the declaration promises the C layout. The
+    /// compiler's struct layout already IS the C one for C-typed fields (fields
+    /// in declaration order, natural alignment, unpacked -- see TypeHelper.cpp's
+    /// Custom case), so the attribute is not a new layout algorithm: it is the
+    /// WITNESS that lets the struct cross the C boundary by value.
+    bool isReprC = false;
+
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);

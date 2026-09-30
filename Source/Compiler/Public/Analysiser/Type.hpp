@@ -264,6 +264,19 @@ public:
         fields = std::move(f);
     }
 
+    /// #[repr(C)] (2026-09-26): this struct's layout is the C one, so it may be
+    /// passed to/from C BY VALUE (the FFI whitelist checks this flag). Structs
+    /// without it are still usable across the boundary -- behind a pointer, as an
+    /// opaque handle.
+    void setCRepr(bool v)
+    {
+        cRepr = v;
+    }
+    bool isCRepr() const
+    {
+        return cRepr;
+    }
+
     // --- enums (tagged unions) ---
     /// An enum is a CustomType whose `variants` is non-empty and whose fields are
     /// the synthetic `{ __tag, <variant>_<idx> ... }` fat layout. A struct has an
@@ -292,6 +305,7 @@ private:
     std::vector<std::shared_ptr<Type>> genericParams;
     std::vector<std::shared_ptr<Type>> genericArgs;
     std::vector<EnumVariantInfo> variants;
+    bool cRepr = false;
 };
 
 // --- 4. 函数类型 ---

@@ -236,6 +236,18 @@ void Emitter::run()
     initLLVMTargets();
     initTargetMachine();
 
+    // The MODULE must carry the target triple and data layout, not just the
+    // emitter's TargetMachine: LLVM derives the platform C ABI (how a struct is
+    // passed BY VALUE) from them at codegen time. Without this the module had
+    // NEITHER, so an argument was classified by LLVM's default rules while the
+    // object was emitted for the host -- a #[repr(C)] struct of one nested
+    // {i32,i32} (8 bytes) came out as TWO 32-bit registers where the C side
+    // expected one 64-bit register, and a 12-byte struct as three registers where
+    // C expected a byval pointer. Scalars were unaffected, which is why this went
+    // unnoticed until structs crossed the boundary.
+    context->module->setTargetTriple(tm_->getTargetTriple().str());
+    context->module->setDataLayout(tm_->createDataLayout());
+
     runOptPipeline(*context->module.get());
 
     emitObjectFile(*context->module.get(), opts_.outPath);

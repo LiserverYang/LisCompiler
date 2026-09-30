@@ -59,6 +59,8 @@ ERRORID E_MoveOutOfReference = 3017;          // non-Copy field moved out of a b
 ERRORID E_RecursiveType = 3018;               // a type that contains itself has infinite size
 ERRORID E_FFIOutsideAllowedScope = 3019;      // extern "C" outside the stdlib / without --allow-ffi
 ERRORID E_NonFfiSafeType = 3020;              // a type that cannot cross the C boundary
+ERRORID E_CReprMisuse = 3021;                 // #[repr(C)] on the wrong item / with a C-unsafe field
+ERRORID E_ExportMisuse = 3022;                // export fn: generic, body-less, duplicate symbol, reserved name
 
 // Borrow-checker errors (4000 series)
 

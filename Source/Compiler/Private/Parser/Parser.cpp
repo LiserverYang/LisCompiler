@@ -174,13 +174,36 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     while (check(TokenCode::ATTRIBUTE_START))
         parseAttribute();
 
+    // #[repr(C)] belongs to a struct and nothing else. Reporting it HERE (before
+    // the dispatch) keeps the attribute from silently attaching to whatever comes
+    // next, and names the real problem when it precedes a function.
+    if (pendingReprC_ && !check(TokenCode::STRUCT))
+    {
+        logError(currentToken(), "#[repr(C)] can only be applied to a struct declaration.", E_CReprMisuse);
+        pendingReprC_ = false;
+    }
+
     if (check(TokenCode::EXTERN))
     {
         return parseExternFunctionDeclaration();
     }
     if (check(TokenCode::STRUCT))
     {
-        return parseStructDefinition();
+        Token structTok = currentToken(); // the struct keyword: the honest position
+        auto structDef = parseStructDefinition();
+        if (pendingReprC_)
+        {
+            pendingReprC_ = false;
+            // An empty struct has no layout to witness (it is only ever an opaque
+            // handle behind a pointer), and a generic struct has no single layout.
+            if (structDef->members.empty())
+                logError(structTok, "#[repr(C)] cannot be applied to an empty struct: an empty struct can only be used as an opaque handle behind a pointer.", E_CReprMisuse);
+            else if (!structDef->genericParams.empty())
+                logError(structTok, "#[repr(C)] cannot be applied to a generic struct: a generic type has no single C layout.", E_CReprMisuse);
+            else
+                structDef->isReprC = true;
+        }
+        return structDef;
     }
     else if (check(TokenCode::IMPL))
     {
@@ -1146,9 +1169,29 @@ void Parser::parseAttribute()
             advance();
         }
     }
+    else if (check(TokenCode::IDENTIFIER) && currentToken().value == "repr")
+    {
+        // #[repr(C)] (2026-09-26): the C-layout witness for a struct that crosses
+        // the FFI boundary BY VALUE. Only C is accepted (the language's own layout
+        // is already the C one for C-typed fields).
+        advance();
+        consume(TokenCode::LPAREN, "expected '(' after 'repr' (write #[repr(C)])", E_ExpectALPAREN);
+        if (check(TokenCode::IDENTIFIER) && currentToken().value == "C")
+        {
+            advance();
+            pendingReprC_ = true;
+        }
+        else
+        {
+            if (check(TokenCode::IDENTIFIER))
+                advance(); // consume the offending name so the ')' below still matches
+            logError(currentToken(), "only #[repr(C)] is supported.", E_CReprMisuse);
+        }
+        consume(TokenCode::RPAREN, "expected ')' to close #[repr(C)]", E_ExpectARPAREN);
+    }
     else
     {
-        logError(currentToken(), "unknown attribute; only #[i_know] and #[link_name] are supported", E_UndefinedIdentifier);
+        logError(currentToken(), "unknown attribute; only #[i_know], #[link_name] and #[repr(C)] are supported", E_UndefinedIdentifier);
     }
 
     consume(TokenCode::RBRACKET, "expected ']' to close attribute", E_ExpectARBRACE);

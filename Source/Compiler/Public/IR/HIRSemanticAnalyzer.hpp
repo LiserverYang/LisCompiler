@@ -398,6 +398,8 @@ public:
     /// verify, so an extern declaration is fenced by a capability (stdlib or
     /// --allow-ffi), a type whitelist, and one signature per C symbol.
     void analyzeExternDeclaration(HIRFunction *f, const std::vector<std::shared_ptr<Type>> &paramTypes);
+    /// True when `ty` may be a field of a #[repr(C)] struct; logs otherwise.
+    bool checkCReprField(HIRNode &owner, const std::shared_ptr<Type> &ty, const std::string &fieldName);
     /// True when `ty` may appear in an extern "C" signature; logs otherwise.
     /// With `variadic` the value is passed through "...", where C's default
     /// argument promotions apply — i8/i16 become int and f32 becomes double, so

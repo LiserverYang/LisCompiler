@@ -1619,7 +1619,12 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
     // The type may be a shell created in pass 1b (with empty fields) that was
     // returned by the name-keyed create* above — set the resolved fields now.
     if (auto ct = std::dynamic_pointer_cast<CustomType>(ty))
+    {
         ct->setFields(std::move(fields));
+        // The layout WITNESS (see StructDef::isReprC): set here, in the type-building
+        // pass, so an extern signature analyzed later in pass 2 already sees it.
+        ct->setCRepr(node->isReprC);
+    }
 
     structGParams.clear();
     isInStruct = false;
@@ -1726,6 +1731,15 @@ void HIRSemanticAnalyzer::visit(HIRStruct *node)
 
     sym->type = buildStructType(node);
     node->structSymbol = sym;
+
+    // #[repr(C)] validation (2026-09-26): the promise is only believable when
+    // every field is something C could also declare at that offset. Reported here
+    // (pass 2, unsuppressed) and once per declaration; the flag itself was set by
+    // buildStructType, so an extern signature checked earlier in this pass still
+    // gets the right answer.
+    if (node->isReprC)
+        for (auto &m : node->members)
+            checkCReprField(*node, m.type, m.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -4110,6 +4124,62 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
 // What may cross the C boundary, and why the rest may not. Everything here is a
 // deliberate narrowing: the compiler cannot verify C, so it verifies what it can
 // about the DECLARATION and refuses the rest with a reason.
+// A #[repr(C)] struct's field must be a value C could also declare at that
+// offset. Pointers are fine (opaque or not), nested #[repr(C)] structs are fine,
+// arrays of such values are fine; bool/char/String/Vec/enums/function types are
+// not, each for the reason the FFI whitelist gives. This is what makes the
+// attribute a WITNESS rather than a wish: without it, #[repr(C)] would let a
+// struct with a 32-bit char claim a layout C would never produce.
+bool HIRSemanticAnalyzer::checkCReprField(HIRNode &owner, const std::shared_ptr<Type> &ty, const std::string &fieldName)
+{
+    if (!ty)
+        return true; // an earlier error already reported this position
+
+    auto bad = [&](const std::string &why)
+    {
+        log(owner, "field '" + fieldName + "' has type '" + ty->toString() + "', which has no C layout: " + why, E_CReprMisuse);
+        return false;
+    };
+
+    switch (ty->getKind())
+    {
+    case Type::Kind::Primitive:
+        switch (std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind())
+        {
+        case PrimitiveType::PrimKind::I8:
+        case PrimitiveType::PrimKind::I16:
+        case PrimitiveType::PrimKind::I32:
+        case PrimitiveType::PrimKind::I64:
+        case PrimitiveType::PrimKind::F32:
+        case PrimitiveType::PrimKind::F64:
+            return true;
+        case PrimitiveType::PrimKind::BOOL:
+            return bad("a Lis bool is one bit while C's _Bool is one byte; store an i8 and convert at the call site.");
+        case PrimitiveType::PrimKind::CHAR:
+            return bad("a Lis char is 32-bit while C's char is one byte; store an i8 or an i32.");
+        default:
+            return bad("void cannot be a field.");
+        }
+    case Type::Kind::Pointer:
+    case Type::Kind::Reference:
+        return true;
+    case Type::Kind::Array:
+        return checkCReprField(owner, std::static_pointer_cast<ArrayType>(ty)->getElementType(), fieldName + "[]");
+    case Type::Kind::Custom:
+    {
+        auto ct = std::static_pointer_cast<CustomType>(ty);
+        if (ct->isEnum())
+            return bad("this language's enums are tagged unions, not C enums; store an i32 and convert.");
+        if (!ct->isCRepr())
+            return bad("a nested struct must be #[repr(C)] itself.");
+        return true;
+    }
+    default:
+        return bad("only C-typed values (integers, floats, pointers, #[repr(C)] structs and arrays of those) "
+                   "may appear in a #[repr(C)] struct.");
+    }
+}
+
 bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr<Type> &ty, const std::string &what, bool variadic)
 {
     if (!ty)
@@ -4146,7 +4216,13 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
                 return bad("void has no value to pass.");
             return true;
         case PrimitiveType::PrimKind::BOOL:
-            return bad("Lis bool is one bit; pass an i32 (C sees 0/1) instead.");
+            if (variadic)
+                return bad("C promotes it to int in a variadic call; cast it to i32 at the call site.");
+            // A scalar bool crosses as C's _Bool (one byte): the declaration uses
+            // i8 and the call site zero-extends/truncates (see
+            // LLVMIRBuilder::toLLVMTypeForFfi). Only a #[repr(C)] STRUCT field is
+            // refused, where a one-byte difference would shift every later field.
+            return true;
         case PrimitiveType::PrimKind::CHAR:
             return bad("Lis char is 32-bit while C's char is one byte; pass an i8 or an i32.");
         default:
@@ -4159,6 +4235,28 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
     case Type::Kind::Pointer:
     case Type::Kind::Reference:
         return true;
+    // A struct crosses the boundary BEHIND A POINTER, never by value (2026-09-26).
+    //
+    // By value would need the platform aggregate ABI to be materialised in the IR:
+    // clang coerces such an argument (an 8-byte struct becomes an i64, a 12-byte
+    // one becomes a byval pointer) and the LLVM backend does NOT re-derive that
+    // from the struct type. Measured here: a call written with the struct type in
+    // the IR reaches C with only its FIRST field -- even {i32,i32} came through as
+    // {1, 0} -- and a 12-byte struct crashed. Passing the address is verified
+    // working in both directions.
+    //
+    // #[repr(C)] keeps its point: it is the layout PROMISE, checked field by field
+    // at the declaration (E3021), that C may read those fields through the pointer.
+    case Type::Kind::Custom:
+    {
+        auto ct = std::static_pointer_cast<CustomType>(ty);
+        if (ct->isEnum())
+            return bad("this language's enums are tagged unions, not C enums; pass an i32 and convert.");
+        return bad("a struct must cross the C boundary BEHIND A POINTER: pass &T / &mut T (valid for the "
+                   "duration of the call) or *T / *mut T (retained). Passing by value needs the platform "
+                   "aggregate ABI, which this compiler does not implement yet -- and #[repr(C)] is what "
+                   "tells C the fields may be read through that pointer.");
+    }
     default:
         return bad("allowed are i8/i16/i32/i64/f32/f64, void (as a return type), "
                    "&T/&mut T, *T/*mut T and &i8. A String, Vec, struct, enum, array or "

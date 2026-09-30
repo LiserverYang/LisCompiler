@@ -18,6 +18,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/TargetParser/Host.h>
 
 LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ctx, const std::string &name)
     : Pass(cnt),
@@ -25,6 +26,9 @@ LLVMIRBuilder::LLVMIRBuilder(std::shared_ptr<Context> cnt, llvm::LLVMContext &ct
       builder_(std::make_unique<llvm::IRBuilder<>>(ctx))
 {
     context->module = std::make_unique<llvm::Module>(name, ctx);
+    // The native triple, so the module is never target-less. The full data layout
+    // is filled in by the Emitter (which owns the TargetMachine) -- see its run().
+    context->module->setTargetTriple(llvm::sys::getDefaultTargetTriple());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -470,6 +474,20 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
     for (const auto &arg : s.args)
         args.push_back(lowerOperand(fs, arg));
 
+    // An extern "C" call may need C's ABI for bool (see toLLVMTypeForFfi): the Lis
+    // value is i1, the declared parameter is i8.
+    std::shared_ptr<FunctionType> externSig;
+    if (s.isExtern)
+    {
+        if (auto *mv = std::get_if<MIRMove>(&s.callee))
+            externSig = std::dynamic_pointer_cast<FunctionType>(mv->place.type);
+        else if (auto *cp = std::get_if<MIRCopy>(&s.callee))
+            externSig = std::dynamic_pointer_cast<FunctionType>(cp->place.type);
+        if (externSig)
+            for (size_t i = 0; i < args.size() && i < externSig->getParams().size(); ++i)
+                args[i] = coerceBoolToC(args[i], externSig->getParams()[i]);
+    }
+
     // Builtin heap calls lower to libc malloc/free/memcpy/strlen.
     if (isHeapBuiltin(s.funcName))
     {
@@ -626,8 +644,9 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         assert(normalDest.has_value());
         llvm::InvokeInst *inv =
             builder_->CreateInvoke(callee->getFunctionType(), callee, *normalDest, *unwindDest, args, s.funcName + ".ret");
+        llvm::Value *invResult = coerceBoolFromC(inv, externSig);
         if (s.dest.has_value())
-            storePlace(fs, *s.dest, inv);
+            storePlace(fs, *s.dest, invResult);
     }
     else
     {
@@ -639,8 +658,11 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
             builder_->CreateCall(callee->getFunctionType(), callee, args,
                 isVoid ? "" : s.funcName + ".ret"); // void calls must have no name
 
+        // C's _Bool comes back as i8; the Lis result is i1.
+        llvm::Value *result = coerceBoolFromC(call, externSig);
+
         if (s.dest.has_value() && !isVoid) // don't store a void result
-            storePlace(fs, *s.dest, call);
+            storePlace(fs, *s.dest, result);
     }
 }
 
@@ -1226,6 +1248,41 @@ llvm::Function *LLVMIRBuilder::getOrDeclareDropGlue(const std::string &structNam
 // return type AND the C variadic flag. getOrDeclareFn() below mints an opaque
 // `i8(...)` declaration, which is right for the compiler's own libc builtins
 // (they are called through dedicated emitters) but wrong for a typed FFI call.
+llvm::Type *LLVMIRBuilder::toLLVMTypeForFfi(const std::shared_ptr<Type> &ty)
+{
+    if (ty && ty->getKind() == Type::Kind::Primitive
+        && std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() == PrimitiveType::PrimKind::BOOL)
+        return llvm::Type::getInt8Ty(ctx_);
+    return semanticTypeToLLVM(ty, ctx_);
+}
+
+llvm::Value *LLVMIRBuilder::coerceBoolToC(llvm::Value *v, const std::shared_ptr<Type> &ty)
+{
+    if (!v || !ty || ty->getKind() != Type::Kind::Primitive)
+        return v;
+    if (std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() != PrimitiveType::PrimKind::BOOL)
+        return v;
+    llvm::Type *i8Ty = llvm::Type::getInt8Ty(ctx_);
+    if (v->getType() == i8Ty)
+        return v;
+    if (v->getType()->isIntegerTy(1))
+        return builder_->CreateZExt(v, i8Ty, "bool.c");
+    return v;
+}
+
+llvm::Value *LLVMIRBuilder::coerceBoolFromC(llvm::Value *v, const std::shared_ptr<FunctionType> &sig)
+{
+    if (!v || !sig || !sig->getReturnType())
+        return v;
+    const auto &rt = sig->getReturnType();
+    if (rt->getKind() != Type::Kind::Primitive
+        || std::static_pointer_cast<PrimitiveType>(rt)->getPrimKind() != PrimitiveType::PrimKind::BOOL)
+        return v;
+    if (!v->getType()->isIntegerTy(8))
+        return v;
+    return builder_->CreateTrunc(v, llvm::Type::getInt1Ty(ctx_), "bool.lis");
+}
+
 llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, const std::shared_ptr<FunctionType> &sig)
 {
     if (auto *fn = context->module->getFunction(name))
@@ -1236,8 +1293,8 @@ llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, con
     std::vector<llvm::Type *> params;
     params.reserve(sig->getParams().size());
     for (const auto &p : sig->getParams())
-        params.push_back(semanticTypeToLLVM(p, ctx_));
-    llvm::Type *ret = semanticTypeToLLVM(sig->getReturnType(), ctx_);
+        params.push_back(toLLVMTypeForFfi(p));
+    llvm::Type *ret = toLLVMTypeForFfi(sig->getReturnType());
     llvm::FunctionType *fty = llvm::FunctionType::get(ret, params, /*isVarArg=*/sig->isVarArg());
     return llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage, name, context->module.get());
 }

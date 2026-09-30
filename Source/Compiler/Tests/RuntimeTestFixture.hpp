@@ -175,6 +175,10 @@ protected:
     /// helper; it is not reset automatically (assign an empty vector to clear).
     std::vector<std::pair<std::string, std::string>> extraArgs;
 
+    /// Extra object files appended to the NEXT linkAndRun() (set by
+    /// compileLinkRunWithSources below, which compiles C/C++ helpers first).
+    std::vector<std::string> extraObjectsForNextLink;
+
     /// Set by the FFI helpers below for one snippet: the fixture's stand-in for
     /// the command line's --allow-ffi (the default, which the rest of the suite
     /// pins, is DENIED).
@@ -450,6 +454,8 @@ protected:
             if (attempt > 0)
                 exePath = fs::path(exePath.string() + ".r" + std::to_string(attempt));
             std::string linkCmd = "g++ -o \"" + exePath.string() + "\" \"" + objPath.string() + "\"";
+            for (const auto &extraObj : extraObjectsForNextLink)
+                linkCmd += " \"" + extraObj + "\"";
             linked = std::system(linkCmd.c_str()) == 0;
         }
         if (!linked)
@@ -593,6 +599,78 @@ protected:
         int code = jitRun();
         EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
                                       << source;
+    }
+
+    /// Compile a Lis snippet AND extra C/C++ sources, link them together, and run
+    /// the result as a subprocess. This is the ONLY way to reach a hand-written C
+    /// helper from a test: the in-process JIT has no linker and resolves a fixed
+    /// symbol table (RuntimeJit.cpp), so an FFI test that needs its own C function
+    /// goes through here. `extraSources` maps a file NAME to its text, e.g.
+    /// {"helper.cpp", "extern \"C\" int lis_double(int x) { return x * 2; }"}.
+    /// FFI is enabled for the snippet (the point of these tests).
+    int compileLinkRunWithSources(const std::string &source,
+        const std::vector<std::pair<std::string, std::string>> &extraSources,
+        std::string *out = nullptr)
+    {
+        ffiForThisTest_ = true;
+        bool compiled = compile(source);
+        ffiForThisTest_ = false;
+        if (!compiled)
+            return -1;
+
+        std::vector<fs::path> written;
+        extraObjectsForNextLink.clear();
+        bool ok = true;
+        for (const auto &[name, text] : extraSources)
+        {
+            fs::path src = objPath;
+            src += "_";
+            src += name;
+            fs::path obj = src;
+            obj.replace_extension(".o");
+            {
+                std::ofstream f(src);
+                f << text;
+            }
+            const std::string cmd = "g++ -c -o \"" + obj.string() + "\" \"" + src.string() + "\"";
+            if (std::system(cmd.c_str()) != 0)
+                ok = false;
+            extraObjectsForNextLink.push_back(obj.string());
+            written.push_back(src);
+            written.push_back(obj);
+        }
+
+        const int code = ok ? linkAndRun(out) : -1;
+        extraObjectsForNextLink.clear();
+        for (const auto &p : written)
+        {
+            std::error_code ec;
+            fs::remove(p, ec);
+        }
+        return code;
+    }
+
+    /// expectRun with extra C/C++ sources (see compileLinkRunWithSources).
+    void expectRunWithSources(const std::string &source,
+        const std::vector<std::pair<std::string, std::string>> &extraSources, int expectedExit)
+    {
+        const int code = compileLinkRunWithSources(source, extraSources, nullptr);
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch (with " << extraSources.size()
+                                      << " extra source file(s)) for:\n"
+                                      << source;
+    }
+
+    /// expectOutput with extra C/C++ sources (see compileLinkRunWithSources).
+    void expectOutputWithSources(const std::string &source,
+        const std::vector<std::pair<std::string, std::string>> &extraSources,
+        const std::string &expectedOut, int expectedExit)
+    {
+        std::string out;
+        const int code = compileLinkRunWithSources(source, extraSources, &out);
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << source;
+        EXPECT_EQ(out, expectedOut) << "stdout mismatch for:\n"
+                                    << source;
     }
 
     /// Compile, LINK, run as a child process, and assert the exit code. The slow

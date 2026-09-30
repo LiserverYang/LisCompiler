@@ -193,6 +193,15 @@ private:
     /// An extern "C" symbol: declared with the caller's signature (parameters,
     /// return type and the C variadic flag), never called indirectly.
     llvm::Function *getOrDeclareExternFn(const std::string &name, const std::shared_ptr<FunctionType> &sig);
+    /// The LLVM type of a C-side parameter/return. Only `bool` differs: a Lis bool
+    /// is one bit, C's _Bool is one byte, so it crosses as i8 and the call site
+    /// zero-extends in / truncates out (coerceBoolToC below).
+    llvm::Type *toLLVMTypeForFfi(const std::shared_ptr<Type> &ty);
+    /// i1 -> i8 for a bool argument of an extern call (other types pass through).
+    llvm::Value *coerceBoolToC(llvm::Value *v, const std::shared_ptr<Type> &ty);
+    /// i8 -> i1 for a bool RESULT of an extern call (a non-bool result, or no
+    /// extern signature, passes through unchanged).
+    llvm::Value *coerceBoolFromC(llvm::Value *v, const std::shared_ptr<FunctionType> &sig);
     std::string mangleName(const MIRFunction &fn) const;
 
     /// Declare `printf(i32(ptr, ...))` once. Still needed by the Display

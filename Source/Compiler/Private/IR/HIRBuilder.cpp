@@ -121,6 +121,7 @@ void HIRBuilder::visit(StructDef *node)
     result->name = internalName(currentModule_, node->name);
     result->position = node->position;
     result->length = node->length;
+    result->isReprC = node->isReprC;
 
     if (!node->genericParams.empty())
     {

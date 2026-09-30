@@ -655,6 +655,10 @@ public:
     std::vector<Symbol *> implementedTraits;
     bool isGeneric;
 
+    /// #[repr(C)] -- see StructDef::isReprC. Carried into CustomType so the FFI
+    /// whitelist can answer "may this struct go to C by value?".
+    bool isReprC = false;
+
     std::vector<std::shared_ptr<GenericParamType>> gParams;
     std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;
     Symbol *structSymbol = nullptr;

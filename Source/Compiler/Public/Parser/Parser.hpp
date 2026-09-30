@@ -92,6 +92,9 @@ protected:
     /// `#[link_name = "..."]` seen by parseAttribute(), consumed by the next
     /// extern declaration (empty = use the declaration's own name).
     std::string pendingLinkName_;
+    /// #[repr(C)] seen just before the current top-level item. Only a struct may
+    /// consume it (see parseAttribute / parseGlobalStatement).
+    bool pendingReprC_ = false;
 
     /**
      * Nesting budget for the recursive-descent functions.
