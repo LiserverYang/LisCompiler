@@ -587,7 +587,20 @@ single_char:
     case ',': token.code = TokenCode::COMMA; break;
     case ':': token.code = TokenCode::COLON; break;
     case ';': token.code = TokenCode::SEMI; break;
-    case '.': token.code = TokenCode::DOT; break;
+    case '.':
+        // "..." — the variadic tail of an extern "C" declaration. The
+        // two-character table above cannot see three characters, so it is
+        // matched here, before the plain '.'.
+        if (index + 2 < source.size() && source[index + 1] == '.' && source[index + 2] == '.')
+        {
+            token.code = TokenCode::ELLIPSIS;
+            token.value = "...";
+            index += 3;
+            column += 3;
+            return token;
+        }
+        token.code = TokenCode::DOT;
+        break;
     case '&': token.code = TokenCode::REFERENCE; break;
     case '!': token.code = TokenCode::NOT; break;
     case '~': token.code = TokenCode::TILDE; break;

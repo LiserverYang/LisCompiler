@@ -189,6 +189,12 @@ int RunModuleInJit(std::unique_ptr<llvm::Module> Mod,
         {"fgetc", reinterpret_cast<void *>(&fgetc)},
         {"fwrite", reinterpret_cast<void *>(&fwrite)},
         {"fflush", reinterpret_cast<void *>(&fflush)},
+        // The FFI tests (2026-09-26) call real C functions from the JIT, which has
+        // no linker: a symbol MCJIT's own process search cannot see becomes a call
+        // through a null pointer. These are the ones the tests use; the rest
+        // (fmod/cos/sin/memset/abs) resolve from the statically linked mingwex.
+        {"snprintf", reinterpret_cast<void *>(&snprintf)},
+        {"memset", reinterpret_cast<void *>(&memset)},
 #ifdef _WIN32
         {"__acrt_iob_func", reinterpret_cast<void *>(&LisJitIobFunc)},
 #endif

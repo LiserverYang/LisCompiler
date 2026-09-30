@@ -303,8 +303,16 @@ public:
     FunctionType(std::vector<std::shared_ptr<Type>> genericParams,
         std::vector<std::shared_ptr<Type>> params,
         std::shared_ptr<Type> returnType);
+    /// A C VARIADIC signature (`extern "C" fn printf(fmt: &i8, ...)`): the
+    /// declared parameters are a fixed prefix, the call site may pass more.
+    FunctionType(std::vector<std::shared_ptr<Type>> genericParams,
+        std::vector<std::shared_ptr<Type>> params,
+        std::shared_ptr<Type> returnType,
+        bool isVarArg);
 
     bool isGeneric() const;
+    /// `...` at the end of the parameter list (only extern declarations have it).
+    bool isVarArg() const;
     const std::vector<std::shared_ptr<Type>> &getParams() const;
     const std::vector<std::shared_ptr<Type>> &getGenericParams() const;
     const std::shared_ptr<Type> &getReturnType() const;
@@ -315,6 +323,7 @@ private:
     std::vector<std::shared_ptr<Type>> params;
     std::shared_ptr<Type> returnType;
     std::vector<std::shared_ptr<Type>> genericParams;
+    bool varArg = false;
 };
 
 // --- 5. Trait 类型 ---

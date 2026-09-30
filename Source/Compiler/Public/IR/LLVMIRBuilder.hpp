@@ -190,6 +190,9 @@ private:
     llvm::Type *toLLVMType(const std::shared_ptr<Type> &ty);
     llvm::Function *getOrDeclareDropGlue(const std::string &structName);
     llvm::Function *getOrDeclareFn(const std::string &name);
+    /// An extern "C" symbol: declared with the caller's signature (parameters,
+    /// return type and the C variadic flag), never called indirectly.
+    llvm::Function *getOrDeclareExternFn(const std::string &name, const std::shared_ptr<FunctionType> &sig);
     std::string mangleName(const MIRFunction &fn) const;
 
     /// Declare `printf(i32(ptr, ...))` once. Still needed by the Display

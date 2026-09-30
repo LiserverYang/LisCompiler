@@ -100,7 +100,9 @@ llvm::Type *semanticTypeToLLVM(const std::shared_ptr<Type> &ty,
         for (const auto &p : newTy->getParams())
             params.push_back(semanticTypeToLLVM(p, ctx));
         llvm::Type *ret = semanticTypeToLLVM(newTy->getReturnType(), ctx);
-        return llvm::FunctionType::get(ret, params, /*isVarArg=*/false)
+        // A `...` signature keeps its flag: the extern declaration in the backend
+        // needs the C variadic call convention.
+        return llvm::FunctionType::get(ret, params, /*isVarArg=*/newTy->isVarArg())
             ->getPointerTo();
     }
 

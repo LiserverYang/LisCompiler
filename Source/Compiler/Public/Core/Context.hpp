@@ -74,6 +74,17 @@ struct Context
     /// EMPTY → nothing qualifies (fail-closed, never fail-open).
     std::vector<std::string> stdLibDirs;
 
+    /// The FFI capability (2026-09-26). An extern "C" declaration binds a C
+    /// symbol whose code can break every guarantee the language makes, so it is
+    /// opt-in: files under stdLibDirs always may (the platform's own bindings),
+    /// everything else needs --allow-ffi. The judge/CI default is OFF.
+    bool ffiAllowed = false;
+
+    /// Every extern "C" declaration seen so far, keyed by C symbol name, so a
+    /// second declaration with a DIFFERENT signature is reported instead of
+    /// silently merging (LLVM would keep the first one and mis-call the other).
+    std::unordered_map<std::string, std::shared_ptr<FunctionType>> externDecls;
+
     /// Loaded file contents keyed by absolute path — for multi-file diagnostics
     /// (Context::filePath/fileValue is a single slot, restored after parsing).
     std::unordered_map<std::string, std::string> fileContents;

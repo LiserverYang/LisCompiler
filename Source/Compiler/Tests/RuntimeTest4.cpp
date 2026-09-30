@@ -2633,3 +2633,143 @@ TEST_F(RuntimeTest, ExampleBalancedTree)
         if (c != '\r') normalized += c;
     EXPECT_EQ(normalized, "106465\n84185\n492737\n");
 }
+
+// ── FFI: extern "C" declarations (2026-09-26) ───────────────────────────────
+//
+// FFI is OPT-IN: the fixture's default (like the judge's) is denied, so only the
+// *Ffi helpers below enable it. Every positive test therefore also documents the
+// command line spelling (--allow-ffi).
+
+TEST_F(RuntimeTest, FfiStrlenOnLiteral)
+{
+    // Also proves the reserved-name carve-out: 'strlen' is a compiler-reserved
+    // libc name, and an extern declaration is the one place allowed to bind it.
+    expectRunFfi("extern \"C\" fn strlen(s: &i8) -> i64;\n"
+                 "fn main() -> i32 { if strlen(\"hello\") == 5 as i64 { ret 0; } ret 1; }\n",
+        0);
+}
+
+TEST_F(RuntimeTest, FfiAbsInt)
+{
+    expectRunFfi("#[link_name = \"abs\"] extern \"C\" fn cAbs(x: i32) -> i32;\n"
+                 "fn main() -> i32 { ret cAbs(0 - 7); }\n",
+        7);
+}
+
+TEST_F(RuntimeTest, FfiFmodDouble)
+{
+    // An f64 argument and an f64 result survive the boundary (the declaration is
+    // built from the callee's signature, not from an opaque i8(...) prototype).
+    expectOutputFfi("extern \"C\" fn fmod(x: f64, y: f64) -> f64;\n"
+                    "fn main() -> i32 { print(fmod(7.5, 2.0)); ret 0; }\n",
+        "1.500000", 0);
+}
+
+TEST_F(RuntimeTest, FfiMutRefWritesThrough)
+{
+    // A &mut i8 parameter is a pointer C may write through; the borrow checker
+    // already guarantees it is valid for the duration of the call.
+    expectRunFfi("extern \"C\" fn memset(buf: &mut i8, c: i32, n: i64) -> *mut i8;\n"
+                 "extern \"C\" fn strlen(s: &i8) -> i64;\n"
+                 "fn main() -> i32 {\n"
+                 "    #[i_know = \"byte buffer\"]\n"
+                 "    let mut buf: [i8; 16] = [(0 as i8); 16];\n"
+                 "    memset(&mut buf[0], 65, 3 as i64);\n"
+                 "    if strlen(&buf[0]) == 3 as i64 { ret 0; } ret 1; }\n",
+        0);
+}
+
+TEST_F(RuntimeTest, FfiVariadicSnprintf)
+{
+    // A C VARIADIC declaration: the fixed prefix is type-checked, the tail goes
+    // through the default-argument promotions (i32/i64/f64/pointers only).
+    expectRunFfi("extern \"C\" fn snprintf(buf: &mut i8, n: i64, fmt: &i8, ...) -> i32;\n"
+                 "extern \"C\" fn strlen(s: &i8) -> i64;\n"
+                 "fn main() -> i32 {\n"
+                 "    #[i_know = \"byte buffer\"]\n"
+                 "    let mut buf: [i8; 32] = [(0 as i8); 32];\n"
+                 "    let written = snprintf(&mut buf[0], 32 as i64, \"%d-%s\", 42, \"ok\");\n"
+                 "    if written != 5 { ret 1; }\n"
+                 "    if strlen(&buf[0]) == 5 as i64 { ret 0; } ret 2; }\n",
+        0);
+}
+
+TEST_F(RuntimeTest, FfiLinkNameBindsADifferentCSymbol)
+{
+    // #[link_name] is what lets a module wrap a libc name: the Lis name is
+    // cMyExp, the C symbol is exp, and the wrapper below calls it in a loop.
+    expectOutputFfi("#[link_name = \"exp\"] extern \"C\" fn cMyExp(x: f64) -> f64;\n"
+                    "fn main() -> i32 { print(cMyExp(0.0)); ret 0; }\n",
+        "1.000000", 0);
+}
+
+TEST_F(RuntimeTest, FfiRequiresCapability)
+{
+    // The DEFAULT: user code without --allow-ffi may not declare extern (the
+    // judge hands submissions no capability, so libc is out of reach).
+    expectCompileFail("extern \"C\" fn strlen(s: &i8) -> i64;\n"
+                      "fn main() -> i32 { ret 0; }\n",
+        "need the FFI capability");
+}
+
+TEST_F(RuntimeTest, FfiCharBoolAndStructRejected)
+{
+    expectCompileFailFfi("extern \"C\" fn f(c: char) -> i32;\nfn main() -> i32 { ret 0; }\n",
+        "cannot cross the C boundary");
+    expectCompileFailFfi("extern \"C\" fn f(b: bool) -> i32;\nfn main() -> i32 { ret 0; }\n",
+        "cannot cross the C boundary");
+    expectCompileFailFfi("struct S { pub v: i32 }\n"
+                         "extern \"C\" fn f(s: S) -> i32;\nfn main() -> i32 { ret 0; }\n",
+        "cannot cross the C boundary");
+    // (A void RETURN is legal — that is C's "returns nothing" signature — but a
+    // library type by value is not: String owns a buffer, and handing ownership of
+    // it to C needs the explicit raw-pointer API of a later stage.)
+    expectCompileFailFfi("extern \"C\" fn f(s: String) -> i32;\nfn main() -> i32 { ret 0; }\n",
+        "cannot cross the C boundary");
+}
+
+TEST_F(RuntimeTest, FfiGenericAndBodyRejected)
+{
+    expectCompileFailFfi("extern \"C\" fn f<T>(x: T) -> i32;\nfn main() -> i32 { ret 0; }\n",
+        "cannot be generic");
+    expectCompileFailFfi("extern \"C\" fn f() -> i32 { ret 0; }\nfn main() -> i32 { ret 0; }\n",
+        "cannot have a body");
+}
+
+TEST_F(RuntimeTest, FfiVariadicArgumentTypesRestricted)
+{
+    // C's default argument promotions: an f32 would silently become a double, an
+    // i8 an int, so both are rejected — cast explicitly instead.
+    expectCompileFailFfi("extern \"C\" fn printf(fmt: &i8, ...) -> i32;\n"
+                         "fn main() -> i32 {\n"
+                         "    #[i_know = \"f32 for the variadic test\"]\n"
+                         "    let small = 1.5 as f32;\n"
+                         "    ret printf(\"%f\", small); }\n",
+        "passed through '...'");
+}
+
+TEST_F(RuntimeTest, FfiExternIsNotAValue)
+{
+    expectCompileFailFfi("extern \"C\" fn strlen(s: &i8) -> i64;\n"
+                         "fn main() -> i32 { let f = strlen; ret 0; }\n",
+        "can be called, but not used as a value");
+}
+
+TEST_F(RuntimeTest, FfiConflictingRedeclarationRejected)
+{
+    // Two Lis names may bind the SAME C symbol only with the same signature:
+    // LLVM keeps the first declaration, so a mismatch would silently mis-call.
+    expectCompileFailFfi("extern \"C\" fn foo(x: i32) -> i32;\n"
+                         "#[link_name = \"foo\"] extern \"C\" fn bar(y: f64) -> f64;\n"
+                         "fn main() -> i32 { ret 0; }\n",
+        "already declared with the signature");
+}
+
+TEST_F(RuntimeTest, UserFunctionNamedStrlenStillRejected)
+{
+    // The carve-out is limited to extern declarations: defining a Lis function
+    // with a reserved libc name is still an error (the FFI flag changes nothing).
+    expectCompileFailFfi("fn strlen(s: &i8) -> i64 { ret 0; }\n"
+                         "fn main() -> i32 { ret 0; }\n",
+        "reserved by the compiler");
+}

@@ -57,6 +57,8 @@ ERRORID E_PrivateFieldAccess = 3015;          // private field read/constructed 
 ERRORID E_MoveOutOfDropType = 3016;           // non-Copy field moved out of a type with impl Drop
 ERRORID E_MoveOutOfReference = 3017;          // non-Copy field moved out of a borrowed place
 ERRORID E_RecursiveType = 3018;               // a type that contains itself has infinite size
+ERRORID E_FFIOutsideAllowedScope = 3019;      // extern "C" outside the stdlib / without --allow-ffi
+ERRORID E_NonFfiSafeType = 3020;              // a type that cannot cross the C boundary
 
 // Borrow-checker errors (4000 series)
 

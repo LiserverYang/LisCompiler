@@ -620,6 +620,15 @@ public:
     bool isStatic = false;
     bool isTraitMethod = false;
     bool isGeneric = false;
+
+    // ── FFI (2026-09-26) ─────────────────────────────────────────────────────
+    /// `extern "C" fn ...;`: a C symbol declaration. `name` is then the BARE C
+    /// name (no module prefix) and the function has no body.
+    bool isExtern = false;
+    /// The C symbol to call (`#[link_name]`, else the declaration's own name).
+    std::string cName;
+    /// A C variadic signature (the parameter list ended with `...`).
+    bool isVariadic = false;
     std::string associatedStruct;
     std::string associatedTrait;
 

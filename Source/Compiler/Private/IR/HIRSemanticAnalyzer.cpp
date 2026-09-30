@@ -621,12 +621,12 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
     }
     else if (auto *f = dynamic_cast<HIRFunction *>(item))
     {
-        // A user/`stdlib` `fn` named like a builtin or a libc symbol would be
-        // silently shadowed by the compiler's call-site interception (builtins)
-        // or collide with codegen's external declaration (libc). Reject it.
-        // `f->name` carries the module prefix — strip it: `foo$strlen` is still
-        // a redefinition of the reserved libc name.
-        if (isReservedFunctionName(displayName(f->name)))
+        // A user/stdlib fn named like a builtin or a libc symbol would be silently
+        // shadowed by the compiler's call-site interception (builtins) or collide
+        // with codegen's external declaration (libc). Reject it.
+        // An extern "C" DECLARATION is the one exception (2026-09-26): binding a
+        // libc name is its entire purpose, and it is gated by E3019 in pass 2.
+        if (!f->isExtern && isReservedFunctionName(displayName(f->name)))
         {
             log(*f, "function name '" + displayName(f->name) + "' is reserved by the compiler.");
             return;
@@ -636,6 +636,8 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
         sym->kind = SymbolKind::Function;
         sym->name = f->name;
         sym->type = nullptr;
+        sym->isExtern = f->isExtern;
+        sym->cName = f->isExtern ? f->cName : std::string();
         SymbolTable::getInstance().insertSymbol(f->name, std::move(sym));
     }
     else if (auto *v = dynamic_cast<HIRVarDecl *>(item))
@@ -891,7 +893,19 @@ void HIRSemanticAnalyzer::preRegisterFunctionType(HIRFunction *f,
 
     auto it = inferredReturns.find(f->name);
     const std::shared_ptr<Type> inferred = (it != inferredReturns.end()) ? it->second : nullptr;
-    sym->type = resolveFunctionSignature(f, inferred);
+    std::shared_ptr<Type> sig = resolveFunctionSignature(f, inferred);
+
+    // A C variadic signature keeps its "...": rebuild the interned type with the
+    // flag. This has to happen in the PRE-pass too — a call site analyzed before
+    // the declaration is visited in pass 2 must already see the variadic type,
+    // or its extra arguments look like an arity error.
+    if (f->isExtern && f->isVariadic)
+        if (auto ft = std::dynamic_pointer_cast<FunctionType>(sig))
+            sig = context->typeContext->getFunction(ft->getParams(), ft->getReturnType(), /*isVarArg=*/true);
+
+    sym->type = sig;
+    sym->isExtern = f->isExtern;
+    if (f->isExtern) sym->cName = f->cName;
 
     suppressTypeErrors_ = false;
 }
@@ -2310,8 +2324,17 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
     }
 
     // --- body ---
+    // An extern "C" declaration has no body: it only binds a C symbol, and its
+    // gate/whitelist diagnostics are reported here (pass 2), where logging is
+    // not suppressed. A body-less NON-extern function is a declaration the
+    // language has no meaning for (trait methods are declarations by design and
+    // are excluded).
     if (node->body)
         visit(node->body.get());
+    else if (node->isExtern)
+        analyzeExternDeclaration(node, paramTypes);
+    else if (!node->isMethod && !node->isTraitMethod)
+        log(*node, "a function declaration without a body must be an extern \"C\" declaration.");
 
     functionInfo.isInFunction = false;
 
@@ -2363,6 +2386,12 @@ void HIRSemanticAnalyzer::visit(HIRFunction *node)
     if (node->isGeneric || methodOfGenericStruct)
     {
         node->type = context->typeContext->getGenericFunction(genericParams, allParamTypes, node->returnType);
+    }
+    else if (node->isVariadic)
+    {
+        // The "..." is part of the type (and of its interning): a variadic and a
+        // non-variadic signature with the same parameters are different types.
+        node->type = context->typeContext->getFunction(allParamTypes, node->returnType, /*isVarArg=*/true);
     }
     else
     {
@@ -3252,6 +3281,18 @@ void HIRSemanticAnalyzer::visit(HIRNameRef *node)
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
         return;
     }
+    // An extern "C" name is a C symbol, not a Lis value: strlen(x) is a call, but
+    // 'let f = strlen;' would have to materialise the address of a symbol this
+    // compiler never declared as a Lis function.
+    if (sym->isExtern && !analyzingCallCallee_)
+    {
+        log(*node, "'" + node->name + "' is an extern \"C\" declaration: it can be called, "
+                "but not used as a value (function pointers to C symbols are not supported yet).",
+            E_NonFfiSafeType);
+        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
+        return;
+    }
+
     node->symbol = sym;
     node->type = sym->type;
     node->scope = SymbolTable::getInstance().getCurrentScope();
@@ -4064,6 +4105,110 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
     return true;
 }
 
+// ── FFI (2026-09-26) ─────────────────────────────────────────────────────────
+//
+// What may cross the C boundary, and why the rest may not. Everything here is a
+// deliberate narrowing: the compiler cannot verify C, so it verifies what it can
+// about the DECLARATION and refuses the rest with a reason.
+bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr<Type> &ty, const std::string &what, bool variadic)
+{
+    if (!ty)
+        return true; // an earlier error already reported this position
+
+    auto bad = [&](const std::string &why)
+    {
+        log(owner, "the " + what + " has type '" + ty->toString()
+                + "', which cannot cross the C boundary: " + why, E_NonFfiSafeType);
+        return false;
+    };
+
+    switch (ty->getKind())
+    {
+    case Type::Kind::Primitive:
+    {
+        switch (std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind())
+        {
+        case PrimitiveType::PrimKind::I32:
+        case PrimitiveType::PrimKind::I64:
+        case PrimitiveType::PrimKind::F64:
+            return true;
+        case PrimitiveType::PrimKind::I8:
+        case PrimitiveType::PrimKind::I16:
+            if (variadic)
+                return bad("C promotes it to int in a variadic call; cast it to i32 at the call site.");
+            return true;
+        case PrimitiveType::PrimKind::F32:
+            if (variadic)
+                return bad("C promotes it to double in a variadic call; cast it to f64 at the call site.");
+            return true;
+        case PrimitiveType::PrimKind::VOID:
+            if (variadic)
+                return bad("void has no value to pass.");
+            return true;
+        case PrimitiveType::PrimKind::BOOL:
+            return bad("Lis bool is one bit; pass an i32 (C sees 0/1) instead.");
+        case PrimitiveType::PrimKind::CHAR:
+            return bad("Lis char is 32-bit while C's char is one byte; pass an i8 or an i32.");
+        default:
+            return bad("unsupported primitive type.");
+        }
+    }
+    // *T / *mut T / &T / &mut T — including &i8, the C string. A REFERENCE is the
+    // safe form: the borrow checker keeps it valid across the call, and the
+    // documented contract is that C must not retain it.
+    case Type::Kind::Pointer:
+    case Type::Kind::Reference:
+        return true;
+    default:
+        return bad("allowed are i8/i16/i32/i64/f32/f64, void (as a return type), "
+                   "&T/&mut T, *T/*mut T and &i8. A String, Vec, struct, enum, array or "
+                   "function needs an explicit raw-pointer API (and its own ownership rule).");
+    }
+}
+
+void HIRSemanticAnalyzer::analyzeExternDeclaration(HIRFunction *f, const std::vector<std::shared_ptr<Type>> &paramTypes)
+{
+    // 1. The capability. Fail-closed: the standard library may bind C (that is
+    //    how the platform's own math/IO reach libc), user code needs --allow-ffi,
+    //    and a judge runs without it.
+    if (!inStdLib() && !context->ffiAllowed)
+    {
+        log(*f, "extern \"C\" declarations need the FFI capability: the standard library has it, "
+                "anything else gets it from --allow-ffi. FFI can break every guarantee the "
+                "language makes, so it is opt-in.", E_FFIOutsideAllowedScope);
+        return;
+    }
+
+    // 2. The type whitelist.
+    bool ok = true;
+    for (size_t i = 0; i < paramTypes.size(); ++i)
+    {
+        const std::string pname = i < f->rawParams.size() ? f->rawParams[i].first : std::to_string(i + 1);
+        if (!checkFfiSafeType(*f, paramTypes[i], "parameter '" + pname + "'"))
+            ok = false;
+    }
+    if (!checkFfiSafeType(*f, f->returnType, "return type"))
+        ok = false;
+    if (!ok)
+        return;
+
+    // 3. One signature per C symbol. Two modules may both declare the same C
+    //    function (that is normal), but they must agree: LLVM keeps the FIRST
+    //    declaration and would silently mis-call the other.
+    const std::string &cName = f->cName.empty() ? f->name : f->cName;
+    auto sig = std::dynamic_pointer_cast<FunctionType>(f->type);
+    auto it = context->externDecls.find(cName);
+    if (it == context->externDecls.end())
+    {
+        context->externDecls[cName] = sig;
+    }
+    else if (sig && it->second && !sig->equals(it->second))
+    {
+        log(*f, "the C symbol '" + cName + "' is already declared with the signature '"
+                + it->second->toString() + "'.", E_NonFfiSafeType);
+    }
+}
+
 // ---------------------------------------------------------------------------
 bool HIRSemanticAnalyzer::inStdLib() const
 {
@@ -4428,7 +4573,15 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
                 break;
             }
         }
+        {
+        // The callee is the one position where a function NAME means "call this",
+        // so analyzingCallCallee_ lets visit(HIRNameRef) allow an extern symbol
+        // here and reject it everywhere else.
+        const bool savedAnalyzingCallee = analyzingCallCallee_;
+        analyzingCallCallee_ = true;
         analyzeExpr(node->callee.get());
+        analyzingCallCallee_ = savedAnalyzingCallee;
+    }
         auto funcType = std::dynamic_pointer_cast<FunctionType>(node->callee->type);
         if (!funcType)
         {
@@ -4436,7 +4589,17 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
             return;
         }
-        if (node->args.size() != funcType->getParams().size())
+        // A C variadic callee takes MORE than its declared parameters, so the
+        // exact-match rule applies only to a non-variadic one (the fixed prefix is
+        // type-checked below, the tail by the FFI-safe rule).
+        if (funcType->isVarArg())
+        {
+            if (node->args.size() < funcType->getParams().size())
+                log(*node, "this C function expects at least "
+                        + std::to_string(funcType->getParams().size())
+                        + " argument(s), got " + std::to_string(node->args.size()) + ".");
+        }
+        else if (node->args.size() != funcType->getParams().size())
             log(*node, "argument count mismatch.");
 
         std::shared_ptr<FunctionType> instantiatedFuncType;
@@ -4520,16 +4683,32 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         }
         // ==============================================================
 
-        // 参数数量检查
-        if (node->args.size() != instantiatedFuncType->getParams().size())
-            log(*node, "argument count mismatch.");
-
         // 参数类型检查（使用实例化后的具体类型）。Free functions get the
         // context-free-generic explanation (see checkCallArgs).
-        checkCallArgs(node->args, instantiatedFuncType->getParams(),
-            /*paramOffset=*/0,
-            *node,
-            /*explainUninferredGeneric=*/true);
+        if (instantiatedFuncType->isVarArg())
+        {
+            // A C VARIADIC call: the declared parameters are a fixed prefix (their
+            // count was checked above), the rest go through the default-argument
+            // promotions, so only the FFI-safe subset may be passed.
+            const auto &fixed = instantiatedFuncType->getParams();
+            checkCallArgs(node->args, fixed,
+                /*paramOffset=*/0,
+                *node,
+                /*explainUninferredGeneric=*/false);
+            for (size_t i = fixed.size(); i < node->args.size(); ++i)
+            {
+                analyzeExpr(node->args[i].get());
+                checkFfiSafeType(*node->args[i], node->args[i]->type,
+                    "argument " + std::to_string(i + 1) + " passed through '...'", /*variadic=*/true);
+            }
+        }
+        else
+        {
+            checkCallArgs(node->args, instantiatedFuncType->getParams(),
+                /*paramOffset=*/0,
+                *node,
+                /*explainUninferredGeneric=*/true);
+        }
         // 设置返回值类型为实例化后的类型
         node->type = instantiatedFuncType->getReturnType();
 

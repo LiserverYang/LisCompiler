@@ -59,4 +59,13 @@ struct Symbol
     /// the importing module). It forwards everything (type/kind/name) to the
     /// target symbol so lookups always see the target's latest state.
     Symbol *aliasTarget = nullptr;
+
+    /// An `extern "C"` DECLARATION (2026-09-26): codegen declares the C symbol
+    /// (cName) instead of looking for a Lis definition, and the call must not go
+    /// through monomorphization.
+    bool isExtern = false;
+    /// The C symbol to call. Differs from `name` when the declaration used
+    /// #[link_name] (which is how a module wraps a libc name without shadowing
+    /// its own function of that name).
+    std::string cName;
 };

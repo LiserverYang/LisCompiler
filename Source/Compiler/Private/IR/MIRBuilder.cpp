@@ -695,7 +695,11 @@ MIRProgram MIRBuilder::buildProgram(HIRProgram *prog)
 
         if (auto *fn = dynamic_cast<HIRFunction *>(raw))
         {
-            addFunction(buildFunction(fn));
+            // An extern "C" DECLARATION has no body and defines nothing: the call
+            // site declares the C symbol directly (see LLVMIRBuilder). Building a
+            // MIRFunction for it would dereference a null body.
+            if (!fn->isExtern)
+                addFunction(buildFunction(fn));
         }
         else if (auto *impl = dynamic_cast<HIRImpl *>(raw))
         {
@@ -2302,11 +2306,21 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
 
     // 2. Lower the callee expression to a place / name.
     std::string funcName;
+    bool calleeIsExtern = false;
     MIROperand calleeOp = [&]() -> MIROperand
     {
         if (auto *nameRef = dynamic_cast<HIRNameRef *>(call->callee.get()))
         {
-            funcName = nameRef->name;
+            // An extern "C" callee is a C SYMBOL: the backend must declare it
+            // with the callee's signature — never look for a Lis definition,
+            // never call through a loaded function pointer, never monomorphize.
+            // The CALL name is the C symbol (cName), which differs from the Lis
+            // name under #[link_name].
+            calleeIsExtern = nameRef->symbol && nameRef->symbol->isExtern;
+            if (calleeIsExtern && !nameRef->symbol->cName.empty())
+                funcName = nameRef->symbol->cName;
+            else
+                funcName = nameRef->name;
             MIRPlace p = buildNameRef(nameRef);
             return placeToOperand(p);
         }
@@ -2372,7 +2386,8 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
         .callee = std::move(calleeOp),
         .funcName = funcName,
         .args = std::move(args),
-        .genericParams = std::move(call->typedGenericParams)});
+        .genericParams = std::move(call->typedGenericParams),
+        .isExtern = calleeIsExtern});
 
     // 5. A call whose return type is `never` (today: the `panic` builtin) does
     //    not return to its caller — seal the block so everything after it is

@@ -274,6 +274,17 @@ public:
     std::shared_ptr<Type> type;
     std::vector<std::unique_ptr<GenericParam>> genericParams;
 
+    // ── FFI (2026-09-26) ─────────────────────────────────────────────────────
+    /// `extern "C" fn ...;` — a DECLARATION of a C symbol: no body, and the
+    /// module does not own the name (it is not module-prefixed).
+    bool isExtern = false;
+    /// The C symbol to call. Defaults to `name`; `#[link_name = "..."]`
+    /// overrides it, which is what lets a module wrap a libc name without
+    /// shadowing its own function of that name.
+    std::string cName;
+    /// A trailing `...` in the parameter list (a C variadic signature).
+    bool isVariadic = false;
+
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);

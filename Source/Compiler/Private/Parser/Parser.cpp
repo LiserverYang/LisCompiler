@@ -169,6 +169,15 @@ void Parser::parseAll()
 
 std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
 {
+    // A top-level item may carry attributes. `#[link_name = "..."]` renames the C
+    // symbol of the `extern "C"` declaration that follows it.
+    while (check(TokenCode::ATTRIBUTE_START))
+        parseAttribute();
+
+    if (check(TokenCode::EXTERN))
+    {
+        return parseExternFunctionDeclaration();
+    }
     if (check(TokenCode::STRUCT))
     {
         return parseStructDefinition();
@@ -179,7 +188,13 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     }
     else if (check(TokenCode::FN))
     {
-        return parseFunctionDefinition();
+        auto func = parseFunctionDefinition();
+        if (!pendingLinkName_.empty())
+        {
+            logError(currentToken(), "#[link_name] is only valid on an 'extern' declaration.", E_ExpectedExpression);
+            pendingLinkName_.clear();
+        }
+        return func;
     }
     else if (check(TokenCode::LET))
     {
@@ -690,7 +705,9 @@ std::unique_ptr<FunctionDef> Parser::parseFunctionDefinition()
     }
 
     consume(TokenCode::LPAREN, "expect a '(' after function name", E_ExpectALPAREN);
-    func->params = parseParameterList();
+    bool isVariadic = false;
+    func->params = parseParameterList(&isVariadic);
+    func->isVariadic = isVariadic;
     consume(TokenCode::RPAREN, "expect a ')' after parameters", E_ExpectARPAREN);
 
     if (match(TokenCode::ARROW))
@@ -698,7 +715,55 @@ std::unique_ptr<FunctionDef> Parser::parseFunctionDefinition()
         func->returnType = parseType();
     }
 
+    // A trailing ';' makes this a DECLARATION with no body (the impl/trait method
+    // parser accepted this already, 2026-09-26). At top level only an
+    // `extern "C"` declaration may omit the body — sema rejects the plain
+    // `fn f();` case with a message that says so.
+    if (match(TokenCode::SEMI))
+        return func;
+
     func->body = parseCompoundStatement();
+    return func;
+}
+
+// `extern "C" fn name(params) -> ret;` — a C symbol declaration (2026-09-26).
+//
+// Everything after `extern "C"` is the ordinary function grammar, reused
+// through parseFunctionDefinition(): it already accepts a declaration with no
+// body (a trailing ';'), which is exactly what an extern is. The declaration is
+// then marked, and its C symbol name taken from #[link_name] (default: its own
+// name — the module does NOT prefix an extern, see HIRBuilder).
+std::unique_ptr<ASTNode> Parser::parseExternFunctionDeclaration()
+{
+    PositionRecorder recorder(this, nullptr);
+
+    advance(); // 'extern' — parseGlobalStatement checked it
+
+    if (check(TokenCode::STRING_LITERAL))
+    {
+        if (currentToken().value != "C")
+            logError(currentToken(), "only extern \"C\" is supported.", E_ExpectedExpression);
+        advance();
+    }
+    else
+    {
+        logError(currentToken(), "expected an ABI string after 'extern' (write extern \"C\").", E_ExpectedExpression);
+    }
+
+    auto func = parseFunctionDefinition();
+    FunctionDef *fd = func.get();
+    fd->isExtern = true;
+    fd->cName = pendingLinkName_.empty() ? fd->name : pendingLinkName_;
+    pendingLinkName_.clear();
+
+    if (!fd->genericParams.empty())
+        logError(currentToken(), "an extern declaration cannot be generic.", E_ExpectedExpression);
+    if (fd->body)
+    {
+        logError(currentToken(), "an extern declaration cannot have a body.", E_ExpectedExpression);
+        fd->body.reset();
+    }
+
     return func;
 }
 
@@ -959,7 +1024,7 @@ std::unique_ptr<MemberFunctionDef> Parser::parseMemberFunctionDefinition()
     return func;
 }
 
-std::vector<std::unique_ptr<Param>> Parser::parseParameterList()
+std::vector<std::unique_ptr<Param>> Parser::parseParameterList(bool *isVariadic)
 {
     std::vector<std::unique_ptr<Param>> params;
 
@@ -970,6 +1035,15 @@ std::vector<std::unique_ptr<Param>> Parser::parseParameterList()
             if (finished())
                 break; // the end of the stream is not a parameter (and the
                        // cursor is clamped there, so looping would never end)
+            // `...` — the C variadic tail. It must be LAST, so the loop stops
+            // right here; anything after it is a normal parse error at ')'.
+            if (check(TokenCode::ELLIPSIS))
+            {
+                advance();
+                if (isVariadic)
+                    *isVariadic = true;
+                break;
+            }
             params.push_back(parseParameter());
         } while (match(TokenCode::COMMA));
     }
@@ -1055,9 +1129,26 @@ void Parser::parseAttribute()
             }
         }
     }
+    else if (check(TokenCode::IDENTIFIER) && currentToken().value == "link_name")
+    {
+        // #[link_name = "symbol"] — binds an extern declaration to a C symbol
+        // whose name differs from the Lis name (libc wrappers need this: a
+        // module cannot define `fn exp` and bind `exp` under the same name).
+        advance();
+        consume(TokenCode::ASSIGN, "expected '=' in #[link_name = \"...\"]", E_ExpectAnASSIGN);
+        if (!check(TokenCode::STRING_LITERAL))
+        {
+            logError(currentToken(), "expected a string symbol name in #[link_name = \"...\"]", E_ExpectedExpression);
+        }
+        else
+        {
+            pendingLinkName_ = currentToken().value;
+            advance();
+        }
+    }
     else
     {
-        logError(currentToken(), "unknown attribute; only #[i_know] is supported", E_UndefinedIdentifier);
+        logError(currentToken(), "unknown attribute; only #[i_know] and #[link_name] are supported", E_UndefinedIdentifier);
     }
 
     consume(TokenCode::RBRACKET, "expected ']' to close attribute", E_ExpectARBRACE);

@@ -44,6 +44,7 @@ enum class TokenCode
     CONTINUE, // "continue"
     ENUM,     // "enum"
     MATCH,    // "match"
+    EXTERN,   // "extern" (C declarations, 2026-09-26)
 
     /* Type keywords */
     I8,    // "i8"
@@ -109,6 +110,7 @@ enum class TokenCode
     LBRACKET,        // "["
     RBRACKET,        // "]"
     ATTRIBUTE_START, // "#[" (attributes, e.g. #[i_know = "..."])
+    ELLIPSIS,        // "..." — the variadic tail of an extern "C" declaration
 };
 
 // The length of all keywords
@@ -143,6 +145,7 @@ const std::array<std::string, KEYWORDS_LENGTH> keywords = {
     "continue",
     "enum",
     "match",
+    "extern",
     "i8",
     "i16",
     "i32",

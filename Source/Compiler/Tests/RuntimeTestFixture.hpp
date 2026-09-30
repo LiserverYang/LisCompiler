@@ -66,7 +66,7 @@ namespace
 /// longer auto-preloaded — selective imports promote the public API's bare
 /// names (the internal names stay `math$max` etc.).
 static const char *kStdlibPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr, PI, TWO_PI, HALF_PI, sqrt, floor, ceil, round, trunc, fract, cos, sin, tan };\n"
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr, PI, TWO_PI, HALF_PI, sqrt, floor, ceil, round, trunc, fract, cos, sin, tan, exp, log, log2, log10, pow, atan, atan2, asin, acos, sinh, cosh, tanh };\n"
     "impt hash { Hash };\n"
     "impt option { Option, is_some, is_none, unwrap_or, and, or };\n"
     "impt iterator { Iterator, Range, range, sum, count, first, last, nth, product };\n"
@@ -94,7 +94,7 @@ static const char *kResultPrologue =
     "impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };\n";
 
 static const char *kMathPrologue =
-    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr, PI, TWO_PI, HALF_PI, sqrt, floor, ceil, round, trunc, fract, cos, sin, tan };\n"
+    "impt math { min, max, clamp, abs, fabs, gcd, lcm, ipow, is_even, is_odd, sign, deg_to_rad, rad_to_deg, lerp, Numeric, Integer, Copy, Ord, Add, Sub, Mul, Div, Rem, PartialEq, PartialOrd, BitAnd, BitOr, BitXor, Shl, Shr, PI, TWO_PI, HALF_PI, sqrt, floor, ceil, round, trunc, fract, cos, sin, tan, exp, log, log2, log10, pow, atan, atan2, asin, acos, sinh, cosh, tanh };\n"
     "impt fmt { Display };\n"
     "impt io { print, println, flush, read_i32, read_i64, read_f64, read_word, read_line, read_rest, try_read_i32, try_read_i64, try_read_f64, try_read_word, try_read_line };\n";
 
@@ -175,6 +175,11 @@ protected:
     /// helper; it is not reset automatically (assign an empty vector to clear).
     std::vector<std::pair<std::string, std::string>> extraArgs;
 
+    /// Set by the FFI helpers below for one snippet: the fixture's stand-in for
+    /// the command line's --allow-ffi (the default, which the rest of the suite
+    /// pins, is DENIED).
+    bool ffiForThisTest_ = false;
+
     void TearDown() override
     {
         std::error_code ec;
@@ -212,6 +217,27 @@ protected:
             << diag;
     }
 
+    /// FFI variants: same as their plain counterparts, but with the capability
+    /// enabled for this snippet only (the command line spelling is --allow-ffi).
+    void expectRunFfi(const std::string &source, int expectedExit)
+    {
+        ffiForThisTest_ = true;
+        expectRun(source, expectedExit);
+        ffiForThisTest_ = false;
+    }
+    void expectOutputFfi(const std::string &source, const std::string &expectedOut, int expectedExit)
+    {
+        ffiForThisTest_ = true;
+        expectOutput(source, expectedOut, expectedExit);
+        ffiForThisTest_ = false;
+    }
+    void expectCompileFailFfi(const std::string &source, const std::string &fragment)
+    {
+        ffiForThisTest_ = true;
+        expectCompileFail(source, fragment);
+        ffiForThisTest_ = false;
+    }
+
     /// Compile `source` through the full pipeline to objPath. Returns false on
     /// any semantic error (diagnostics are logged to stdout by the Logger).
     /// The stdlib is NOT auto-preloaded; a prologue imports its public API
@@ -231,6 +257,10 @@ protected:
         // The real lstdlib is also the unsafe-core boundary: the stdlib modules
         // imported below are the only files allowed to use the heap primitives.
         context->stdLibDirs.push_back(stdLibDir.string());
+        // FFI is opt-in exactly like the command line's --allow-ffi: only the
+        // tests that ask for it may declare extern "C" (the rest of the suite
+        // pins the DEFAULT, which is denied).
+        context->ffiAllowed = ffiForThisTest_;
 
         // Main source (stdlib imports prepended).
         context->filePath = "test.lis";

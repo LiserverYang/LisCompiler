@@ -536,6 +536,19 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
 
     if (auto *move = std::get_if<MIRMove>(&s.callee))
     {
+        // An extern "C" call (2026-09-26): DECLARE the C symbol with the callee's
+        // own signature. This has to come BEFORE the function-pointer fallback
+        // below: an extern callee's place is function-TYPED (the HIR name-ref
+        // carries a FunctionType), so that branch would load a value that was
+        // never stored — the symbol is defined in another object file, not in a
+        // local slot.
+        if (s.isExtern)
+        {
+            callee = getOrDeclareExternFn(s.funcName,
+                std::dynamic_pointer_cast<FunctionType>(move->place.type));
+        }
+        else
+        {
         // Direct call by name (most common path): the callee temp holds the
         // function name and s.funcName is the real symbol.
         callee = context->module->getFunction(s.funcName);
@@ -557,9 +570,19 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                 callee = getOrDeclareFn(s.funcName);
             }
         }
+        }
     }
     else if (auto *copy = std::get_if<MIRCopy>(&s.callee))
     {
+        if (s.isExtern)
+        {
+            // Same as the MIRMove case: declare the C symbol, never treat the
+            // extern callee as a function-pointer value.
+            callee = getOrDeclareExternFn(s.funcName,
+                std::dynamic_pointer_cast<FunctionType>(copy->place.type));
+        }
+        else
+        {
         callee = context->module->getFunction(s.funcName);
         if (!callee)
         {
@@ -573,6 +596,7 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
             {
                 callee = getOrDeclareFn(s.funcName);
             }
+        }
         }
     }
 
@@ -983,7 +1007,14 @@ llvm::Value *LLVMIRBuilder::lowerConst(const MIRConst &c)
             const std::string &fnName = std::get<std::string>(c.value);
             if (llvm::Function *fn = context->module->getFunction(fnName))
                 return fn;
-            return getOrDeclareFn(fnName); // external — opaque declaration
+            // A function NAME used as a value. When the module does not define it,
+        // the symbol is external: an extern "C" declaration carries its real
+        // signature in the MIR const's type (declaring it opaquely here would
+        // settle the WRONG type into the module before the call is emitted, and
+        // LLVM keeps the first declaration).
+        if (auto ft = std::dynamic_pointer_cast<FunctionType>(c.type))
+            return getOrDeclareExternFn(fnName, ft);
+        return getOrDeclareFn(fnName); // external — opaque declaration
         }
         // Emit a null-terminated global string constant and return a pointer.
         const std::string &s = std::get<std::string>(c.value);
@@ -1188,6 +1219,27 @@ llvm::Function *LLVMIRBuilder::getOrDeclareDropGlue(const std::string &structNam
     func->setVisibility(llvm::GlobalValue::DefaultVisibility);
 
     return func;
+}
+
+// An extern "C" declaration (2026-09-26): the symbol is DEFINED elsewhere, so the
+// module gets a declaration built from the CALLER's signature — parameters,
+// return type AND the C variadic flag. getOrDeclareFn() below mints an opaque
+// `i8(...)` declaration, which is right for the compiler's own libc builtins
+// (they are called through dedicated emitters) but wrong for a typed FFI call.
+llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, const std::shared_ptr<FunctionType> &sig)
+{
+    if (auto *fn = context->module->getFunction(name))
+        return fn;
+    if (!sig)
+        return getOrDeclareFn(name);
+
+    std::vector<llvm::Type *> params;
+    params.reserve(sig->getParams().size());
+    for (const auto &p : sig->getParams())
+        params.push_back(semanticTypeToLLVM(p, ctx_));
+    llvm::Type *ret = semanticTypeToLLVM(sig->getReturnType(), ctx_);
+    llvm::FunctionType *fty = llvm::FunctionType::get(ret, params, /*isVarArg=*/sig->isVarArg());
+    return llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage, name, context->module.get());
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)

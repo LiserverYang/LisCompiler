@@ -89,6 +89,9 @@ protected:
      *  (marks every CastExpr in its expression tree, relaxing the
      *  integer-narrowing ERROR to a warning). */
     bool pendingIKnow_ = false;
+    /// `#[link_name = "..."]` seen by parseAttribute(), consumed by the next
+    /// extern declaration (empty = use the declaration's own name).
+    std::string pendingLinkName_;
 
     /**
      * Nesting budget for the recursive-descent functions.
@@ -361,7 +364,10 @@ protected:
     int getPrecedence(TokenCode type);
 
     /* Parser functions */
-    std::vector<std::unique_ptr<Param>> parseParameterList();
+    /// `isVariadic` (optional out-param) is set when the list ends with `...`.
+    std::vector<std::unique_ptr<Param>> parseParameterList(bool *isVariadic = nullptr);
+    /// `extern "C" fn ...;` — a C symbol declaration (no body).
+    std::unique_ptr<ASTNode> parseExternFunctionDeclaration();
     std::unique_ptr<ASTNode> parseGlobalStatement();
     std::unique_ptr<ImportStmt> parseImptStatement();
     std::unique_ptr<ModulePath> parseModulePath();

@@ -319,7 +319,16 @@ void HIRBuilder::visit(FunctionDef *node)
     auto result = std::make_unique<HIRFunction>();
     result->position = node->position;
     result->length = node->length;
-    result->name = internalName(currentModule_, node->name);
+    // An `extern "C"` declaration keeps its BARE name: it names a C symbol, not a
+    // Lis definition, so it must not be module-prefixed (codegen emits a call to
+    // exactly this name) and every module that declares it shares one symbol.
+    result->isExtern = node->isExtern;
+    result->cName = node->cName;
+    result->isVariadic = node->isVariadic;
+    // An extern "C" declaration keeps its DECLARATION name visible (bare, no
+    // module prefix — it names a C symbol shared by every module); the C SYMBOL
+    // it binds travels separately in `cName` (they differ under #[link_name]).
+    result->name = node->isExtern ? node->name : internalName(currentModule_, node->name);
     result->isMethod = false;
     result->isStatic = true;
     result->isTraitMethod = false;

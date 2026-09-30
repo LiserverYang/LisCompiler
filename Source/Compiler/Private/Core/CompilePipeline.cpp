@@ -41,6 +41,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--print-llvmir"}, setAsTrue, "false", "Print the parsed LLVM IR."});
     argParser->registRule(ArgParseRule{{"-o"}, setAsValue, "2", "The optimise level(0-3), default is 2."});
     argParser->registRule(ArgParseRule{{"-I"}, setAsValue, "", "Add module search path(s), ';'-separated (lisbuild packs include_dirs here)."});
+    argParser->registRule(ArgParseRule{{"--allow-ffi"}, setAsTrue, "false", "Allow extern C declarations (FFI) in user code. OFF by default: FFI can break every guarantee the language makes, so the standard library has it and the judge does not hand it to submissions."});
     argParser->registRule(ArgParseRule{{"--max-depth"},
         setAsValue,
         "256",
@@ -79,6 +80,11 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     passes.emplace_back(argParser.release());
     passes.emplace_back(std::make_unique<LambdaPass>(context, [](std::shared_ptr<Context> ctx)
         {
+            // The FFI capability is read HERE, not in the constructor above: the
+            // Argparser is itself a PASS, so argv is only parsed once that pass
+            // runs — reading it earlier always saw the default ("false").
+            ctx->ffiAllowed = ctx->args->getArg("allow_ffi") == "true";
+
             // this pass is to read file
             ctx->filePath = ctx->args->getArg("filePath");
             std::ifstream input{ctx->filePath, std::ios::binary};

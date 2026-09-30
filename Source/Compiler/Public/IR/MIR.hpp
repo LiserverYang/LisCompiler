@@ -223,6 +223,11 @@ struct MIRStmtCall
     // the concrete struct method; if the concrete type is a PRIMITIVE (no
     // method), it converts this call back into a direct binary op using `op`.
     std::optional<MIRRValueBinaryOp::Op> genericOpFallback;
+
+    /// An `extern "C"` callee (2026-09-26): `funcName` is a C symbol, so codegen
+    /// declares it with the signature of the callee place's FunctionType — not a
+    /// module function, not an indirect call through a loaded pointer.
+    bool isExtern = false;
 };
 
 struct MIRStmtDrop

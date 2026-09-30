@@ -168,6 +168,22 @@ std::shared_ptr<FunctionType> TypeContext::getFunction(std::vector<std::shared_p
     return functionType;
 }
 
+std::shared_ptr<FunctionType> TypeContext::getFunction(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType, bool isVarArg)
+{
+    if (!isVarArg)
+        return getFunction(std::move(params), std::move(returnType));
+
+    auto key = std::make_tuple(std::vector<std::shared_ptr<Type>>{}, params, returnType);
+    auto it = variadicFunctions.find(key);
+    if (it != variadicFunctions.end())
+        return it->second;
+
+    auto functionType = std::make_shared<FunctionType>(
+        std::vector<std::shared_ptr<Type>>{}, params, returnType, /*isVarArg=*/true);
+    variadicFunctions[key] = functionType;
+    return functionType;
+}
+
 std::shared_ptr<TraitType> TypeContext::createTrait(std::string name, std::vector<TraitType::Method> methods)
 {
     auto it = traits.find(name);

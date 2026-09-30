@@ -358,14 +358,26 @@ FunctionType::FunctionType(std::vector<std::shared_ptr<Type>> params,
 FunctionType::FunctionType(std::vector<std::shared_ptr<Type>> genericParams,
     std::vector<std::shared_ptr<Type>> params,
     std::shared_ptr<Type> returnType)
+    : FunctionType(std::move(genericParams), std::move(params), std::move(returnType), /*isVarArg=*/false) {}
+
+FunctionType::FunctionType(std::vector<std::shared_ptr<Type>> genericParams,
+    std::vector<std::shared_ptr<Type>> params,
+    std::shared_ptr<Type> returnType,
+    bool isVarArg)
     : Type(Kind::Function),
       genericParams(std::move(genericParams)),
       params(std::move(params)),
-      returnType(std::move(returnType)) {}
+      returnType(std::move(returnType)),
+      varArg(isVarArg) {}
 
 bool FunctionType::isGeneric() const
 {
     return !genericParams.empty();
+}
+
+bool FunctionType::isVarArg() const
+{
+    return varArg;
 }
 
 const std::vector<std::shared_ptr<Type>> &FunctionType::getParams() const
@@ -390,7 +402,8 @@ bool FunctionType::equals(const std::shared_ptr<Type> &other) const
     const auto &ft = static_cast<const FunctionType *>(other.get());
     return genericParams == ft->genericParams
            && params == ft->params
-           && returnType->equals(ft->returnType);
+           && returnType->equals(ft->returnType)
+           && varArg == ft->varArg;
 }
 
 std::string FunctionType::toString() const
@@ -411,6 +424,12 @@ std::string FunctionType::toString() const
     {
         str += params[i]->toString();
         if (i != params.size() - 1) str += ", ";
+    }
+    // A variadic signature reads as C does: the fixed prefix, then "...".
+    if (varArg)
+    {
+        if (!params.empty()) str += ", ";
+        str += "...";
     }
     str += ") -> " + returnType->toString();
     return str;

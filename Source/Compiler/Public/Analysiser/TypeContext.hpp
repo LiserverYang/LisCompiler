@@ -117,6 +117,9 @@ public:
         bool strict = false);
 
     std::shared_ptr<FunctionType> getFunction(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType);
+    /// A C variadic signature: the fixed prefix plus `...`. Interned separately,
+    /// so a variadic and a non-variadic function never alias.
+    std::shared_ptr<FunctionType> getFunction(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> returnType, bool isVarArg);
 
     std::shared_ptr<TraitType> createTrait(std::string name, std::vector<TraitType::Method> methods);
 
@@ -204,6 +207,8 @@ private:
     // same signature never collide (and two generic functions with different
     // generic-param lists don't alias either).
     std::unordered_map<std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>>, std::shared_ptr<FunctionType>, FuncHash> functions;
+    /// Same key, for `...` signatures (extern "C" declarations).
+    std::unordered_map<std::tuple<std::vector<std::shared_ptr<Type>>, std::vector<std::shared_ptr<Type>>, std::shared_ptr<Type>>, std::shared_ptr<FunctionType>, FuncHash> variadicFunctions;
     std::unordered_map<std::pair<void *, bool>, std::shared_ptr<ReferenceType>, RefHash> refCache;
     std::unordered_map<std::pair<void *, bool>, std::shared_ptr<PointerType>, RefHash> ptrCache;
     std::unordered_map<std::string, std::shared_ptr<TraitType>> traits;
