@@ -96,6 +96,29 @@ impl Vec
         ret self.cap;
     }
 
+    // ── ownership transfer (2026-09-26) ──────────────────────────────────────
+
+    // Hand the element buffer out (see String::into_raw). The Vec is left a valid
+    // EMPTY one: Drop destroys the elements it still owns and frees the buffer, so
+    // a receiver that kept pointing at the handed-out buffer would double-free.
+    fn into_raw(self: &mut Vec<T>) -> *mut T
+    {
+        let out = self.data;
+        self.data = __alloc<T>(0);
+        self.len = 0;
+        self.cap = 0;
+        self.cursor = 0;
+        ret out;
+    }
+
+    // Adopt a buffer of `cap` elements, `len` of which are initialized. The Vec
+    // owns the live range [0, len) from here: dropping it releases those elements
+    // through T's own destructor, exactly like a Vec the language built.
+    fn from_raw(data: *mut T, len: i32, cap: i32) -> Vec<T>
+    {
+        ret Vec { data: data, len: len, cap: cap, cursor: 0 };
+    }
+
     fn is_empty(self: &Vec) -> bool
     {
         ret self.len <= self.cursor;

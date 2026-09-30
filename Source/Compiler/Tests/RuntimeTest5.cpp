@@ -184,3 +184,124 @@ TEST_F(RuntimeTest, FfiVariadicBoolStillRejected)
                          "fn main() -> i32 { ret printf(\"%d\", true); }\n",
         "cannot cross the C boundary");
 }
+
+// ── ownership transfer: the buffer leaves the language and comes back ────────
+
+TEST_F(RuntimeTest, FfiStringOwnershipRoundTrip)
+{
+    // into_raw hands the buffer to C (which edits it in place and also returns a
+    // NEW malloc buffer); from_raw adopts either one. The source String is left a
+    // valid EMPTY one -- it is printed and dropped afterwards, which is the check
+    // that the handed-out buffer was not freed twice.
+    const std::string helper =
+        "#include <cstdint>\n"
+        "#include <cstdlib>\n"
+        "#include <cstring>\n"
+        "#include <cctype>\n"
+        "extern \"C\" void lis_upper(char* s) { for (; *s; ++s) *s = (char)toupper((unsigned char)*s); }\n"
+        "extern \"C\" char* lis_dup_reversed(const char* s) {\n"
+        "    size_t n = strlen(s);\n"
+        "    char* out = (char*)malloc(n + 1);\n"
+        "    for (size_t i = 0; i < n; ++i) out[i] = s[n - 1 - i];\n"
+        "    out[n] = 0;\n"
+        "    return out;\n"
+        "}\n";
+    // Exit code only: the CONTENT is asserted in the snippet itself, and a
+    // subprocess's stdout goes through the CRT's text mode (CRLF) on Windows.
+    expectRunWithSources(
+        "extern \"C\" fn lis_upper(s: *mut i8) -> void;\n"
+        // *mut i8 -> &i8 is deliberately NOT allowed (the narrowing direction of
+        // the FFI contract), so the C side is declared with the raw pointer it
+        // actually takes.
+        "extern \"C\" fn lis_dup_reversed(s: *mut i8) -> *mut i8;\n"
+        "fn main() -> i32 {\n"
+        "    let mut s = String::from_lit(\"hello\");\n"
+        "    let raw = s.into_raw();\n"
+        "    if s.len() != 0 { ret 1; }        // the source is a valid empty String\n"
+        "    lis_upper(raw);                   // C edits the buffer in place\n"
+        "    let back = String::from_raw(raw, 5, 6);\n"
+        "    if back.to_cstr() != \"HELLO\" { ret 2; }\n"
+        "    print(back.to_cstr()); println();\n"
+        "    let mut t = String::from_lit(\"abc\");\n"
+        "    let raw2 = t.into_raw();\n"
+        "    let rev = lis_dup_reversed(raw2);    // C returns a NEW buffer\n"
+        "    let reclaimed = String::from_raw(raw2, 3, 4);   // ... and we take ours back\n"
+        "    if reclaimed.len() != 3 { ret 3; }\n"
+        "    let rev_s = String::from_raw(rev, 3, 4);\n"
+        "    if rev_s.to_cstr() != \"cba\" { ret 4; }\n"
+        "    print(rev_s.to_cstr()); println();\n"
+        "    ret 0;\n"
+        "}\n",
+        {{"helper.cpp", helper}}, 0);
+}
+
+TEST_F(RuntimeTest, FfiVecOwnershipRoundTrip)
+{
+    const std::string helper =
+        "#include <cstdint>\n"
+        "#include <cstdlib>\n"
+        "extern \"C\" int64_t lis_sum(const int32_t* xs, int64_t n) {\n"
+        "    int64_t s = 0; for (int64_t i = 0; i < n; ++i) s += xs[i]; return s;\n"
+        "}\n"
+        "extern \"C\" int32_t* lis_iota(int64_t n) {\n"
+        "    int32_t* out = (int32_t*)malloc((size_t)n * sizeof(int32_t));\n"
+        "    for (int64_t i = 0; i < n; ++i) out[i] = (int32_t)i;\n"
+        "    return out;\n"
+        "}\n";
+    expectRunWithSources(
+        // The stdlib prologue promotes String but NOT Vec (its tests import it).
+        "impt vec { Vec };\n"
+        "extern \"C\" fn lis_sum(xs: *mut i32, n: i64) -> i64;\n"
+        "extern \"C\" fn lis_iota(n: i64) -> *mut i32;\n"
+        "fn main() -> i32 {\n"
+        "    let mut v = Vec<i32>::new();\n"
+        "    v.push(1); v.push(2); v.push(3);\n"
+        "    let cap = v.cap();\n"
+        "    let raw = v.into_raw();\n"
+        "    if v.len() != 0 { ret 1; }        // still a valid empty Vec\n"
+        "    if lis_sum(raw, 3 as i64) != 6 as i64 { ret 2; }\n"
+        "    let back = Vec<i32>::from_raw(raw, 3, cap);\n"
+        "    if back.len() != 3 { ret 3; }\n"
+        "    if back[2] != 3 { ret 4; }\n"
+        "    let p = lis_iota(5 as i64);       // a buffer C allocated\n"
+        "    let nums = Vec<i32>::from_raw(p, 5, 5);\n"
+        "    if nums.len() != 5 { ret 5; }\n"
+        "    if nums[0] != 0 { ret 6; }\n"
+        "    if nums[4] != 4 { ret 7; }\n"
+        "    ret 0;\n"
+        "}\n",
+        {{"helper.cpp", helper}}, 0);
+}
+
+// ── opaque handles: an empty struct is the only thing that can be one ────────
+
+TEST_F(RuntimeTest, FfiOpaqueHandleFileIo)
+{
+    // FILE* is the canonical opaque handle: the language never lays it out, it
+    // only carries the pointer. No C helper is needed -- these are CRT calls, so
+    // this runs through a real link (expectRunProcFfi).
+    expectRunProcFfi(
+        "struct File { }\n"
+        "extern \"C\" fn fopen(path: &i8, mode: &i8) -> *mut File;\n"
+        "extern \"C\" fn fputs(s: &i8, f: *mut File) -> i32;\n"
+        "extern \"C\" fn fgets(buf: *mut i8, n: i32, f: *mut File) -> *mut i8;\n"
+        "extern \"C\" fn fclose(f: *mut File) -> i32;\n"
+        "extern \"C\" fn remove(path: &i8) -> i32;\n"
+        "fn main() -> i32 {\n"
+        "    let path = \"lis_ffi_opaque.tmp\";\n"
+        "    let w = fopen(path, \"w\");\n"
+        "    if fputs(\"hello\\n\", w) < 0 { ret 1; }\n"
+        "    fclose(w);\n"
+        "    #[i_know = \"byte buffer for C\"]\n"
+        "    let mut buf: [i8; 16] = [(0 as i8); 16];\n"
+        "    let r = fopen(path, \"r\");\n"
+        // Raw pointers cannot be compared (there is no null literal either), so the
+        // READ result is checked by CONTENT through the C-string builtin.
+        "    fgets(&mut buf[0], 16, r);\n"
+        "    fclose(r);\n"
+        "    remove(path);\n"
+        "    if str_cmp(&buf[0], \"hello\\n\") != 0 { ret 2; }\n"
+        "    ret 0;\n"
+        "}\n",
+        0);
+}

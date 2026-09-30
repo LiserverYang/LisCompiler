@@ -650,6 +650,19 @@ protected:
         return code;
     }
 
+    /// expectRunProc with the FFI capability on (a real link, no C helper).
+    void expectRunProcFfi(const std::string &source, int expectedExit)
+    {
+        ffiForThisTest_ = true;
+        const bool ok = compile(source);
+        ffiForThisTest_ = false;
+        ASSERT_TRUE(ok) << "compilation failed:\n"
+                        << source;
+        const int code = linkAndRun();
+        EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch for:\n"
+                                      << source;
+    }
+
     /// expectRun with extra C/C++ sources (see compileLinkRunWithSources).
     void expectRunWithSources(const std::string &source,
         const std::vector<std::pair<std::string, std::string>> &extraSources, int expectedExit)

@@ -150,6 +150,38 @@ impl String
     {
         ret self.cap;
     }
+
+    // ── ownership transfer (2026-09-26) ──────────────────────────────────────
+    //
+    // The two ends of a buffer leaving and re-entering the language. Nothing here
+    // is checked for you: after into_raw the C side owns the buffer, and from_raw
+    // adopts whatever pointer it is given (it must be a Lis allocation, or one C
+    // filled for exactly this purpose).
+
+    // Hand the buffer out. Ownership leaves the language: it comes back either
+    // through from_raw below, or by C releasing it (free(), or lis_free() once
+    // stdlib ffi is imported on the C side).
+    //
+    // The String itself is left a VALID EMPTY one rather than forgotten: Drop
+    // frees `data` unconditionally, so a receiver still pointing at the buffer we
+    // just handed out would free it a second time.
+    fn into_raw(self: &mut String) -> *mut i8
+    {
+        let out = self.data;
+        let fresh = __alloc(16);
+        fresh[0] = '\0' as i8;
+        self.data = fresh;
+        self.len = 0;
+        self.cap = 16;
+        ret out;
+    }
+
+    // Adopt a buffer: `len` bytes plus the NUL terminator, allocated with room for
+    // `cap` bytes. The String owns it from here, exactly as if it had built it.
+    fn from_raw(data: *mut i8, len: i32, cap: i32) -> String
+    {
+        ret String { data: data, len: len, cap: cap };
+    }
 }
 
 impl Drop for String
