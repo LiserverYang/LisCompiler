@@ -102,6 +102,18 @@ print(floor(sqrt(2.0) * 100.0));   // 141.000000
 可以作为数组元素、可以按值反复使用。字段必须全部 Copy，且不能同时实现 `Drop`。
 见[类型系统](./types.md)。
 
+## 所有权转移与 FFI 模块（2026-09-26）
+
+| API | 说明 |
+|---|---|
+| `String::into_raw(&mut self) -> *mut i8` | 把缓冲区交给 C；源 String 变成合法的空串（Drop 仍安全） |
+| `String::from_raw(data, len, cap) -> String` | 收养一个缓冲区（`cap` 含 NUL） |
+| `Vec<T>::into_raw(&mut self) -> *mut T` | 交出元素缓冲区；源 Vec 变成合法的空 Vec |
+| `Vec<T>::from_raw(data, len, cap) -> Vec<T>` | 收养；存活区间 `[0, len)`，析构按 T 自己的析构函数释放 |
+| `impt ffi` 的 `lis_alloc(i32) -> *mut i8` / `lis_free(*mut i8)` | 给 C 用的分配器对（导出符号） |
+
+细节与契约见 [FFI](./ffi.md)。
+
 ## Vec 的容量 API
 
 | 方法 | 说明 |
