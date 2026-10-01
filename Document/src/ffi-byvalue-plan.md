@@ -4,7 +4,7 @@
 > datalayout，~Context::targetTriple~ / ~Context::dataLayout~ 可直接用于分类；
 > ~#[repr(C, packed)]~ 已落地并已把「真正创建结构体类型的地方」钉准。
 
-## 1. 现状（2026-09-26 实测）
+## 1. 现状（实测）
 
 - 我们的 IR 把结构体类型直接写进调用：~call i32 @nested_val(%Nested %load)~。
 - clang 会在 **IR 层**做 ABI 强制转换：~call i32 @nested_val(i64 %6)~（8 字节）与

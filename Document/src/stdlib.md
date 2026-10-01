@@ -7,7 +7,7 @@
 （见[声明](./declarations.md)的模块与导入节）。类型名大写开头（2026-08 命名规范）。
 
 ```lis
-impt io { print, println, read_i32, read_line };   // 输入输出（2026-09-25）
+impt io { print, println, read_i32, read_line };   // 输入输出
 impt fmt { Display };                              // 想给自己的类型实现打印时才需要
 impt math { max, abs };
 impt option { Option, unwrap_or };
@@ -28,7 +28,7 @@ vec 导入 math/option/iterator/drop；io 导入 fmt/string/option）—— 只�
 > 「selective import conflicts with an existing name」——这是既有的冲突规则，不是 bug。
 > 需要同时用两个时，用整模块导入 + 限定名：`impt result;` 然后 `result::unwrap_or(...)`。
 
-## io —— 输入输出（2026-09-25）
+## io —— 输入输出
 
 `print_*` / `read_*` 那一族编译器内置函数**已全部退役**：io 是普通 Lis 模块，编译器只提供
 字节流原语（`__read_byte`/`__write`/`__flush`，stdlib 专用）与原语 `Display` 的下降。
@@ -73,7 +73,7 @@ print(Point { x: 1, y: 2 });   // 1,2
 它：`print(s); print(s);` 对 `String` 是 use-after-move。要重复打印就打印借用出来的 C 串：
 `print(s.to_cstr())`（`&i8` 是 Copy）。
 
-## math 的浮点函数（2026-09-26）
+## math 的浮点函数
 
 两类实现：**手写**的（`sqrt` 归一化 + 牛顿、`cos/sin/tan` 区间归约 + 12 项泰勒、取整族）与
 **libm 绑定**的（`exp/log/pow/...`：`extern "C"` + `#[link_name]`，见 [FFI](./ffi.md)）。
@@ -98,11 +98,11 @@ print(floor(sqrt(2.0) * 100.0));   // 141.000000
 
 ## `Copy`（`impl Copy for S {}`）
 
-`math` 里的 `Copy` 是**真的语义标记**（2026-09-26）：实现它的类型获得原语般的复制语义，
+`math` 里的 `Copy` 是**真的语义标记**：实现它的类型获得原语般的复制语义，
 可以作为数组元素、可以按值反复使用。字段必须全部 Copy，且不能同时实现 `Drop`。
 见[类型系统](./types.md)。
 
-## 所有权转移与 FFI 模块（2026-09-26）
+## 所有权转移与 FFI 模块
 
 | API | 说明 |
 |---|---|
@@ -125,7 +125,7 @@ print(floor(sqrt(2.0) * 100.0));   // 141.000000
 `with_capacity` 仍缺失：扩容需要**类型级**的元素大小，而 `__sizeof` 需要一个 T 的值；
 `from_elem` 已覆盖"开一块 n 元素缓冲"的实际需要。
 
-## Map / Set —— 红黑树有序容器（2026-09-26）
+## Map / Set —— 红黑树有序容器
 
 ```lis
 impt map { Map };            // Set 在 set.lis：impt set { Set };
@@ -160,7 +160,7 @@ for e in m { print(*e.key); }              // 12 —— 迭代按**键升序**
 - **没有按值 get**：按值交出只有 Copy 元素才安全，而这个约束**无法表达**（方法/自由函数上的
   bound 到不了 arena 的元素类型）。Copy 值用 `*m.get_ref(&k).unwrap()`，非 Copy 值用
   `get_ref` / `remove`。
-- `get_ref` 返回的借用**被借用检查追踪**（2026-10-01）：`insert`（扩容）/ `remove` 与它冲突即 E4001。
+- `get_ref` 返回的借用**被借用检查追踪**：`insert`（扩容）/ `remove` 与它冲突即 E4001。
 - **键唯一：Map 不是多重集**。序统计数的是**键**。要「多重集 + 排名/第 k 小」，用竞赛标准技巧 ——
   每次出现给唯一 id，键取 `(值, id)` 按字典序比较：
 
@@ -186,7 +186,7 @@ for e in m { print(*e.key); }              // 12 —— 迭代按**键升序**
 `Set<K>` 是同一棵树上的薄包装（值槽放 bool）：`insert(k) -> bool`（true = 之前不在）、
 `contains` / `remove(&k) -> bool` / `len` / `is_empty` / `clear` / `iter` / `check_invariants`。
 
-## HashMap / HashSet —— 链式哈希表（2026-09-26）
+## HashMap / HashSet —— 链式哈希表
 
 ```lis
 impt hashmap { HashMap, HashSet };   // HashSet 也在 hashmap.lis 里
@@ -259,7 +259,7 @@ struct Range { pub start: i32, pub end: i32, pub current: i32 }
 
 - `range(start, end)`：半开区间 `[start, end)`。
 - 泛型助手（`T: Iterator<i32>`）：`sum` `count` `first` `last` `nth` `product`。
-- `Vec<T>` 的**借用迭代器**（2026-09-19）：`struct VecIter<T> { pub src: &Vec<T>, pub pos: i32 }`
+- `Vec<T>` 的**借用迭代器**：`struct VecIter<T> { pub src: &Vec<T>, pub pos: i32 }`
   与 `impl<T> Iterator<&T> for VecIter<T>`；`v.iter()` 返回它。注意 `Iterator<T>` 的 `T` 是
   **迭代步交出的类型**，所以这里是 `Iterator<&T>`——每步给一个元素引用。
 - `for x in iterable { }` 的协议（借用/`move`/右值三种形态）：见[语句](./statements.md)的 for 节。
@@ -292,7 +292,7 @@ struct String
   只有 `String` 自己的方法能保证；读长度/容量用 `len()` / `cap()`。
   字段可见性由编译器强制（E3015），不是约定。
 - String 是**字节串**：中文按 UTF-8 字节计数（`len` 是字节数）。
-- `to_cstr` 的返回借用编译器不追踪——调用方必须保证 owner 存活。
+- `to_cstr` 的返回借用**会被追踪**：owner 被 move，或 `push_char`/`push_str` 扩容，都直接报错。
 - OOM 不检查。
 
 ## Vec
@@ -303,7 +303,7 @@ trait IndexMut<T> { fn set(self: &mut Self, i: i32, v: T); }
 struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全私有
 ```
 
-**元素可以是任意类型**（2026-09-19 起）：Copy 元素能被按值读出（`v[i]`、`get`），
+**元素可以是任意类型**：Copy 元素能被按值读出（`v[i]`、`get`），
 其余元素只能**移动**进出容器（`push`/`pop`/`remove`/`insert`/`for`）或被**出借**
 （`at_ref`/`at_mut`）。容器自己拥有的元素会被析构——`clear` 与 `Drop` ——**每个恰好一次**。
 
@@ -334,14 +334,14 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
   `type 'string$String' does not implement trait 'Copy' required by 'vec$Vec::at'`
   （impl 上写的泛型约束现在真的会被检查）。非 Copy 容器请用 `at_ref`/`at_mut` 或
   `pop`/`remove`/`for`。
-- **`at_ref`/`at_mut` 的借用被追踪**（2026-10-01）：拿到引用后，这个 Vec 在它的最后一次
+- **`at_ref`/`at_mut` 的借用被追踪**：拿到引用后，这个 Vec 在它的最后一次
   使用之前保持借用，`push`/`insert`（会 `__free` 旧缓冲）与它冲突即 E4001。
 - **`for` 的正序与游标**：`next()` 把元素移出，Vec 内部记下「已移出的前缀」；容器只拥有
   该前缀之后的元素，所以 `len()`、下标、`pop`/`remove` 都相对**存活区间**解释，
   `Drop`/`clear` 也只析构这一段——被移出的元素不会被析构第二次。
-- **遍历**（2026-09-19）：`for e in v` 借用（`e: &T`，循环结束后容器可用，但循环体内
+- **遍历**：`for e in v` 借用（`e: &T`，循环结束后容器可用，但循环体内
   不能改动容器——扩容会释放迭代器指着的缓冲，报 E4001）；`for e in move v` 消费（`e: T`）。
-- **`iter_mut()`（2026-09-19 同日落地）**：`VecIterMut<T>` 每步交出 `&mut T`，可以就地改元素：
+- **`iter_mut()`**：`VecIterMut<T>` 每步交出 `&mut T`，可以就地改元素：
   `for r in v.iter_mut() { *r = *r + 1; }`。这是把借用检查下放到 MIR（按 CFG 数据流算活跃
   区间）之后才成立的 API——在此之前「从 `self` 派生并返回 `&mut`」会被 E4001/E3002 误拒，
   文档只能建议写 `while i < v.len() { v[i] = ...; }` 下标循环。
@@ -352,7 +352,7 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
 
 - marker/算子 trait：`Numeric` `Integer` `Add` `Sub` `Mul` `Div` `Rem` `PartialEq`
   `PartialOrd` `BitAnd` `BitOr` `BitXor` `Shl` `Shr`（见[运算符](./operators.md)）。
-- `Copy`（2026-09-19）：**空 marker trait**，声明「这个类型可以按位复制」。泛型容器用它
+- `Copy`：**空 marker trait**，声明「这个类型可以按位复制」。泛型容器用它
   写约束（`impl<T: Copy> Index<T> for Vec<T>`），于是泛型体里读一个 `T` 字段不再被判成
   「从引用后移动」（E3017），并按值交出元素也只对 Copy 类型开放。原语（整数/浮点/char/bool）
   在语义分析里被**播种**为自动实现 `Copy`，用户类型要显式 `impl Copy for X { }`。
@@ -367,7 +367,7 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
 
 ## 作用域与撞名
 
-模块系统（2026-08-13）根治了旧的「单作用域合并」限制：标准库各模块有独立命名空间，
+模块系统根治了旧的「单作用域合并」限制：标准库各模块有独立命名空间，
 用户全局名不再与标准库内部名撞。若用户**显式选择性导入**的名字与自己的定义同名，
 会报「selective import conflicts with an existing name」—— 这是冲突提示而非误报
 （自己定义的名字优先，去掉该 import 即可）。

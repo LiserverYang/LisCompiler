@@ -6,13 +6,13 @@
 （`malloc`/`free`/`memcpy`/`strlen`/`strcmp`/`sprintf`/`printf`/`fgets`/`strcspn`/
 `atoi`/`strtod`/`abort`/`fprintf`）会被拒绝（「function name 'X' is reserved by the compiler」）。
 
-> **打印与读取不在这个列表里了（2026-09-25）**。`print`/`println`/`flush` 与 `read_*` 现在是
+> **打印与读取不在这个列表里了**。`print`/`println`/`flush` 与 `read_*` 现在是
 > **标准库 `io` 模块里的普通函数**（`Source/Std/io.lis`），`Display` 在 `fmt` 模块里。
 > 编译器只为它们提供**字节流原语**（`__read_byte`/`__write`/`__flush`）与原语的 `Display`
 > 下降，词法/数字解析/分行/格式化策略全部是 Lis 代码。见[内置 IO 原语](#内置-io-原语-read_byte--write--flush)
 > 与[标准库](./stdlib.md)。
 >
-> **保留名有一个例外（2026-09-26）**：`extern "C"` 声明就是要绑定 libc 名，所以
+> **保留名有一个例外**：`extern "C"` 声明就是要绑定 libc 名，所以
 > `extern "C" fn strlen(...)` 合法（`fn strlen(...)` 仍然拒绝）。FFI 默认关闭，
 > 用户代码要加 `--allow-ffi`；标准库自己可以（`math.lis` 的 libm 绑定）。
 > 见 [FFI：调用 C](./ffi.md)。
@@ -29,7 +29,7 @@
 反过来，**声明返回 `never` 的函数必须发散**：函数体里必须至少有一个发散调用（直接或间接
 调用 `panic`），否则编译期报错。
 
-注意：`abort()` 自己**不会刷新 stdio**，所以 panic 路径会先显式 `fflush(stdout)`（2026-09-25）：
+注意：`abort()` 自己**不会刷新 stdio**，所以 panic 路径会先显式 `fflush(stdout)`：
 崩溃之前打印的内容不会丢。数组越界（`idx_oob`）与 `assert_fail` 同理。
 
 ## 断言 assert
@@ -60,7 +60,7 @@ assert(str_len(line) > 0, "empty input");
 `String::from_lit` 复制一份。两个字符串字面量之间的 `==` / `!=` 会下降为 `str_cmp(a, b) == 0`
 （见[表达式](./expression.md)），无需显式调用。
 
-## 输出与输入：io 模块（2026-09-25）
+## 输出与输入：io 模块
 
 `print_*` / `read_*` 一系列内置函数**已全部退役**。打印与读取现在是标准库 `io` 模块
 （`Source/Std/io.lis`）里的普通 Lis 函数，编译器只提供下面的字节流原语与原语 `Display`
@@ -120,7 +120,7 @@ let s = read_line();                        // -> String，当前行的剩余部
 | `__deref(p: *T) -> &T` | 把只读裸指针变成共享引用（stdlib 专用） | |
 | `__deref_mut(p: *mut T) -> &mut T` | 把可写裸指针变成可变引用（stdlib 专用） | |
 
-**带类型的 `__alloc<T>`（2026-09-19）**：标准库容器需要一块「指向 T 的堆缓冲」，
+**带类型的 `__alloc<T>`**：标准库容器需要一块「指向 T 的堆缓冲」，
 而 `*mut i8` 无法索引出 T。`__alloc<T>(n)` 生成的仍是 `malloc(n)`（`n` 是**字节**，
 由调用方用 `__sizeof(v) * count` 算），但返回 `*mut T`，于是 `p[i]` 得到干净的
 `getelementptr T`。T 可以是尚未确定的泛型参数（`*mut T` 在单态化时才落地），
@@ -129,7 +129,7 @@ let s = read_line();                        // -> String，当前行的剩余部
 `__sizeof(v)` 不移动 `v`；泛型体内没有 T 的值可用时，就把大小**从调用点传进来**
 （`Vec::push` 的 `grow(__sizeof(v))` 就是这么写的）。
 
-**`__drop(x)`（2026-09-19）**：参数是一个**位置**（变量/字段/下标/解引用），语义是
+**`__drop(x)`**：参数是一个**位置**（变量/字段/下标/解引用），语义是
 「现在析构这个位置上的值，并把它当作已被移出」。下降就是编译器内部作用域末端的
 `MIRStmtDrop`（局部的运行时 drop flag、部分移动分解、动态 drop 全部照旧），因此之后
 作用域末端的清理不会再析构它一次；对**不需要析构**的类型（所有原语）它一条指令都不发。
