@@ -30,7 +30,7 @@
 /// never drift apart when a new builtin is added.
 enum class BuiltinCategory
 {
-    // NOTE (2026-09-25): the print_* / read_* families are GONE. Printing and
+    // NOTE: the print_* / read_* families are GONE. Printing and
     // reading are ordinary Lis code in Source/Std/io.lis -- print / println /
     // flush and the read_* readers -- built on the IO primitives below plus the
     // Display lowering for the primitives. The compiler no longer knows those

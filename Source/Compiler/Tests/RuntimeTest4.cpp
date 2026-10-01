@@ -417,7 +417,7 @@ TEST_F(RuntimeTest, BitOrAssociativity)
     expectRun("fn main() -> i32 { ret 1 | 2 | 4; }", 7);
 }
 
-// ── `^` (XOR): the infix operator added 2026-09-19 ─────────────────────────────
+// ── `^` (XOR): the infix operator added ─────────────────────────────
 
 TEST_F(RuntimeTest, XorBasic)
 {
@@ -977,7 +977,7 @@ TEST_F(RuntimeTest, GenericDoubleParam)
 
 TEST_F(RuntimeTest, GenericFunctionOnI64)
 {
-    // `T: Copy` because `x + x` consumes a by-value operand twice (2026-09-19).
+    // `T: Copy` because `x + x` consumes a by-value operand twice.
     expectRun("fn dbl<T: Numeric + Copy>(x: T) -> T { ret x + x; }"
               " fn main() -> i64 { let a = 4 as i64; ret dbl(a); }",
         8);
@@ -1533,7 +1533,7 @@ TEST_F(RuntimeTest, VecSetOutOfBoundsAborts)
         "Vec::set index out of bounds");
 }
 
-// ── Vec of NON-Copy elements (2026-09-19) ─────────────────────────────────────
+// ── Vec of NON-Copy elements ─────────────────────────────────────
 //
 // `Vec<T>` has no Copy bound: elements may own heap buffers (String, another
 // Vec, a user struct with a Drop impl). The container destroys the elements it
@@ -1787,7 +1787,7 @@ TEST_F(RuntimeTest, ExampleVec)
     expectExample("vec", 0);
 }
 
-// ── condition / scrutinee temporaries end with the condition (2026-09-19) ──────
+// ── condition / scrutinee temporaries end with the condition ──────
 //
 // A method receiver is only RESERVED while the call is set up (two-phase), and a
 // reservation is not relaxed for a write. A condition (or a match scrutinee) is
@@ -1828,7 +1828,7 @@ TEST_F(RuntimeTest, MatchScrutineeReservationEndsBeforeTheArms)
         0);
 }
 
-// ── unary value operators: - ! ~ + (2026-09-19) ──────────────────────────────
+// ── unary value operators: - ! ~ + ──────────────────────────────
 //
 // '-' is defined on the numeric primitives, '!' on bool, '~' on the integers;
 // '+x' is parsed and erased. None of them is overloadable yet (a Neg/Not trait
@@ -1924,7 +1924,7 @@ TEST_F(RuntimeTest, UnaryOperandTypesRejected)
         "operator '-' cannot be applied to type 'char'");
 }
 
-// ── compound assignment: x op= y (2026-09-19) ────────────────────────────────
+// ── compound assignment: x op= y ────────────────────────────────
 //
 // 'x op= y' means 'x = x op y' with the target place evaluated ONCE. The
 // operand rules are the binary operator's, restricted to what lowers to a
@@ -2010,7 +2010,7 @@ TEST_F(RuntimeTest, CompoundAssignRejectedShapes)
         "operands of '+=' must have the same type");
 }
 
-// ── for: borrow by default, consume with move (2026-09-19) ───────────────────
+// ── for: borrow by default, consume with move ───────────────────
 //
 // 'for x in <place>' lends the collection - the loop walks it through iter()
 // and each step hands out &T - while 'for x in move <place>' consumes it and
@@ -2126,14 +2126,14 @@ TEST_F(RuntimeTest, ForNamedPureIteratorNeedsMove)
         "has no method 'iter'");
 }
 
-// ── let ... else (2026-09-19) ────────────────────────────────────────────────
+// ── let ... else ────────────────────────────────────────────────
 //
 // 'let x = f() else fallback;' binds the payload of an Option/Result and runs
 // the fallback expression on the None/Err path. The fallback must have the
 // payload's type (a diverging one is compatible through never).
 
 // 'let x = maybe() else fallback;' binds the Some payload, or falls back on None.
-// ── iter_mut: the API the CFG-based borrow checker unblocked (2026-09-19) ─────
+// ── iter_mut: the API the CFG-based borrow checker unblocked ─────
 //
 // A `&mut T` derived from `self` and RETURNED from a method used to be rejected
 // (E4001/E3002 by the tree-based checker), so the standard library had no
@@ -2514,7 +2514,7 @@ TEST_F(RuntimeTest, HashMapKeyWithoutHashRejected)
         "does not implement trait");
 }
 
-// ── order statistics on the ordered Map (2026-09-26) ─────────────────────────
+// ── order statistics on the ordered Map ─────────────────────────
 // count_less/rank/kth/pred/succ are one O(log n) descent over the subtree sizes
 // the rotations maintain; check_invariants() verifies those sizes too.
 
@@ -2638,7 +2638,7 @@ TEST_F(RuntimeTest, ExampleBalancedTree)
     EXPECT_EQ(normalized, "106465\n84185\n492737\n");
 }
 
-// ── FFI: extern "C" declarations (2026-09-26) ───────────────────────────────
+// ── FFI: extern "C" declarations ───────────────────────────────
 //
 // FFI is OPT-IN: the fixture's default (like the judge's) is denied, so only the
 // *Ffi helpers below enable it. Every positive test therefore also documents the

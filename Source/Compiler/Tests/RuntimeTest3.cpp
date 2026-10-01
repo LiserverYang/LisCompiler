@@ -91,7 +91,7 @@ TEST_F(RuntimeTest, PrintFloatAndBool)
 
 TEST_F(RuntimeTest, MathSqrt)
 {
-    // New in 2026-09-26: math had no sqrt (and no way at all to get an integer
+    // New: math had no sqrt (and no way at all to get an integer
     // out of an f64 until the float->int cast landed).
     expectOutput("fn main() -> i32 { print(sqrt(2.0)); ret 0; }", "1.414214", 0);
     expectOutput("fn main() -> i32 { print(sqrt(2.0) * sqrt(2.0)); ret 0; }", "2.000000", 0);
@@ -293,7 +293,7 @@ TEST_F(RuntimeTest, ArrayInBoundsNoAbort)
         6);
 }
 
-// ── 2026-08-12 spec decisions ────────────────────────────────────────────
+// ── spec decisions ────────────────────────────────────────────
 // 1. Default parameter values (`a: i32 = 5`) were dead syntax (parsed then
 //    ignored by every later pass) — removed; must now be a parse error.
 TEST_F(RuntimeTest, DefaultParameterValuesRejected)
@@ -814,7 +814,7 @@ TEST_F(RuntimeTest, FailedMemberAccessReportsNoCascade)
 
 // ── E0509: a field cannot leave a type that implements Drop ────────────────────
 //
-// Language decision (2026-09-15): follow Rust. The type's own destructor
+// Language decision: follow Rust. The type's own destructor
 // releases its fields as a whole, so a partially-initialized value would either
 // skip that destructor or hand it memory it must not touch (and the moved field
 // would be released twice).
@@ -866,7 +866,7 @@ TEST_F(RuntimeTest, DiscardedFieldOutOfDropTypeRejected)
                       " fn main() -> i32 { let p = P { a: A { v: 1 } }; p.a; ret 0; }",
         "implements Drop");
 }
-// ── Four language pain points, fixed 2026-09-18 ────────────────────────────────
+// ── Four language pain points, fixed ────────────────────────────────
 //
 // (1) a method body may call a SIBLING method — the impl's signatures are now
 //     attached to the type before any body is analyzed (pass 1c-3);
@@ -1246,7 +1246,7 @@ TEST_F(RuntimeTest, NestingLimitIsConfigurable)
 }
 TEST_F(RuntimeTest, MoveOutOfReferenceRejected)
 {
-    // Rust's E0507 (language decision 2026-09-15): a field cannot be moved out
+    // Rust's E0507 (language decision): a field cannot be moved out
     // of a place the function only borrows. The borrow owns nothing, so the
     // value would go to the receiver while the referent keeps releasing it —
     // two owners of one buffer. Measured before the rule: heap corruption
@@ -1310,7 +1310,7 @@ TEST_F(RuntimeTest, ConditionalMoveKeepsDropFlagCorrect)
     // drop FLAG decides, not a static "was it moved" answer (0 = dropped twice,
     // 2 = dropped never). The old form of this test observed the drop through a
     // raw pointer into the value's buffer -- an alias the checker could not see,
-    // which is why it used to print freed memory (and, since 2026-10-01, is
+    // which is why it used to print freed memory (and is now
     // REJECTED: see ToCstrBorrowIsTracked below). The drop itself is what is
     // observed now, through a scope that ends before main reads the counter.
     expectRun("let g = 0;"
@@ -1320,7 +1320,7 @@ TEST_F(RuntimeTest, ConditionalMoveKeepsDropFlagCorrect)
         1);
 }
 
-// ── returned borrows are tracked (2026-10-01) ────────────────────────────────
+// ── returned borrows are tracked ────────────────────────────────
 //
 // `to_cstr`/`at_ref`/`get_ref`/`at_mut` return a borrow OF THE RECEIVER. Until
 // this landed the result was untracked: the receiver's own borrow ended with the
@@ -1408,7 +1408,7 @@ TEST_F(RuntimeTest, StringIndexEachPosition)
         97 + 99);
 }
 
-// ── a by-value CARRIER moves the borrow with the value (2026-10-01, step 2) ───
+// ── a by-value CARRIER moves the borrow with the value (step 2) ───
 //
 // `get_ref` hands back an `Option<&V>`; `unwrap` takes that Option BY VALUE and
 // gives back the `&V` inside it. The reference that flows from the source into
@@ -2251,7 +2251,7 @@ TEST_F(RuntimeTest, GenericComparisonRetargetsToTheStructMethod)
         1);
 }
 
-// ── libm bindings (2026-09-26) ──────────────────────────────────────────────
+// ── libm bindings ──────────────────────────────────────────────
 // math.exp/log/pow/... are extern "C" calls now (the stdlib is inside the FFI
 // capability). The hand-written cos/sin above are the ORACLE for the binding:
 // MathLibmMatchesTaylor compares the two implementations.

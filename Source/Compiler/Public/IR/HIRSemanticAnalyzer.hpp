@@ -394,7 +394,7 @@ public:
     virtual void visit(HIRImpl *node) override;
     virtual void visit(HIRFunction *node) override;
 
-    /// FFI (2026-09-26): the C boundary is the one place the compiler cannot
+    /// FFI: the C boundary is the one place the compiler cannot
     /// verify, so an extern declaration is fenced by a capability (stdlib or
     /// --allow-ffi), a type whitelist, and one signature per C symbol.
     void analyzeExternDeclaration(HIRFunction *f, const std::vector<std::shared_ptr<Type>> &paramTypes);

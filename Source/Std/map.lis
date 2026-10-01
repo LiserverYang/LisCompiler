@@ -350,7 +350,7 @@ impl Map
     }
 
     // Insert or REPLACE. Returns the previous value when the key was present.
-    // ── order statistics (2026-09-26) ─────────────────────────────────────────
+    // ── order statistics ─────────────────────────────────────────
     // A balanced-tree template problem (insert / delete / rank / k-th /
     // predecessor / successor) needs these; before them the only way to reach the
     // i-th entry was walking the iterator, which is O(n) per query and dies on

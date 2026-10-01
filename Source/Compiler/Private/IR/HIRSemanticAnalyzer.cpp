@@ -240,7 +240,7 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
     // the pointee, and the generic-instantiation path below (which is about
     // `Foo<T>` naming a CustomType) must never see a pointer. Returning early is
     // safe because a pointer never carries genericArgs of its own.
-    // Function type "fn(A, B) -> R" (2026-09-26): a CALLBACK signature. Resolved
+    // Function type "fn(A, B) -> R": a CALLBACK signature. Resolved
     // before the generic path below for the same reason pointers are -- it names
     // no CustomType.
     if (raw.isFunction)
@@ -644,7 +644,7 @@ void HIRSemanticAnalyzer::preRegister(HIRNode *item)
         // A user/stdlib fn named like a builtin or a libc symbol would be silently
         // shadowed by the compiler's call-site interception (builtins) or collide
         // with codegen's external declaration (libc). Reject it.
-        // An extern "C" DECLARATION is the one exception (2026-09-26): binding a
+        // An extern "C" DECLARATION is the one exception: binding a
         // libc name is its entire purpose, and it is gated by E3019 in pass 2.
         if (!f->isExtern && isReservedFunctionName(displayName(f->name)))
         {
@@ -1755,7 +1755,7 @@ void HIRSemanticAnalyzer::visit(HIRStruct *node)
     sym->type = buildStructType(node);
     node->structSymbol = sym;
 
-    // #[repr(C)] validation (2026-09-26): the promise is only believable when
+    // #[repr(C)] validation: the promise is only believable when
     // every field is something C could also declare at that offset. Reported here
     // (pass 2, unsuppressed) and once per declaration; the flag itself was set by
     // buildStructType, so an extern signature checked earlier in this pass still
@@ -1872,10 +1872,10 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
     //   Copy : every primitive (a generic container needs `T: Copy` to be able
     //          to read an element through a reference at all — see
     //          Type::isCopyable).
-    //   Ord  : like PartialOrd (2026-09-20) — a total order, used as the key
+    //   Ord  : like PartialOrd — a total order, used as the key
     //          bound of the ordered containers. Unlike Numeric/Integer it is
     //          NOT primitives-only: a struct opts in with an empty impl.
-    //   Hash : i32 ONLY (2026-09-20). The generic body's `k.hash()` is lowered
+    //   Hash : i32 ONLY. The generic body's `k.hash()` is lowered
     //          for a primitive in MIRMonomorphization (see the lowering table
     //          there); that lowering multiplies by an i32 constant, so any wider
     //          key would need a cast it does not emit yet.
@@ -1924,7 +1924,7 @@ void HIRSemanticAnalyzer::visit(HIRTrait *node)
         if (isHash)
             seed(PrimitiveType::PrimKind::I32);
 
-        // Display (2026-09-25): every primitive prints itself, and so does '&i8',
+        // Display: every primitive prints itself, and so does '&i8',
         // the language's C-string spelling. A primitive cannot carry a method
         // body, so the implementation is a backend lowering keyed by the concrete
         // type (see the __show_* retarget in MIRMonomorphization); this seed is
@@ -2186,7 +2186,7 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
                 log(*node, "method '" + tm.name + "' static modifier mismatch.");
         }
 
-        // ── `Copy` / `Drop` are real semantic markers (2026-09-26) ─────────────
+        // ── `Copy` / `Drop` are real semantic markers ─────────────
         // `impl Copy for P {}` makes Type::isCopyable() true for P (see
         // Type.cpp), which is what gives a plain-data struct primitive-like copy
         // semantics — `[P; N]` arrays, reading it out of a container twice,
@@ -2580,7 +2580,7 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         initType = node->init.value()->type;
         initFailed = !initType;
 
-        // ── `let x = <Option/Result> else <expr>;` (2026-09-19) ──────────────
+        // ── `let x = <Option/Result> else <expr>;` ──────────────
         // The binding takes the PAYLOAD type; the else expression supplies the
         // value for the None/Err path, or DIVERGES (`else panic("...")` — never
         // is compatible with anything). Only Option and Result are recognised,
@@ -2733,7 +2733,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     inCompoundAssignTarget_ = savedInCompoundTarget;
     analyzeExpr(node->value.get());
 
-    // `x op= y` (2026-09-19) follows exactly the operand rules of `x op y`,
+    // `x op= y` follows exactly the operand rules of `x op y`,
     // minus the operator-trait method call: the MIR lowers it as a read of the
     // target place, the primitive binary op, and a write back — so only operands
     // that lower to a PRIMITIVE binary op are accepted here (integers, floats,
@@ -3786,7 +3786,7 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
             {
                 if (rType->integerBitWidth() > 32)
                 {
-                    // #[i_know] (2026-08-12): the statement attribute turns the
+                    // #[i_know]: the statement attribute turns the
                     // narrowing ERROR into a warning — the data may truncate.
                     if (node->iKnow)
                         log(*node, "high-to-low cast suppressed by #[i_know]; data may overflow.", E_SemanticError, Logger::LogLevel::WARNING);
@@ -3807,7 +3807,7 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
             // narrowing. integerBitWidth() states the widths explicitly.
             if (tType->isInteger() && rType->integerBitWidth() > tType->integerBitWidth())
             {
-                // #[i_know] (2026-08-12): turns the narrowing ERROR into a
+                // #[i_know]: turns the narrowing ERROR into a
                 // warning (see the CHAR case above).
                 if (node->iKnow)
                     log(*node, "high-to-low cast suppressed by #[i_know]; data may overflow.", E_SemanticError, Logger::LogLevel::WARNING);
@@ -3819,7 +3819,7 @@ void HIRSemanticAnalyzer::visit(HIRCast *node)
         case PrimitiveType::PrimKind::F32:
         case PrimitiveType::PrimKind::F64:
         {
-            // Float -> integer (2026-09-26): `x as i32` truncates toward zero.
+            // Float -> integer: `x as i32` truncates toward zero.
             // Before this the language had NO way to turn an f64 into an integer
             // at all ("f64 cannot be cast."), which blocked every geometry /
             // number-theory / FFT program that needs `(int)(x + 0.5)`.
@@ -4140,7 +4140,7 @@ bool HIRSemanticAnalyzer::handleHeapBuiltin(HIRCall *node, const std::string &na
     return true;
 }
 
-// ── FFI (2026-09-26) ─────────────────────────────────────────────────────────
+// ── FFI ─────────────────────────────────────────────────────────
 //
 // What may cross the C boundary, and why the rest may not. Everything here is a
 // deliberate narrowing: the compiler cannot verify C, so it verifies what it can
@@ -4271,7 +4271,7 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
         return checkFfiSafeType(owner, ft->getReturnType(), "callback return type");
     }
 
-    // A struct crosses the boundary BEHIND A POINTER, never by value (2026-09-26).
+    // A struct crosses the boundary BEHIND A POINTER, never by value.
     //
     // By value would need the platform aggregate ABI to be materialised in the IR:
     // clang coerces such an argument (an 8-byte struct becomes an i64, a 12-byte
@@ -4742,7 +4742,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
     // ---- Regular function call -------------------------------------------
     case HIRCall::CallKind::Regular:
     {
-        // NOTE (2026-09-25): the io entry points are ORDINARY stdlib functions —
+        // NOTE: the io entry points are ORDINARY stdlib functions —
         // `print<T: Display>(x)`, `println()` (newline + flush), `flush()`, the
         // `read_*` family — resolved through the normal name path. The compiler
         // neither recognises their names nor dispatches on their argument count;
@@ -4915,7 +4915,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         // 设置返回值类型为实例化后的类型
         node->type = instantiatedFuncType->getReturnType();
 
-        // The callee must carry the INSTANTIATED signature (2026-09-26). The
+        // The callee must carry the INSTANTIATED signature. The
         // symbol is the generic DEFINITION, so analyzeExpr(node->callee) — i.e.
         // visit(HIRNameRef) — stamped the definition's type onto it
         // ("fn<T>(Option<T>) -> bool" for is_none). Monomorphization rewrites the
@@ -4923,7 +4923,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         // generic struct's method body that table holds only that struct's params
         // (set$Set::insert<K> → {K}), so the stale T threw "Generic parameter 'T'
         // not found in substitution map". The Method and Static branches have
-        // carried this retarget since 2026-09-20; the free-function branch was
+        // carried this retarget; the free-function branch was
         // missed, which left Set/HashMap (both call is_none from a generic method
         // body) uncompilable.
         if (node->callee && instantiatedFuncType)
@@ -5712,7 +5712,7 @@ void HIRSemanticAnalyzer::visit(HIRDeref *node)
         log(*node, "cannot dereference a value of type '" + node->operand->type->toString() + "': '*p' requires a reference ('&T' or '&mut T').");
 }
 // ---------------------------------------------------------------------------
-// Prefix VALUE operators: -x, !x, ~x (2026-09-19).
+// Prefix VALUE operators: -x, !x, ~x.
 //
 // All three are defined on PRIMITIVES only for now (user-type overloading needs
 // a Neg/Not trait plus the operator-method plumbing, which lands separately):

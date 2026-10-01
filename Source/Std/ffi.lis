@@ -1,4 +1,4 @@
-// FFI support (2026-09-26): the allocator behind the boundary.
+// FFI support: the allocator behind the boundary.
 //
 // Inside the language, memory comes from the heap primitives __alloc/__free, which
 // only the standard library may call. Outside, C gets exactly two symbols, so the

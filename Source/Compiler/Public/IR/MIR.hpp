@@ -55,7 +55,7 @@ struct MIRPlace
     std::shared_ptr<Type> type;
 
     /// Source span of the HIR expression that produced this place. Borrow /
-    /// move / definite-assignment checking runs on MIR (2026-09-19), and those
+    /// move / definite-assignment checking runs on MIR, and those
     /// diagnostics point at the PLACE a program uses (E3005 use-after-move,
     /// E3011 uninitialized use, E4001-E4004 borrow conflicts), so the position
     /// has to ride along with the place instead of being looked up in the HIR
@@ -224,7 +224,7 @@ struct MIRStmtCall
     // method), it converts this call back into a direct binary op using `op`.
     std::optional<MIRRValueBinaryOp::Op> genericOpFallback;
 
-    /// An `extern "C"` callee (2026-09-26): `funcName` is a C symbol, so codegen
+    /// An `extern "C"` callee: `funcName` is a C symbol, so codegen
     /// declares it with the signature of the callee place's FunctionType — not a
     /// module function, not an indirect call through a loaded pointer.
     bool isExtern = false;

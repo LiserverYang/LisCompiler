@@ -44,8 +44,8 @@ enum class TokenCode
     CONTINUE, // "continue"
     ENUM,     // "enum"
     MATCH,    // "match"
-    EXTERN,   // "extern" (C declarations, 2026-09-26)
-    EXPORT,   // "export" (C definitions: the reverse boundary, 2026-09-26)
+    EXTERN,   // "extern" (C declarations)
+    EXPORT,   // "export" (C definitions: the reverse boundary)
 
     /* Type keywords */
     I8,    // "i8"

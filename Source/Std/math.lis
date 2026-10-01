@@ -98,7 +98,7 @@ trait PartialOrd
     fn ge(self: &Self, other: &Self) -> bool;
 }
 
-// TOTAL order (2026-09-20): a MARKER trait saying "every two keys compare, and
+// TOTAL order: a MARKER trait saying "every two keys compare, and
 // they are never both-less and never both-greater" — the invariant a search tree
 // needs. The ordered containers bound their key with it:
 //
@@ -128,7 +128,7 @@ trait BitOr
     fn bitor(self, other: Self) -> Self;
 }
 
-// `^`: infix XOR (2026-09-19). The lexer has a `^` token and the parser gives
+// `^`: infix XOR. The lexer has a `^` token and the parser gives
 // it a level between `&` and `|`, so `a ^ b` works for integer primitives and
 // for a struct implementing this trait.
 //
@@ -296,7 +296,7 @@ fn lerp(a: f64, b: f64, t: f64) -> f64
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 浮点数学（2026-09-26）
+// 浮点数学
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // 纯 Lis，不依赖 libm（语言还没有 extern/FFI）。精度与 libm 同量级（相对误差
@@ -472,7 +472,7 @@ fn tan(x: f64) -> f64
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// libm 绑定（2026-09-26）
+// libm 绑定
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // 这些函数直接调 C 数学库，不再手写：extern "C" 声明 + 一层薄包装。

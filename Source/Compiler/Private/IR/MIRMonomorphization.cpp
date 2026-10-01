@@ -303,7 +303,7 @@ bool lowerPrimitiveTraitMethod(MIRStmtCall &call, size_t sep, std::optional<MIRS
 {
     const std::string method = call.funcName.substr(sep + 2);
 
-    // `Display::show` on a primitive (2026-09-25): retarget the placeholder call
+    // `Display::show` on a primitive: retarget the placeholder call
     // `<T>::show` to the backend entry for the CONCRETE type (__show_i32, ...).
     // The call stays a call — the backend intercepts it by name, exactly like the
     // other builtins — so this only renames it; `replacement` stays empty.

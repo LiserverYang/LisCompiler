@@ -467,7 +467,7 @@ TEST_F(RuntimeTest, GenericStructNested)
 
 TEST_F(RuntimeTest, GenericBoundedAddWorks)
 {
-    // DECISION (2026-09-19): a generic parameter obeys the ownership rules, and
+    // DECISION: a generic parameter obeys the ownership rules, and
     // the arithmetic traits take their operands BY VALUE — so `x + x` needs the
     // parameter to be Copy (Rust reports E0382 for the same code).
     expectRun("fn f<T: Numeric + Copy>(x: T) -> T { ret x + x; }"
@@ -1251,7 +1251,7 @@ TEST_F(RuntimeTest, TryOperatorRequiresMatchingErrorType)
 // the unsubstituted U reached TypeContext::substitute and the compiler died with
 // "Generic parameter 'U' not found in substitution map". Found through set.lis
 // (Set::insert<K> calls is_none); the Method and Static branches had carried the
-// retarget since 2026-09-20, the free-function branch had not.
+// retarget, the free-function branch had not.
 TEST_F(RuntimeTest, GenericFreeFunctionCallInsideGenericMethod)
 {
     // (The parameter names must differ — 'U' in the callee, 'K' in the caller —

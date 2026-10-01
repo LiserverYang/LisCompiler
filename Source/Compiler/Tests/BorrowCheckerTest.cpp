@@ -254,7 +254,7 @@ TEST_F(BorrowCheckerTest, AssignFieldWhileBorrowed)
 
 TEST_F(BorrowCheckerTest, MoveWhileDeadBorrowAllowed)
 {
-    // DECISION (2026-09-19): a move only conflicts with a borrow that is still
+    // DECISION: a move only conflicts with a borrow that is still
     // LIVE. `r` is never used again, so the borrow is over by the time x moves
     // and nothing can dangle — the MIR checker follows the reference's live
     // range (true NLL; Rust accepts this too).
@@ -326,7 +326,7 @@ TEST_F(BorrowCheckerTest, NllReadThenWrite)
 
 TEST_F(BorrowCheckerTest, NllMoveAfterHolderLastUseAllowed)
 {
-    // DECISION (2026-09-19): the borrow ends at the holder's last use (`r.v`),
+    // DECISION: the borrow ends at the holder's last use (`r.v`),
     // so the move afterwards is safe. See MoveWhileDeadBorrowAllowed.
     expectOk("struct S { pub v: i32 } fn main() { let x = S { v: 1 }; let r = &x; let v = r.v; let y = x; }");
 }
@@ -1267,7 +1267,7 @@ TEST_F(BorrowCheckerTest, ArrayRefReadElementThroughIndex)
 
 TEST_F(BorrowCheckerTest, GenericParamUsedTwiceByValue)
 {
-    // DECISION (2026-09-19): a generic parameter is subject to the ownership
+    // DECISION: a generic parameter is subject to the ownership
     // rules like any other value. The arithmetic traits take their operands BY
     // VALUE, so `x + x` consumes x twice unless the parameter is Copy-bound
     // (rustc reports E0382 for the same code). The HIR checker is lenient here —
@@ -1287,7 +1287,7 @@ TEST_F(BorrowCheckerTest, GenericParamUsedTwiceByValue)
 
 TEST_F(BorrowCheckerTest, MoveInOneBranchDoesNotPoisonTheOther)
 {
-    // DECISION (2026-09-19): moves are tracked as CFG DATAFLOW, so a move in one
+    // DECISION: moves are tracked as CFG DATAFLOW, so a move in one
     // branch does not poison the other — the branches are exclusive at runtime
     // (Rust accepts this too). The HIR checker walks the tree in source order
     // with ONE global moved-state per binding, so the then-branch's move leaked
@@ -1744,7 +1744,7 @@ TEST_F(BorrowCheckerTest, TempBorrowOfLiteral)
 
 TEST_F(BorrowCheckerTest, MutBorrowOfArrayElementThenOtherElement)
 {
-    // Distinct CONSTANT indices are disjoint places (2026-09-19): the second
+    // Distinct CONSTANT indices are disjoint places: the second
     // borrow no longer conflicts. Writing through the first element while the
     // second is borrowed is likewise fine.
     expectOk("fn main() { let mut a = [1, 2, 3]; let r0 = &mut a[0]; let r1 = &mut a[1];"
@@ -1888,7 +1888,7 @@ TEST_F(BorrowCheckerTest, TwoPhaseReservationStillBlocksAMove)
 
 TEST_F(BorrowCheckerTest, NestedCallReborrowsDoNotOverlap)
 {
-    // DECISION (2026-09-19): the two reborrows of `*s` do NOT overlap. MIR runs
+    // DECISION: the two reborrows of `*s` do NOT overlap. MIR runs
     // the inner call first ('_r = call a(copy s); call b(copy s, _r);'), so a's
     // exclusive borrow is released before b's is taken — the machine never holds
     // two &mut to the same place. The HIR checker sees ONE source statement and
@@ -1905,7 +1905,7 @@ TEST_F(BorrowCheckerTest, NestedCallReborrowsDoNotOverlap)
 
 TEST_F(BorrowCheckerTest, WriteAfterTheReservationReturnedAllowed)
 {
-    // DECISION (2026-09-19): the reservation ends when the CALL returns. MIR has
+    // DECISION: the reservation ends when the CALL returns. MIR has
     // linearized the source statement into '_t = &mut *s; _r = call take(_t);
     // s.n = _r;', so the write happens after the callee released the borrow —
     // nothing aliases at that point (rustc accepts this shape too).

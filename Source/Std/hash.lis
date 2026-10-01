@@ -11,7 +11,7 @@
 //     struct MyKey { pub a: i32 }
 //     impl Hash for MyKey { fn hash(self: &MyKey) -> i32 { ret self.a * 2654435761; } }
 //
-// What implements it (2026-09-20):
+// What implements it:
 //   - `i32`: seeded by the compiler (a primitive cannot carry a method body) and
 //     lowered to `k * 2654435761` — the standard 32-bit multiplicative hash,
 //     with the language's silent wraparound doing the mixing.

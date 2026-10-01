@@ -74,7 +74,7 @@ struct Context
     /// EMPTY → nothing qualifies (fail-closed, never fail-open).
     std::vector<std::string> stdLibDirs;
 
-    /// The FFI capability (2026-09-26). An extern "C" declaration binds a C
+    /// The FFI capability. An extern "C" declaration binds a C
     /// symbol whose code can break every guarantee the language makes, so it is
     /// opt-in: files under stdLibDirs always may (the platform's own bindings),
     /// everything else needs --allow-ffi. The judge/CI default is OFF.

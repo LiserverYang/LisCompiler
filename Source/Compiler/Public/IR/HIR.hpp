@@ -216,7 +216,7 @@ public:
     std::unique_ptr<HIRExpr> expr;
     HIRRawType rawTargetType;         // set by HIRBuilder
     std::shared_ptr<Type> targetType; // filled by HIRSemanticAnalyzer
-    // 2026-08-12: set by the `#[i_know]` statement attribute — relaxes the
+    // set by the `#[i_know]` statement attribute — relaxes the
     // integer-narrowing cast ERROR to a warning.
     bool iKnow = false;
     void accept(HIRVisitor *visitor) override
@@ -414,7 +414,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-/// A prefix VALUE operator: `-x`, `!x`, `~x` (2026-09-19). `+x` never reaches
+/// A prefix VALUE operator: `-x`, `!x`, `~x`. `+x` never reaches
 /// the HIR (the parser erases it). The operand is a value — all three operators
 /// are defined on Copy types only, so no move bookkeeping is involved — and the
 /// result has the operand's type except for `!`, which yields bool.
@@ -458,7 +458,7 @@ public:
     std::optional<std::unique_ptr<HIRExpr>> init;
 
     /// `let x = <Option/Result> else <expr>;` — the fallback branch, evaluated
-    /// only when the initializer is None/Err (2026-09-19). The expression's type
+    /// only when the initializer is None/Err. The expression's type
     /// must be the payload type (or never, for a diverging call).
     std::optional<std::unique_ptr<HIRExpr>> elseExpr;
 
@@ -478,7 +478,7 @@ public:
     std::unique_ptr<HIRExpr> target;
     std::unique_ptr<HIRExpr> value;
 
-    /// `x op= y` (2026-09-19): the target is read with THIS operator and written
+    /// `x op= y`: the target is read with THIS operator and written
     /// back — the MIR lowers the place once, so it is exactly `x = x op y`
     /// without evaluating the target twice. `isCompound == false` is a plain
     /// `=` and ignores `compoundOp`.
@@ -626,7 +626,7 @@ public:
     bool isTraitMethod = false;
     bool isGeneric = false;
 
-    // ── FFI (2026-09-26) ─────────────────────────────────────────────────────
+    // ── FFI ─────────────────────────────────────────────────────
     /// `extern "C" fn ...;`: a C symbol declaration. `name` is then the BARE C
     /// name (no module prefix) and the function has no body.
     bool isExtern = false;
@@ -634,7 +634,7 @@ public:
     std::string cName;
     /// A C variadic signature (the parameter list ended with `...`).
     bool isVariadic = false;
-    /// `export fn` (2026-09-26): a DEFINITION C may call. Like an extern it keeps
+    /// `export fn`: a DEFINITION C may call. Like an extern it keeps
     /// its bare name (the emitted symbol), unlike an extern it has a body.
     bool isExport = false;
     std::string associatedStruct;

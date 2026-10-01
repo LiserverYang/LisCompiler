@@ -17,7 +17,7 @@
 //     let last = v.pop();    // Option<i32>
 //     for e in v { ... }     // consumes v (Vec implements Iterator<T>), in order
 //
-// ELEMENTS MAY BE ANY TYPE (2026-09-19). A Copy element can be read out by
+// ELEMENTS MAY BE ANY TYPE. A Copy element can be read out by
 // value (`v[i]`, `get`); anything else MOVES in and out of the container
 // (`push`/`pop`/`remove`/`insert` and `for`), or is lent by `at_ref`/`at_mut`.
 // The container destroys the elements it still owns — `clear` and the `Drop`
@@ -96,7 +96,7 @@ impl Vec
         ret self.cap;
     }
 
-    // ── ownership transfer (2026-09-26) ──────────────────────────────────────
+    // ── ownership transfer ──────────────────────────────────────
 
     // Hand the element buffer out (see String::into_raw). The Vec is left a valid
     // EMPTY one: Drop destroys the elements it still owns and frees the buffer, so
@@ -225,7 +225,7 @@ impl Vec
         ret &mut self.data[self.cursor + i];
     }
 
-    // A BORROWING iterator over the live elements (2026-09-19): `for x in v`
+    // A BORROWING iterator over the live elements: `for x in v`
     // calls this, so the loop neither copies nor consumes the Vec, and it works
     // for non-Copy elements (each step LENDS one). The borrow is promoted by the
     // loop desugaring (it binds `&v` first), so the checker keeps the Vec
@@ -239,7 +239,7 @@ impl Vec
         ret VecIter { src: self, pos: 0 };
     }
 
-    // A borrowing MUTABLE iterator (2026-09-19): each step lends `&mut T`, so a
+    // A borrowing MUTABLE iterator: each step lends `&mut T`, so a
     // loop can write through it. This is the API the CFG-based borrow checker
     // unblocked — a `&mut` derived from `self` and RETURNED used to be rejected
     // (E4001/E3002), which is why the earlier round had to document a
@@ -265,7 +265,7 @@ impl<T: Copy> Vec<T>
 
     // Grow or shrink to `n` elements, filling new slots with copies of `v`.
     //
-    // This is the "give me a buffer of n elements" facility (2026-09-26): before
+    // This is the "give me a buffer of n elements" facility: before
     // it, sizing a Vec meant n `push`es. `T: Copy` is what makes the fill loop
     // legal — the same value is handed to `push` on every iteration — and it is
     // also why shrinking is free: a Copy value has nothing to destroy.
@@ -335,7 +335,7 @@ impl Iterator<T> for Vec<T>
 }
 
 // ---------------------------------------------------------------------------
-// Borrowed iteration (2026-09-19): `for x in v` uses this, so the loop does not
+// Borrowed iteration: `for x in v` uses this, so the loop does not
 // consume the Vec and yields `&T` — the way to walk a Vec of NON-Copy elements
 // without taking them out of it.
 //

@@ -204,7 +204,7 @@ TEST_F(RuntimeTest, ReadF64)
 
 TEST_F(RuntimeTest, UserStructCopyImplMakesItCopy)
 {
-    // `impl Copy for P {}` is a REAL marker now (2026-09-26). Before this it was
+    // `impl Copy for P {}` is a REAL marker now. Before this it was
     // a documented no-op: isCopyable() ignored implTrait for a struct, so P was
     // always Move and the impl changed nothing.
     expectRun("struct P { pub x: i32, pub y: i32 } impl Copy for P {}"
@@ -450,7 +450,7 @@ TEST_F(RuntimeTest, IntToCharCast)
 
 TEST_F(RuntimeTest, FloatToIntCastTruncatesTowardsZero)
 {
-    // Float -> integer is ALLOWED now (2026-09-26) and truncates toward zero,
+    // Float -> integer is ALLOWED now and truncates toward zero,
     // like C's `(int)x`. It used to be rejected outright ("f64 cannot be cast"),
     // which left no way at all to get an integer out of an f64.
     expectRun("fn main() -> i32 { let x = 3.7 as i32; ret x; }", 3);
@@ -1036,7 +1036,7 @@ TEST_F(RuntimeTest, NestedForBreakInner)
 
 TEST_F(RuntimeTest, MultipleGenericInstantiation)
 {
-    // `T: Copy` because `x + x` consumes a by-value operand twice (2026-09-19).
+    // `T: Copy` because `x + x` consumes a by-value operand twice.
     expectRun("fn dbl<T: Numeric + Copy>(x: T) -> T { ret x + x; }"
               " fn main() -> i32 { let a = dbl(21); let b = dbl(2); ret a + b; }",
         46);

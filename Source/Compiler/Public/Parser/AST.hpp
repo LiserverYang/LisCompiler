@@ -93,7 +93,7 @@ public:
         Primitive,
         Custom,
         ModuleQualified,
-        /// `fn(T, U) -> R` — a CALLBACK type (2026-09-26). The language has had
+        /// `fn(T, U) -> R` — a CALLBACK type. The language has had
         /// function-typed VALUES forever (`let f = foo;` infers one), but no way to
         /// WRITE the type; an FFI declaration (qsort's comparator) needs to.
         Function
@@ -162,7 +162,7 @@ public:
     std::vector<std::unique_ptr<GenericParam>> genericParams;
     Symbol *symbol;
 
-    /// #[repr(C)] (2026-09-26): the declaration promises the C layout. The
+    /// #[repr(C)]: the declaration promises the C layout. The
     /// compiler's struct layout already IS the C one for C-typed fields (fields
     /// in declaration order, natural alignment, unpacked -- see TypeHelper.cpp's
     /// Custom case), so the attribute is not a new layout algorithm: it is the
@@ -294,7 +294,7 @@ public:
     std::shared_ptr<Type> type;
     std::vector<std::unique_ptr<GenericParam>> genericParams;
 
-    // ── FFI (2026-09-26) ─────────────────────────────────────────────────────
+    // ── FFI ─────────────────────────────────────────────────────
     /// `extern "C" fn ...;` — a DECLARATION of a C symbol: no body, and the
     /// module does not own the name (it is not module-prefixed).
     bool isExtern = false;
@@ -304,7 +304,7 @@ public:
     std::string cName;
     /// A trailing `...` in the parameter list (a C variadic signature).
     bool isVariadic = false;
-    /// `export fn` (2026-09-26) — the reverse direction: this DEFINITION is
+    /// `export fn` — the reverse direction: this DEFINITION is
     /// callable from C. It has a body, keeps its own (bare, un-prefixed) name as
     /// the emitted symbol unless #[link_name] says otherwise, and its signature
     /// must be FFI-safe.
@@ -392,7 +392,7 @@ public:
     std::optional<std::unique_ptr<TypeNode>> type;
     std::optional<std::unique_ptr<Expr>> initValue;
 
-    /// `let x = <Option/Result expr> else <expr>;` (2026-09-19): the FALLBACK
+    /// `let x = <Option/Result expr> else <expr>;`: the FALLBACK
     /// value (or a diverging call) used when the initializer is None/Err. Only an
     /// expression — a block would need block-expressions, which this language
     /// does not have.
@@ -413,7 +413,7 @@ public:
     std::unique_ptr<Expr> value;
 
     /// The COMPOUND spelling's operator text ("+=", "-=", ...), empty for a
-    /// plain `=` (2026-09-19). `x op= y` means `x = x op y` with the target
+    /// plain `=`. `x op= y` means `x = x op y` with the target
     /// place evaluated ONCE (the MIR lowers it that way); the syntactic form is
     /// kept so the HIR knows which operator to apply.
     std::string compoundOp;
@@ -438,7 +438,7 @@ public:
 class ForStmt : public Stmt
 {
 public:
-    /// `for x in move v` — CONSUME the iterable (2026-09-19). Without it the loop
+    /// `for x in move v` — CONSUME the iterable. Without it the loop
     /// borrows a place iterable instead (see HIRBuilder::visit(ForStmt)).
     bool isMove = false;
 
@@ -692,7 +692,7 @@ class CastExpr : public Expr
 public:
     std::unique_ptr<TypeNode> targetType;
     std::unique_ptr<Expr> expression;
-    // 2026-08-12: set by `#[i_know = "..."]` (statement attribute). A marked
+    // set by `#[i_know = "..."]` (statement attribute). A marked
     // cast bypasses the integer-narrowing ERROR (still emits a warning).
     bool iKnow = false;
 
@@ -763,7 +763,7 @@ public:
     }
 };
 
-/// A prefix VALUE operator: `-x`, `!x`, `~x` (2026-09-19).
+/// A prefix VALUE operator: `-x`, `!x`, `~x`.
 ///
 /// `+` is deliberately NOT one of these: the parser erases it, so `+x` is just
 /// `x`. Prefix operators bind tighter than any binary operator and nest

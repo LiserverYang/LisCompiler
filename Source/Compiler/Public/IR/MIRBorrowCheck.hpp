@@ -4,7 +4,7 @@
  *
  * MIRBorrowCheck — borrow / move / definite-assignment checking on the MIR CFG.
  *
- * WHY MIR (2026-09-19). These three analyses are CFG DATAFLOW: "is this place
+ * WHY MIR. These three analyses are CFG DATAFLOW: "is this place
  * still owned here", "is this binding assigned on every path that reaches this
  * point", "is this borrow still live". The HIR tree can only approximate them
  * with statement ordinals and scope markers, which is why the HIR checker needs
@@ -24,7 +24,7 @@
  * "a non-Copy binding needs an initializer" (E3012) — those are place/type
  * properties, not dataflow, and stay in HIRSemanticAnalyzer.
  *
- * This is the ONLY implementation of those checks (2026-09-19): the tree-based
+ * This is the ONLY implementation of those checks: the tree-based
  * checker that used to live in HIRSemanticAnalyzer is gone, along with the
  * LIS_BORROW_CHECK escape hatch. The 246 source-level BorrowCheckerTest cases
  * and the runtime suite are its oracle: a missed OR spurious diagnostic fails a

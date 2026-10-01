@@ -60,7 +60,7 @@ struct Symbol
     /// target symbol so lookups always see the target's latest state.
     Symbol *aliasTarget = nullptr;
 
-    /// An `extern "C"` DECLARATION (2026-09-26): codegen declares the C symbol
+    /// An `extern "C"` DECLARATION: codegen declares the C symbol
     /// (cName) instead of looking for a Lis definition, and the call must not go
     /// through monomorphization.
     bool isExtern = false;

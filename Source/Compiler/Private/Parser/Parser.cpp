@@ -755,7 +755,7 @@ std::unique_ptr<FunctionDef> Parser::parseFunctionDefinition()
     }
 
     // A trailing ';' makes this a DECLARATION with no body (the impl/trait method
-    // parser accepted this already, 2026-09-26). At top level only an
+    // parser accepted this already). At top level only an
     // `extern "C"` declaration may omit the body — sema rejects the plain
     // `fn f();` case with a message that says so.
     if (match(TokenCode::SEMI))
@@ -765,7 +765,7 @@ std::unique_ptr<FunctionDef> Parser::parseFunctionDefinition()
     return func;
 }
 
-// `extern "C" fn name(params) -> ret;` — a C symbol declaration (2026-09-26).
+// `extern "C" fn name(params) -> ret;` — a C symbol declaration.
 //
 // Everything after `extern "C"` is the ordinary function grammar, reused
 // through parseFunctionDefinition(): it already accepts a declaration with no
@@ -806,7 +806,7 @@ std::unique_ptr<ASTNode> Parser::parseExternFunctionDeclaration()
     return func;
 }
 
-// `export fn name(params) -> ret { ... }` — a C entry point (2026-09-26).
+// `export fn name(params) -> ret { ... }` — a C entry point.
 //
 // The mirror image of parseExternFunctionDeclaration: same FFI-safe rules, same
 // capability gate, but this one DEFINES the symbol -- so it needs a body, and it
@@ -953,7 +953,7 @@ std::unique_ptr<TypeNode> Parser::parseType()
         return type;
     }
 
-    // Function type `fn(T, U) -> R` (2026-09-26) — a CALLBACK signature. Values of
+    // Function type `fn(T, U) -> R` — a CALLBACK signature. Values of
     // function type have always existed; this is the first way to NAME the type,
     // which is what an FFI declaration needs (qsort's comparator).
     if (match(TokenCode::FN))
@@ -1150,7 +1150,7 @@ std::unique_ptr<Param> Parser::parseParameter()
 
     param->type = parseType();
 
-    // 2026-08-12 (spec decision): default parameter values (`a: i32 = 5`) were
+    // (spec decision): default parameter values (`a: i32 = 5`) were
     // parsed then silently IGNORED by every later pass — dead syntax. Removed:
     // a trailing `= expr` is now a clean parse error instead.
     if (match(TokenCode::ASSIGN))
@@ -1197,7 +1197,7 @@ void Parser::parseAttribute()
 {
     consume(TokenCode::ATTRIBUTE_START, "expected '#['", E_ExpectALBRACE);
 
-    // Only `#[i_know = "..."]` is defined (2026-08-12 spec decision): it
+    // Only `#[i_know = "..."]` is defined (spec decision): it
     // relaxes integer-narrowing cast errors on the next statement to warnings.
     if (check(TokenCode::IDENTIFIER) && currentToken().value == "i_know")
     {
@@ -1256,7 +1256,7 @@ void Parser::parseAttribute()
     }
     else if (check(TokenCode::IDENTIFIER) && currentToken().value == "repr")
     {
-        // #[repr(C)] (2026-09-26): the C-layout witness for a struct that crosses
+        // #[repr(C)]: the C-layout witness for a struct that crosses
         // the FFI boundary BY VALUE. Only C is accepted (the language's own layout
         // is already the C one for C-typed fields).
         advance();
@@ -1442,7 +1442,7 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     // 赋值语句或表达式语句
     auto expr = parseExpression();
 
-    // `=` or one of the compound spellings (2026-09-19). The operator tokens are
+    // `=` or one of the compound spellings. The operator tokens are
     // statement-level only: getPrecedence() gives them 0, so the expression above
     // stopped at the target.
     TokenCode assignCode = currentToken().code;
@@ -1560,7 +1560,7 @@ std::unique_ptr<DeclStmt> Parser::parseDeclarationStatement()
     {
         decl->initValue = parseExpression();
 
-        // `else <expr>` — the fallback binding (2026-09-19). A `let` initializer
+        // `else <expr>` — the fallback binding. A `let` initializer
         // can never be an if-statement (if is a statement, not an expression), so
         // the keyword is unambiguous here.
         if (match(TokenCode::ELSE))
@@ -1584,7 +1584,7 @@ std::unique_ptr<ForStmt> Parser::parseForLoop()
     consume(TokenCode::IN, "expected keyword 'in'", E_ExpectedKeyword);
 
     // `for x in move v` consumes the iterable; the default form BORROWS a place
-    // iterable (2026-09-19, see HIRBuilder::visit(ForStmt)).
+    // iterable (see HIRBuilder::visit(ForStmt)).
     forStmt->isMove = match(TokenCode::MOVE);
 
     // A bare-identifier iterable followed by `{` is the loop body, not a struct
@@ -1849,7 +1849,7 @@ std::unique_ptr<Expr> Parser::parseUnary()
         return deref;
     }
 
-    // Value prefixes (2026-09-19): `-x`, `!x`, `~x`, and the no-op `+x`.
+    // Value prefixes: `-x`, `!x`, `~x`, and the no-op `+x`.
     // They share the dereference's precedence slot: tighter than every binary
     // operator, right-associative, one nesting level each. (`- -x` and `-*p` are
     // both fine; `a - -b` is a subtraction by `-b`.)

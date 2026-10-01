@@ -151,7 +151,7 @@ impl String
         ret self.cap;
     }
 
-    // ── ownership transfer (2026-09-26) ──────────────────────────────────────
+    // ── ownership transfer ──────────────────────────────────────
     //
     // The two ends of a buffer leaving and re-entering the language. Nothing here
     // is checked for you: after into_raw the C side owns the buffer, and from_raw

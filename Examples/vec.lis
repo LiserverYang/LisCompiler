@@ -162,7 +162,7 @@ fn main() -> i32
     }
     if drops != 4 { ret 24; }
 
-    // 9. The 2026-09-19 additions: a lending loop, compound assignment and
+    // 9. The additions: a lending loop, compound assignment and
     //    let ... else. `for e in v` borrows v (e is &i32) instead of draining
     //    it, so the Vec is still there afterwards -- and still growable.
     {

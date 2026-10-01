@@ -724,7 +724,7 @@ TEST_F(LexerTest, ColonDoubleColonMix)
 
 TEST_F(LexerTest, OperatorsNoSpaces)
 {
-    // "+=" is ONE token since compound assignment landed (2026-09-19); a lone
+    // "+=" is ONE token since compound assignment landed; a lone
     // "+" followed by "=" now needs a space between them.
     runLexer("+ = -*");
     expectToken(0, TokenCode::PLUS, "+", 1, 1);
@@ -856,8 +856,8 @@ TEST_F(LexerTest, UnknownCharsStillLexAround)
     EXPECT_EQ(context->tokenStream[2].value, "b");
 }
 
-// `~` is the bitwise-complement OPERATOR (2026-09-19) and `^` became the XOR
-// TOKEN (2026-09-20) — it used to be an "Unknown character" lexer error.
+// `~` is the bitwise-complement OPERATOR and `^` became the XOR
+// TOKEN — it used to be an "Unknown character" lexer error.
 TEST_F(LexerTest, TildeIsBitComplementToken)
 {
     runLexer("~");

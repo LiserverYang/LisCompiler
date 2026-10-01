@@ -264,7 +264,7 @@ public:
         fields = std::move(f);
     }
 
-    /// #[repr(C)] (2026-09-26): this struct's layout is the C one, so it may be
+    /// #[repr(C)]: this struct's layout is the C one, so it may be
     /// passed to/from C BY VALUE (the FFI whitelist checks this flag). Structs
     /// without it are still usable across the boundary -- behind a pointer, as an
     /// opaque handle.

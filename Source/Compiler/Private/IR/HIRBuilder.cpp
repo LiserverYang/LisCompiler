@@ -672,7 +672,7 @@ void HIRBuilder::visit(ForStmt *node)
     std::string srcName = "__src_" + std::to_string(forLoopCtr_);
     forLoopCtr_++;
 
-    // Which form? (2026-09-19)
+    // Which form?
     //   * "for x in move e"        -> consume e (the historical desugaring).
     //   * "for x in e" with e a PLACE (a name, a field, an index, a deref)
     //                              -> borrow e for the loop and yield &T.
@@ -854,7 +854,7 @@ void HIRBuilder::visit(ForStmt *node)
     outer->stmts.push_back(std::move(itDecl));
     outer->stmts.push_back(std::move(loop));
 
-    // NOTE (2026-09-19): a `let __hold = &*__src;` PIN used to follow the loop to
+    // NOTE: a `let __hold = &*__src;` PIN used to follow the loop to
     // keep the source borrow alive across the body — the tree-based checker ended
     // a borrow at its holder's last use, and the iterator is built from __src
     // BEFORE the loop, so `for x in v { v.push(1); }` would have slipped through
@@ -1271,7 +1271,7 @@ void HIRBuilder::visit(BinaryOp *node)
         result->opKind = HIRBinaryOp::OpKind::ShiftLeft;
     else if (node->op == ">>")
         result->opKind = HIRBinaryOp::OpKind::ShiftRight;
-    // `^` (BitXor) IS reachable from source (2026-09-19): the lexer has a
+    // `^` (BitXor) IS reachable from source: the lexer has a
     // TokenCode::CARET and getPrecedence() gives it a level between `&` and `|`.
     //
     // KNOWN LIMITATION (P13, shifts only): the `<<` and `>>` branches are

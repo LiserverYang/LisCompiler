@@ -1143,7 +1143,7 @@ void MIRBuilder::buildLetElse(HIRVarDecl *decl, size_t localIdx)
 
 void MIRBuilder::buildAssign(HIRAssign *assign)
 {
-    // `x op= y` (2026-09-19) is its own lowering: the target place is evaluated
+    // `x op= y` is its own lowering: the target place is evaluated
     // ONCE, read, combined with the RHS through the primitive binary op, and
     // written back — never `x = x op y` with the target evaluated twice.
     if (assign->isCompound)
@@ -2278,7 +2278,7 @@ MIRPlace MIRBuilder::buildCall(HIRCall *call)
                 MIRPlace dropped = buildExpr(call->args[0].get());
                 emitDrop(dropped);
 
-                // `__drop(x)` CONSUMES the value at x (2026-09-26). emitDrop()
+                // `__drop(x)` CONSUMES the value at x. emitDrop()
                 // released it, but a whole local is still on the scope-end sweep's
                 // owned list, so without this ownership hand-off every such value
                 // was destroyed TWICE. map.lis is where it became visible:

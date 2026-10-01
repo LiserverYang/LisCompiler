@@ -1,4 +1,4 @@
-// FFI stage 1/2 tests (2026-09-26) -- see Document/src/ffi.md.
+// FFI stage 1/2 tests -- see Document/src/ffi.md.
 //
 // These live in their own TU because every one of them touches the C boundary:
 // each declares extern "C" or export, and the ones that need a hand-written C

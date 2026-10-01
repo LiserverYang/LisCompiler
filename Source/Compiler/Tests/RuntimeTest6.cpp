@@ -1,4 +1,4 @@
-// FFI by-value aggregate ABI (2026-09-26) -- see FfiAbi and Document/src/ffi.md.
+// FFI by-value aggregate ABI -- see FfiAbi and Document/src/ffi.md.
 //
 // Every shape here is a DIFFERENTIAL test: a g++-compiled C helper computes the
 // same number the Lis side computes independently, in BOTH directions (a struct

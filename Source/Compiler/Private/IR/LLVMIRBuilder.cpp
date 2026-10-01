@@ -879,7 +879,7 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
 
     if (auto *move = std::get_if<MIRMove>(&s.callee))
     {
-        // An extern "C" call (2026-09-26): DECLARE the C symbol with the callee's
+        // An extern "C" call: DECLARE the C symbol with the callee's
         // own signature. This has to come BEFORE the function-pointer fallback
         // below: an extern callee's place is function-TYPED (the HIR name-ref
         // carries a FunctionType), so that branch would load a value that was
@@ -1598,7 +1598,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareDropGlue(const std::string &structNam
     return func;
 }
 
-// An extern "C" declaration (2026-09-26): the symbol is DEFINED elsewhere, so the
+// An extern "C" declaration: the symbol is DEFINED elsewhere, so the
 // module gets a declaration built from the CALLER's signature — parameters,
 // return type AND the C variadic flag. getOrDeclareFn() below mints an opaque
 // `i8(...)` declaration, which is right for the compiler's own libc builtins

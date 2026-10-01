@@ -35,7 +35,7 @@ bool Type::isCopyable() const
     if (kind == Kind::GenericParam)
         return implementsTrait("Copy");
 
-    // A USER TYPE becomes Copy by SAYING SO: `impl Copy for P {}` (2026-09-26).
+    // A USER TYPE becomes Copy by SAYING SO: `impl Copy for P {}`.
     // The marker was documented from the start but had no effect — isCopyable()
     // ignored implTrait for a CustomType, so the impl did nothing: a struct was
     // always Move, and `[P; N]` was rejected ("array element type ... must be
