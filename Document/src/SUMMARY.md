@@ -17,3 +17,4 @@
 - [错误信息](./errors.md)
 - [已知限制与路线图](./limitations.md)
 - [优化：语言事实的分工](./optimization.md)
+- [内存映射 IO：volatile 与寄存器](./mmio.md)
