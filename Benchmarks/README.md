@@ -67,6 +67,43 @@ sample (`perf record -g --call-graph dwarf -- lisc Benchmarks/stress.lis`, see t
 profiling notes in CLAUDE.md) or wire LLVM's `StandardInstrumentations` /
 `TimePassesHandler` into `Emitter::runOptPipeline` for a per-pass text report.
 
+## Sampling with perf (Linux/WSL): two 9p traps
+
+`--time-trace` covers our own phases; to see inside LLVM (the whole `Emitter` block) you
+need a sampler. `perf` works in WSL2 (kernel 6.18 here, `perf_event_paranoid=2`), but it
+must not touch the Windows mount -- both failures below were measured, not guessed:
+
+- **`--output` has to be on a native filesystem.** Writing `perf.data` into `/mnt/f` (a 9p
+  drvfs mount) dies with `failed to write perf data, error: Bad address` and leaves a
+  1120-byte stub -- **with or without `--call-graph`**, so it is the output path and not
+  the unwinder. The same command with `-o /tmp/perf.data` records 12k samples fine.
+- **Run the binary from a native path too.** perf loads symbols/dso from the executable;
+  with the binary on `/mnt/f` the report comes back empty. `lisc` looks for `lstdlib`
+  next to `argv[0]`, so copy that as well.
+
+```bash
+cp Build/Binaries/lisc /tmp/lisc && cp -r Build/Binaries/lstdlib /tmp/
+cp Benchmarks/stress.lis /tmp/ && cd /tmp
+perf record -o /tmp/p.data --all-user -g --call-graph dwarf -- /tmp/lisc /tmp/stress.lis -o 2 --out /tmp/s.o
+git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph   # once
+perf script -i /tmp/p.data > p.script
+perl /tmp/FlameGraph/stackcollapse-perf.pl p.script > p.folded
+perl /tmp/FlameGraph/flamegraph.pl --width 1800 p.folded > compile.svg
+```
+
+- **`--all-user`** drops the kernel frames, which resolve to nothing in WSL
+  (`ffffffffa4... [unknown]`) and only add width to the graph.
+- **`--call-graph dwarf` is required to see inside `libLLVM`**: our build is Debug (frame
+  pointers present), but the LLVM libraries are a release build without them, so
+  `--call-graph fp` unwinds garbage the moment the stack enters LLVM.
+- `Failed to open /proc/schedstat` is a harmless WSL warning.
+- First result from the 3 s stress compile (12257 samples, user space only): the leaf
+  frames are dominated by `std::vector` accessors (`size`, `operator[]`, `_M_data`,
+  `~vector` -- at `-O0` every `locals[i]` is a real call), then `llvm::SROAPass::run` /
+  `llvm::PromoteMemToReg` and our own `computeLiveness`. That is consistent with the
+  `--time-trace` split above (Emitter 37%, MIRBorrowCheck 31%) and is the first thing to
+  look at if compile time becomes a problem.
+
 ## Is it still valid?
 
 `stress.lis` is a normal program: it must compile, link and exit 0
