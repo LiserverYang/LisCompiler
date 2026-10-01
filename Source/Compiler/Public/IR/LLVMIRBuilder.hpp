@@ -210,6 +210,23 @@ private:
     /// Everything else is module-private and gets internal linkage.
     bool isCEntryPoint(const std::string &name) const;
 
+    /// Is this type (or anything reachable inside it) a `&T`/`&mut T`/`*T`?
+    /// Used to decide whether ANOTHER parameter could alias the one exclusive
+    /// reference a function takes -- a reference smuggled inside a by-value
+    /// aggregate aliases just as well as one passed directly.
+    static bool containsIndirection(const std::shared_ptr<Type> &ty, int depth = 0);
+
+    /// Does the body read or write a global variable? A global is reachable
+    /// without any parameter, so a `&mut` argument bound to that same global
+    /// (`f(&mut G)` where the body pushes to `G`) would alias it.
+    static bool bodyReferencesGlobals(const MIRFunction &mirFn);
+
+    /// State what the borrow checker proved: a `&mut T` parameter is the ONLY
+    /// way into its object, so accesses through it cannot alias anything else
+    /// (`noalias`). See the definition for the four conditions that keep the
+    /// claim true -- each one has a counterexample in IrFactsTest.cpp.
+    void applyParameterAttributes(llvm::Function *fn, const MIRFunction &mirFn);
+
     /// Declare `printf(i32(ptr, ...))` once. Still needed by the Display
     /// lowering for the primitives (`__show_*`); the print_* builtins that used
     /// it are gone — printing is stdlib code now.

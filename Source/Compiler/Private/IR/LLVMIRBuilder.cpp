@@ -178,6 +178,189 @@ bool LLVMIRBuilder::isCEntryPoint(const std::string &name) const
     return name == "main" || context->exportedSymbols.count(name) > 0;
 }
 
+bool LLVMIRBuilder::containsIndirection(const std::shared_ptr<Type> &ty, int depth)
+{
+    // Unknown, or nested past the sanity bound: assume it may alias. Refusing the
+    // attribute costs a little optimization; guessing wrong is a silent
+    // miscompile, which is the one failure this compiler must never have.
+    if (!ty || depth > 32)
+        return true;
+    if (ty->isPointerLike())
+        return true;
+
+    switch (ty->getKind())
+    {
+    case Type::Kind::Custom:
+    {
+        auto ct = std::static_pointer_cast<CustomType>(ty);
+        for (const auto &field : ct->getFields())
+            if (containsIndirection(field.type, depth + 1))
+                return true;
+        // An enum's payloads are not in getFields(): `Option<&T>` is a by-value
+        // aggregate that carries a reference.
+        for (const auto &variant : ct->getVariants())
+            for (const auto &payload : variant.payloadTypes)
+                if (containsIndirection(payload, depth + 1))
+                    return true;
+        return false;
+    }
+    case Type::Kind::Array:
+        return containsIndirection(
+            std::static_pointer_cast<ArrayType>(ty)->getElementType(), depth + 1);
+    default:
+        return false;
+    }
+}
+
+// ── Walking a body for global accesses ───────────────────────────────────────
+// MIR has no generic visitor, so these small recursions cover the variant set in
+// MIR.hpp. Only PlaceBase::Global matters: everything reached through a
+// parameter is BASED ON that parameter, which is exactly what `noalias` allows.
+
+namespace
+{
+bool operandTouchesGlobal(const MIROperand &op)
+{
+    if (auto *c = std::get_if<MIRCopy>(&op))
+        return c->place.base == PlaceBase::Global;
+    if (auto *m = std::get_if<MIRMove>(&op))
+        return m->place.base == PlaceBase::Global;
+    return false; // MIRConst
+}
+
+bool rvalueTouchesGlobal(const MIRRValue &rv)
+{
+    return std::visit([](const auto &v) -> bool
+        {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, MIRRValueUse>)
+                return operandTouchesGlobal(v.operand);
+            else if constexpr (std::is_same_v<T, MIRRValueBinaryOp>)
+                return operandTouchesGlobal(v.left) || operandTouchesGlobal(v.right);
+            else if constexpr (std::is_same_v<T, MIRRValueUnaryOp>)
+                return operandTouchesGlobal(v.operand);
+            else if constexpr (std::is_same_v<T, MIRRValueCast>)
+                return operandTouchesGlobal(v.operand);
+            else if constexpr (std::is_same_v<T, MIRRValueRef>)
+                return v.place.base == PlaceBase::Global;
+            else if constexpr (std::is_same_v<T, MIRRValueAddrOf>)
+                return v.place.base == PlaceBase::Global;
+            else if constexpr (std::is_same_v<T, MIRRValueStructInit>)
+            {
+                for (const auto &[fieldName, value] : v.fields)
+                    if (operandTouchesGlobal(value))
+                        return true;
+                return false;
+            }
+            else if constexpr (std::is_same_v<T, MIRRValueArrayInit>)
+            {
+                for (const auto &element : v.elements)
+                    if (operandTouchesGlobal(element))
+                        return true;
+                return false;
+            }
+            else
+                return false;
+        },
+        rv);
+}
+
+bool callTouchesGlobal(const MIRStmtCall &call)
+{
+    if (call.dest.has_value() && call.dest->base == PlaceBase::Global)
+        return true;
+    if (operandTouchesGlobal(call.callee))
+        return true;
+    for (const auto &arg : call.args)
+        if (operandTouchesGlobal(arg))
+            return true;
+    return false;
+}
+} // namespace
+
+bool LLVMIRBuilder::bodyReferencesGlobals(const MIRFunction &mirFn)
+{
+    for (const auto &bb : mirFn.body.blocks)
+    {
+        for (const auto &stmt : bb.stmts)
+        {
+            const bool touches = std::visit([](const auto &s) -> bool
+                {
+                    using T = std::decay_t<decltype(s)>;
+                    if constexpr (std::is_same_v<T, MIRStmtAssign>)
+                        return s.lhs.base == PlaceBase::Global ||
+                               rvalueTouchesGlobal(s.rhs);
+                    else if constexpr (std::is_same_v<T, MIRStmtCall>)
+                        return callTouchesGlobal(s);
+                    else if constexpr (std::is_same_v<T, MIRStmtDrop>)
+                        return s.place.base == PlaceBase::Global;
+                    else
+                        return false; // MIRStmtNop
+                },
+                stmt);
+            if (touches)
+                return true;
+        }
+
+        const bool terminatorTouches = std::visit([](const auto &t) -> bool
+            {
+                using T = std::decay_t<decltype(t)>;
+                if constexpr (std::is_same_v<T, MIRTermBranch>)
+                    return operandTouchesGlobal(t.cond);
+                else if constexpr (std::is_same_v<T, MIRTermReturn>)
+                    return t.value.has_value() && operandTouchesGlobal(*t.value);
+                else if constexpr (std::is_same_v<T, MIRTermCall>)
+                    return callTouchesGlobal(t.call);
+                else
+                    return false;
+            },
+            bb.terminator);
+        if (terminatorTouches)
+            return true;
+    }
+    return false;
+}
+
+void LLVMIRBuilder::applyParameterAttributes(llvm::Function *fn, const MIRFunction &mirFn)
+{
+    const MIRBody &body = mirFn.body;
+
+    // Conditions 1+2: exactly ONE parameter is pointer-ish, and it is `&mut T`.
+    // Two of them may alias: the borrow checker keeps two `&mut` disjoint, but a
+    // sibling `&T` may alias a reserved `&mut` (two-phase borrows make
+    // `f(&mut x, &x)` legal), and a reference CARRIED INSIDE a by-value aggregate
+    // (`VecIter { src: &v }`) aliases just as well.
+    int onlyPointerParam = -1;
+    bool onlyIsExclusive = false;
+    for (size_t i = 1; i <= body.argCount; ++i)
+    {
+        const std::shared_ptr<Type> &ty = body.locals[i].type;
+        if (!containsIndirection(ty))
+            continue;
+        if (onlyPointerParam >= 0)
+            return; // a second way into the object: say nothing
+        onlyPointerParam = static_cast<int>(i);
+        onlyIsExclusive = ty->getKind() == Type::Kind::Reference &&
+                          std::static_pointer_cast<ReferenceType>(ty)->isMutableRef();
+    }
+    if (onlyPointerParam < 0 || !onlyIsExclusive)
+        return;
+
+    // Condition 3: C callers are not bound by the borrow checker, so an exported
+    // entry point cannot promise exclusivity.
+    if (isCEntryPoint(mirFn.name))
+        return;
+
+    // Condition 4: a global is reachable without any parameter, so `f(&mut G)`
+    // whose body also touches `G` would alias through it.
+    if (bodyReferencesGlobals(mirFn))
+        return;
+
+    // locals[1..argCount] map to the LLVM parameters in order.
+    fn->addParamAttr(static_cast<unsigned>(onlyPointerParam - 1),
+        llvm::Attribute::NoAlias);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pass 2 — function declarations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,10 +400,14 @@ void LLVMIRBuilder::declareFunctions(const MIRProgram &prog)
             isCEntryPoint(mirFn->name) ? llvm::GlobalValue::ExternalLinkage
                                        : llvm::GlobalValue::InternalLinkage;
 
-        llvm::Function::Create(fty,
+        llvm::Function *declared = llvm::Function::Create(fty,
             linkage,
             mirFn->name,
             context->module.get());
+
+        // The other half of the language's facts: which references are
+        // exclusive (see applyParameterAttributes for the conditions).
+        applyParameterAttributes(declared, *mirFn);
     }
 }
 

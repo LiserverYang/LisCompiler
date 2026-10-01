@@ -16,3 +16,4 @@
 - [FFI：调用 C](./ffi.md)
 - [错误信息](./errors.md)
 - [已知限制与路线图](./limitations.md)
+- [优化：语言事实的分工](./optimization.md)
