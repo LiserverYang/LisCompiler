@@ -2301,7 +2301,8 @@ TEST_F(RuntimeTest, MapIteratesInKeyOrder)
                  "        }\n"
                  "    }\n"
                  "    ret 0; }",
-        "1 2 3 ", 0);
+        "1 2 3 ",
+        0);
 }
 
 TEST_F(RuntimeTest, MapForLoopVisitsEveryEntryInOrder)
@@ -2315,7 +2316,8 @@ TEST_F(RuntimeTest, MapForLoopVisitsEveryEntryInOrder)
                  "    for e in m { acc = acc + *e.key * 100 + *e.value; }\n"
                  "    print(acc);\n"
                  "    ret 0; }",
-        "330", 0);
+        "330",
+        0);
 }
 
 TEST_F(RuntimeTest, MapIterationSortedForManyKeys)
@@ -2384,7 +2386,8 @@ TEST_F(RuntimeTest, MapStringKeysIterateInOrder)
                  "        }\n"
                  "    }\n"
                  "    ret 0; }",
-        "a b ", 0);
+        "a b ",
+        0);
 }
 
 TEST_F(RuntimeTest, SetBasicOperations)
@@ -2413,7 +2416,8 @@ TEST_F(RuntimeTest, SetIteratesInKeyOrder)
                  "    for k in s { print(*k); print(\" \"); acc = acc + *k; }\n"
                  "    print(acc);\n"
                  "    ret 0; }",
-        "1 3 5 9", 0);
+        "1 3 5 9",
+        0);
 }
 
 // ── hash table: hashmap.lis ─────────────────────────────────────────────────
@@ -2445,8 +2449,8 @@ TEST_F(RuntimeTest, HashMapIterationVisitsEveryEntry)
               "    let mut i = 0;\n"
               "    while i < 50 { h.insert((i * 7) % 50, i); i = i + 1; }\n"
               "    if h.len() != 50 { ret 1; }\n"
-              "    let mut total = 0;\n"        // 'sum' is the iterator module's
-              "    let mut seen = 0;\n"          // promoted name in the prologue
+              "    let mut total = 0;\n" // 'sum' is the iterator module's
+              "    let mut seen = 0;\n"  // promoted name in the prologue
               "    let mut it = h.iter();\n"
               "    while true {\n"
               "        match it.next() {\n"
@@ -2662,7 +2666,8 @@ TEST_F(RuntimeTest, FfiFmodDouble)
     // built from the callee's signature, not from an opaque i8(...) prototype).
     expectOutputFfi("extern \"C\" fn fmod(x: f64, y: f64) -> f64;\n"
                     "fn main() -> i32 { print(fmod(7.5, 2.0)); ret 0; }\n",
-        "1.500000", 0);
+        "1.500000",
+        0);
 }
 
 TEST_F(RuntimeTest, FfiMutRefWritesThrough)
@@ -2700,7 +2705,8 @@ TEST_F(RuntimeTest, FfiLinkNameBindsADifferentCSymbol)
     // cMyExp, the C symbol is exp, and the wrapper below calls it in a loop.
     expectOutputFfi("#[link_name = \"exp\"] extern \"C\" fn cMyExp(x: f64) -> f64;\n"
                     "fn main() -> i32 { print(cMyExp(0.0)); ret 0; }\n",
-        "1.000000", 0);
+        "1.000000",
+        0);
 }
 
 TEST_F(RuntimeTest, FfiRequiresCapability)

@@ -182,9 +182,7 @@ namespace
 {
 bool isVoidType(const std::shared_ptr<Type> &ty)
 {
-    return ty && ty->getKind() == Type::Kind::Primitive &&
-           std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() ==
-               PrimitiveType::PrimKind::VOID;
+    return ty && ty->getKind() == Type::Kind::Primitive && std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() == PrimitiveType::PrimKind::VOID;
 }
 } // namespace
 
@@ -270,8 +268,7 @@ bool rvalueTouchesGlobal(const MIRRValue &rv)
                 return false;
             }
             else
-                return false;
-        },
+                return false; },
         rv);
 }
 
@@ -298,8 +295,7 @@ bool LLVMIRBuilder::bodyReferencesGlobals(const MIRFunction &mirFn)
                 {
                     using T = std::decay_t<decltype(s)>;
                     if constexpr (std::is_same_v<T, MIRStmtAssign>)
-                        return s.lhs.base == PlaceBase::Global ||
-                               rvalueTouchesGlobal(s.rhs);
+                        return s.lhs.base == PlaceBase::Global || rvalueTouchesGlobal(s.rhs);
                     else if constexpr (std::is_same_v<T, MIRStmtCall>)
                         return callTouchesGlobal(s);
                     else if constexpr (std::is_same_v<T, MIRStmtDrop>)
@@ -322,8 +318,7 @@ bool LLVMIRBuilder::bodyReferencesGlobals(const MIRFunction &mirFn)
                 else if constexpr (std::is_same_v<T, MIRTermCall>)
                     return callTouchesGlobal(t.call);
                 else
-                    return false;
-            },
+                    return false; },
             bb.terminator);
         if (terminatorTouches)
             return true;
@@ -350,8 +345,7 @@ void LLVMIRBuilder::applyParameterAttributes(llvm::Function *fn, const MIRFuncti
         if (onlyPointerParam >= 0)
             return; // a second way into the object: say nothing
         onlyPointerParam = static_cast<int>(i);
-        onlyIsExclusive = ty->getKind() == Type::Kind::Reference &&
-                          std::static_pointer_cast<ReferenceType>(ty)->isMutableRef();
+        onlyIsExclusive = ty->getKind() == Type::Kind::Reference && std::static_pointer_cast<ReferenceType>(ty)->isMutableRef();
     }
     if (onlyPointerParam < 0 || !onlyIsExclusive)
         return;
@@ -766,8 +760,7 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
             planSig = std::dynamic_pointer_cast<FunctionType>(cp->place.type);
         if (planSig && FfiAbi::needsPlan(*planSig))
         {
-            externPlan = FfiAbi::classify(*planSig, context->targetTriple,
-                context->module->getDataLayout(), ctx_);
+            externPlan = FfiAbi::classify(*planSig, context->targetTriple, context->module->getDataLayout(), ctx_);
             if (externPlan.valid)
             {
                 auto operandPlacePtr = [&](const MIROperand &op) -> llvm::Value *
@@ -809,8 +802,7 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                     {
                         llvm::Value *at = (k == 0)
                                               ? ptr
-                                              : builder_->CreateGEP(llvm::Type::getInt8Ty(ctx_), ptr,
-                                                    builder_->getInt64((uint64_t)k * 8), "agg.p");
+                                              : builder_->CreateGEP(llvm::Type::getInt8Ty(ctx_), ptr, builder_->getInt64((uint64_t)k * 8), "agg.p");
                         expanded.push_back(builder_->CreateLoad(externPlan.argTys[i][k], at, "agg"));
                     }
                 }
@@ -900,27 +892,27 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         }
         else
         {
-        // Direct call by name (most common path): the callee temp holds the
-        // function name and s.funcName is the real symbol.
-        callee = context->module->getFunction(s.funcName);
-        if (!callee)
-        {
-            // Not a module function. If the callee place is FUNCTION-typed it is
-            // a function-pointer VALUE (a local/param) — call through it rather
-            // than minting a bogus external declaration.
-            auto funcTy = std::dynamic_pointer_cast<FunctionType>(move->place.type);
-            if (funcTy)
+            // Direct call by name (most common path): the callee temp holds the
+            // function name and s.funcName is the real symbol.
+            callee = context->module->getFunction(s.funcName);
+            if (!callee)
             {
-                indirectPtr = loadPlace(fs, move->place);
-                indirectTy = funcTy;
+                // Not a module function. If the callee place is FUNCTION-typed it is
+                // a function-pointer VALUE (a local/param) — call through it rather
+                // than minting a bogus external declaration.
+                auto funcTy = std::dynamic_pointer_cast<FunctionType>(move->place.type);
+                if (funcTy)
+                {
+                    indirectPtr = loadPlace(fs, move->place);
+                    indirectTy = funcTy;
+                }
+                else
+                {
+                    // The function is external — declare it with an opaque signature
+                    // (stdlib/intrinsic calls).
+                    callee = getOrDeclareFn(s.funcName);
+                }
             }
-            else
-            {
-                // The function is external — declare it with an opaque signature
-                // (stdlib/intrinsic calls).
-                callee = getOrDeclareFn(s.funcName);
-            }
-        }
         }
     }
     else if (auto *copy = std::get_if<MIRCopy>(&s.callee))
@@ -934,20 +926,20 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         }
         else
         {
-        callee = context->module->getFunction(s.funcName);
-        if (!callee)
-        {
-            auto funcTy = std::dynamic_pointer_cast<FunctionType>(copy->place.type);
-            if (funcTy)
+            callee = context->module->getFunction(s.funcName);
+            if (!callee)
             {
-                indirectPtr = loadPlace(fs, copy->place);
-                indirectTy = funcTy;
+                auto funcTy = std::dynamic_pointer_cast<FunctionType>(copy->place.type);
+                if (funcTy)
+                {
+                    indirectPtr = loadPlace(fs, copy->place);
+                    indirectTy = funcTy;
+                }
+                else
+                {
+                    callee = getOrDeclareFn(s.funcName);
+                }
             }
-            else
-            {
-                callee = getOrDeclareFn(s.funcName);
-            }
-        }
         }
     }
 
@@ -1009,8 +1001,7 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                                             : builder_->CreateExtractValue(result, {(unsigned)k}, "agg");
                     llvm::Value *at = (k == 0)
                                           ? dst
-                                          : builder_->CreateGEP(llvm::Type::getInt8Ty(ctx_), dst,
-                                                builder_->getInt64((uint64_t)k * 8), "agg.p");
+                                          : builder_->CreateGEP(llvm::Type::getInt8Ty(ctx_), dst, builder_->getInt64((uint64_t)k * 8), "agg.p");
                     builder_->CreateStore(part, at);
                 }
             }
@@ -1392,13 +1383,13 @@ llvm::Value *LLVMIRBuilder::lowerConst(const MIRConst &c)
             if (llvm::Function *fn = context->module->getFunction(fnName))
                 return fn;
             // A function NAME used as a value. When the module does not define it,
-        // the symbol is external: an extern "C" declaration carries its real
-        // signature in the MIR const's type (declaring it opaquely here would
-        // settle the WRONG type into the module before the call is emitted, and
-        // LLVM keeps the first declaration).
-        if (auto ft = std::dynamic_pointer_cast<FunctionType>(c.type))
-            return getOrDeclareExternFn(fnName, ft);
-        return getOrDeclareFn(fnName); // external — opaque declaration
+            // the symbol is external: an extern "C" declaration carries its real
+            // signature in the MIR const's type (declaring it opaquely here would
+            // settle the WRONG type into the module before the call is emitted, and
+            // LLVM keeps the first declaration).
+            if (auto ft = std::dynamic_pointer_cast<FunctionType>(c.type))
+                return getOrDeclareExternFn(fnName, ft);
+            return getOrDeclareFn(fnName); // external — opaque declaration
         }
         // Emit a null-terminated global string constant and return a pointer.
         const std::string &s = std::get<std::string>(c.value);
@@ -1658,8 +1649,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, con
     // the call site has to do exactly the same -- lowerCall classifies the same
     // signature. Without this the IR carried the struct type and C received only
     // its first field.
-    const FfiAbi::Plan plan = FfiAbi::classify(*sig, context->targetTriple,
-        context->module->getDataLayout(), ctx_);
+    const FfiAbi::Plan plan = FfiAbi::classify(*sig, context->targetTriple, context->module->getDataLayout(), ctx_);
 
     std::vector<llvm::Type *> params;
     params.reserve(sig->getParams().size() + 1);
@@ -1927,8 +1917,7 @@ llvm::Function *LLVMIRBuilder::getOrDeclareFwrite()
     return getOrDeclareLibcFunction("fwrite",
         llvm::FunctionType::get(
             llvm::Type::getInt64Ty(ctx_),
-            {llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt64Ty(ctx_),
-                llvm::Type::getInt64Ty(ctx_), llvm::PointerType::getUnqual(ctx_)},
+            {llvm::PointerType::getUnqual(ctx_), llvm::Type::getInt64Ty(ctx_), llvm::Type::getInt64Ty(ctx_), llvm::PointerType::getUnqual(ctx_)},
             /*isVarArg=*/false));
 }
 
@@ -1948,8 +1937,7 @@ llvm::Value *LLVMIRBuilder::getStdinFilePtr()
     // through __acrt_iob_func (no data symbol); other libcs export globals.
 #ifdef _WIN32
     llvm::Function *iob = getOrDeclareAcrtIobFunc();
-    return builder_->CreateCall(iob->getFunctionType(), iob,
-        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
+    return builder_->CreateCall(iob->getFunctionType(), iob, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 0)});
 #else
     llvm::GlobalVariable *g = getOrDeclareStdin();
     return builder_->CreateLoad(llvm::PointerType::getUnqual(ctx_), g);
@@ -1960,8 +1948,7 @@ llvm::Value *LLVMIRBuilder::getStdoutFilePtr()
 {
 #ifdef _WIN32
     llvm::Function *iob = getOrDeclareAcrtIobFunc();
-    return builder_->CreateCall(iob->getFunctionType(), iob,
-        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 1)});
+    return builder_->CreateCall(iob->getFunctionType(), iob, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 1)});
 #else
     llvm::GlobalVariable *g = context->module->getNamedGlobal("stdout");
     if (!g)

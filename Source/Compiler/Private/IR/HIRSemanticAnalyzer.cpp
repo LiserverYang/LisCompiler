@@ -8,8 +8,8 @@
 #include "Core/TargetInit.hpp"
 #include "IR/FfiAbi.hpp"
 
-#include <llvm/IR/DataLayout.h>
 #include "IR/BuiltinNames.hpp"
+#include <llvm/IR/DataLayout.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -4208,8 +4208,7 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
 
     auto bad = [&](const std::string &why)
     {
-        log(owner, "the " + what + " has type '" + ty->toString()
-                + "', which cannot cross the C boundary: " + why, E_NonFfiSafeType);
+        log(owner, "the " + what + " has type '" + ty->toString() + "', which cannot cross the C boundary: " + why, E_NonFfiSafeType);
         return false;
     };
 
@@ -4305,8 +4304,7 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
             auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
             auto probe = context->typeContext->getFunction({ty}, voidTy);
             const std::string dl = context->dataLayout.empty() ? hostDataLayout() : context->dataLayout;
-            FfiAbi::Plan plan = FfiAbi::classify(*probe, context->targetTriple,
-                llvm::DataLayout(dl), *context->llvmContext);
+            FfiAbi::Plan plan = FfiAbi::classify(*probe, context->targetTriple, llvm::DataLayout(dl), *context->llvmContext);
             if (!plan.valid)
                 return bad(plan.why);
         }
@@ -4328,7 +4326,8 @@ void HIRSemanticAnalyzer::analyzeExternDeclaration(HIRFunction *f, const std::ve
     {
         log(*f, "extern \"C\" declarations need the FFI capability: the standard library has it, "
                 "anything else gets it from --allow-ffi. FFI can break every guarantee the "
-                "language makes, so it is opt-in.", E_FFIOutsideAllowedScope);
+                "language makes, so it is opt-in.",
+            E_FFIOutsideAllowedScope);
         return;
     }
 
@@ -4357,8 +4356,7 @@ void HIRSemanticAnalyzer::analyzeExternDeclaration(HIRFunction *f, const std::ve
     }
     else if (sig && it->second && !sig->equals(it->second))
     {
-        log(*f, "the C symbol '" + cName + "' is already declared with the signature '"
-                + it->second->toString() + "'.", E_NonFfiSafeType);
+        log(*f, "the C symbol '" + cName + "' is already declared with the signature '" + it->second->toString() + "'.", E_NonFfiSafeType);
     }
 }
 
@@ -4402,9 +4400,8 @@ void HIRSemanticAnalyzer::analyzeExportDeclaration(HIRFunction *f)
         if (f->params[i].second && f->params[i].second->getKind() == Type::Kind::Custom
             && !std::static_pointer_cast<CustomType>(f->params[i].second)->isEnum())
         {
-            log(*f, "an exported function cannot take the struct '" + f->params[i].second->toString()
-                    + "' BY VALUE yet: the reverse direction has to adapt the ABI inside the body. "
-                      "Take &T / &mut T / *T / *mut T instead.",
+            log(*f, "an exported function cannot take the struct '" + f->params[i].second->toString() + "' BY VALUE yet: the reverse direction has to adapt the ABI inside the body. "
+                                                                                                        "Take &T / &mut T / *T / *mut T instead.",
                 E_NonFfiSafeType);
             ok = false;
         }
@@ -4414,9 +4411,7 @@ void HIRSemanticAnalyzer::analyzeExportDeclaration(HIRFunction *f)
     if (f->returnType && f->returnType->getKind() == Type::Kind::Custom
         && !std::static_pointer_cast<CustomType>(f->returnType)->isEnum())
     {
-        log(*f, "an exported function cannot RETURN the struct '" + f->returnType->toString()
-                + "' BY VALUE yet (same reason). Return a pointer instead.",
-            E_NonFfiSafeType);
+        log(*f, "an exported function cannot RETURN the struct '" + f->returnType->toString() + "' BY VALUE yet (same reason). Return a pointer instead.", E_NonFfiSafeType);
         ok = false;
     }
     if (!ok)
@@ -4806,9 +4801,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
         if (funcType->isVarArg())
         {
             if (node->args.size() < funcType->getParams().size())
-                log(*node, "this C function expects at least "
-                        + std::to_string(funcType->getParams().size())
-                        + " argument(s), got " + std::to_string(node->args.size()) + ".");
+                log(*node, "this C function expects at least " + std::to_string(funcType->getParams().size()) + " argument(s), got " + std::to_string(node->args.size()) + ".");
         }
         else if (node->args.size() != funcType->getParams().size())
             log(*node, "argument count mismatch.");
@@ -4909,8 +4902,7 @@ void HIRSemanticAnalyzer::visit(HIRCall *node)
             for (size_t i = fixed.size(); i < node->args.size(); ++i)
             {
                 analyzeExpr(node->args[i].get());
-                checkFfiSafeType(*node->args[i], node->args[i]->type,
-                    "argument " + std::to_string(i + 1) + " passed through '...'", /*variadic=*/true);
+                checkFfiSafeType(*node->args[i], node->args[i]->type, "argument " + std::to_string(i + 1) + " passed through '...'", /*variadic=*/true);
             }
         }
         else

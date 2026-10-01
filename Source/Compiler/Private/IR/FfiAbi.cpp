@@ -55,8 +55,7 @@ size_t sizeOf(const std::shared_ptr<Type> &ty, const llvm::DataLayout &dl, llvm:
     return dl.getTypeAllocSize(semanticTypeToLLVM(ty, ctx));
 }
 
-void eachScalar(const std::shared_ptr<Type> &ty, uint64_t base, const llvm::DataLayout &dl,
-    llvm::LLVMContext &ctx, const std::function<void(uint64_t, const std::shared_ptr<Type> &)> &visit)
+void eachScalar(const std::shared_ptr<Type> &ty, uint64_t base, const llvm::DataLayout &dl, llvm::LLVMContext &ctx, const std::function<void(uint64_t, const std::shared_ptr<Type> &)> &visit)
 {
     if (!ty)
         return;
@@ -89,8 +88,7 @@ bool FfiAbi::needsPlan(const FunctionType &sig)
     return isByValueAggregate(sig.getReturnType());
 }
 
-FfiAbi::Plan FfiAbi::classify(const FunctionType &sig, const std::string &triple,
-    const llvm::DataLayout &dl, llvm::LLVMContext &ctx)
+FfiAbi::Plan FfiAbi::classify(const FunctionType &sig, const std::string &triple, const llvm::DataLayout &dl, llvm::LLVMContext &ctx)
 {
     Plan plan;
     llvm::Triple t(triple.empty() ? llvm::sys::getDefaultTargetTriple() : triple);
@@ -123,8 +121,7 @@ FfiAbi::Plan FfiAbi::classify(const FunctionType &sig, const std::string &triple
                     return;
                 lastByte[idx] = std::max(lastByte[idx], off + sizeOf(leaf, dl, ctx));
                 if (!isFloatType(leaf))
-                    sse[idx] = false;
-            });
+                    sse[idx] = false; });
 
         std::vector<llvm::Type *> parts;
         for (unsigned i = 0; i < eightbytes; ++i)
@@ -141,8 +138,7 @@ FfiAbi::Plan FfiAbi::classify(const FunctionType &sig, const std::string &triple
                             if (off >= begin && off < begin + 8
                                 && std::static_pointer_cast<PrimitiveType>(leaf)->getPrimKind()
                                        == PrimitiveType::PrimKind::F32)
-                                ++floats;
-                        });
+                                ++floats; });
                     if (floats == 2)
                     {
                         parts.push_back(llvm::FixedVectorType::get(llvm::Type::getFloatTy(ctx), 2));

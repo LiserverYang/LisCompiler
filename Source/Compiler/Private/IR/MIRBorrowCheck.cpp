@@ -1246,7 +1246,8 @@ bool FunctionChecker::referencesFlowInto(const std::shared_ptr<Type> &dst, const
     return dstPointee && srcPointee && dstPointee->equals(srcPointee);
 }
 
-void FunctionChecker::collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call){
+void FunctionChecker::collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call)
+{
     // A C function's pointer lifetime is the caller's business, and a RAW pointer
     // is not a borrow at all (`__deref_mut` returns `&mut T` from a `*mut T`).
     if (call.isExtern || !call.dest.has_value())
@@ -1305,13 +1306,13 @@ void FunctionChecker::collectCallResultBorrow(size_t blockIndex, size_t stmtInde
     if (describePlace(target).throughDeref)
         return;
 
-    const std::vector<size_t> ids{addBorrow(target, dest.root, SIZE_MAX,
-        carriedReferenceIsMut(destType), /*twoPhase=*/false)};
+    const std::vector<size_t> ids{addBorrow(target, dest.root, SIZE_MAX, carriedReferenceIsMut(destType), /*twoPhase=*/false)};
     borrowSites_[{blockIndex, stmtIndex}] = ids;
     holderBorrow_[dest.root] = ids.back();
 }
 
-MIRPlace FunctionChecker::placeOfLocal(size_t index) const{
+MIRPlace FunctionChecker::placeOfLocal(size_t index) const
+{
     MIRPlace place;
     place.base = PlaceBase::Local;
     place.index = index;
@@ -2028,8 +2029,7 @@ void FunctionChecker::settleBorrows(size_t blockIndex, size_t stmtIndex, const M
                     continue;
                 if (std::find(sources.begin(), sources.end(), entry.second) == sources.end())
                     continue;
-                if (carriesReferenceTo(destType, borrows_[entry.first].place.type) ||
-                    referencesFlowInto(destType, body_.locals[entry.second].type))
+                if (carriesReferenceTo(destType, borrows_[entry.first].place.type) || referencesFlowInto(destType, body_.locals[entry.second].type))
                     entry.second = redefined;
             }
         }

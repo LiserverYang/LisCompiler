@@ -676,7 +676,8 @@ protected:
 
     /// expectRun with extra C/C++ sources (see compileLinkRunWithSources).
     void expectRunWithSources(const std::string &source,
-        const std::vector<std::pair<std::string, std::string>> &extraSources, int expectedExit)
+        const std::vector<std::pair<std::string, std::string>> &extraSources,
+        int expectedExit)
     {
         const int code = compileLinkRunWithSources(source, extraSources, nullptr);
         EXPECT_EQ(code, expectedExit) << "runtime exit code mismatch (with " << extraSources.size()
@@ -687,7 +688,8 @@ protected:
     /// expectOutput with extra C/C++ sources (see compileLinkRunWithSources).
     void expectOutputWithSources(const std::string &source,
         const std::vector<std::pair<std::string, std::string>> &extraSources,
-        const std::string &expectedOut, int expectedExit)
+        const std::string &expectedOut,
+        int expectedExit)
     {
         std::string out;
         const int code = compileLinkRunWithSources(source, extraSources, &out);

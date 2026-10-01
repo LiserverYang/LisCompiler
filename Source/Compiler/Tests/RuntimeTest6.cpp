@@ -67,7 +67,8 @@ TEST_F(RuntimeTest, FfiAggregateIntCoercion)
         "    if f2(F2 { a: fa, b: fb }) != 12.0 { ret 6; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", c}}, 0);
+        {{"helper.cpp", c}},
+        0);
 }
 
 // ── bigger aggregates: passed BY REFERENCE (a copy), returned via sret ──────
@@ -112,7 +113,8 @@ TEST_F(RuntimeTest, FfiAggregateByReference)
         "    if grown.v[7] != 17 as i64 { ret 8; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", c}}, 0);
+        {{"helper.cpp", c}},
+        0);
 }
 
 // ── nested aggregate: a struct whose only field is another struct ───────────
@@ -136,7 +138,8 @@ TEST_F(RuntimeTest, FfiAggregateNested)
         "    if made.inner.w != 8 { ret 3; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", c}}, 0);
+        {{"helper.cpp", c}},
+        0);
 }
 
 // ── SysV x86-64 classification, pinned against clang ────────────────────────
@@ -158,7 +161,8 @@ TEST_F(RuntimeTest, FfiSysvAggregateClassification)
         "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
     const std::string triple = "x86_64-unknown-linux-gnu";
 
-    auto prim = [&](PrimitiveType::PrimKind k) { return tc->getPrimitive(k); };
+    auto prim = [&](PrimitiveType::PrimKind k)
+    { return tc->getPrimitive(k); };
     auto i32 = prim(PrimitiveType::PrimKind::I32);
     auto i64 = prim(PrimitiveType::PrimKind::I64);
     auto f32 = prim(PrimitiveType::PrimKind::F32);
@@ -193,10 +197,14 @@ TEST_F(RuntimeTest, FfiSysvAggregateClassification)
         return FfiAbi::classify(*sig, triple, dl, llvmCtx);
     };
 
-    auto isF32 = [&](llvm::Type *t) { return t == llvm::Type::getFloatTy(llvmCtx); };
-    auto isF64 = [&](llvm::Type *t) { return t == llvm::Type::getDoubleTy(llvmCtx); };
-    auto isI32 = [&](llvm::Type *t) { return t == llvm::Type::getInt32Ty(llvmCtx); };
-    auto isI64 = [&](llvm::Type *t) { return t == llvm::Type::getInt64Ty(llvmCtx); };
+    auto isF32 = [&](llvm::Type *t)
+    { return t == llvm::Type::getFloatTy(llvmCtx); };
+    auto isF64 = [&](llvm::Type *t)
+    { return t == llvm::Type::getDoubleTy(llvmCtx); };
+    auto isI32 = [&](llvm::Type *t)
+    { return t == llvm::Type::getInt32Ty(llvmCtx); };
+    auto isI64 = [&](llvm::Type *t)
+    { return t == llvm::Type::getInt64Ty(llvmCtx); };
     auto isF32x2 = [&](llvm::Type *t)
     { return t == llvm::FixedVectorType::get(llvm::Type::getFloatTy(llvmCtx), 2); };
 
@@ -213,7 +221,7 @@ TEST_F(RuntimeTest, FfiSysvAggregateClassification)
     EXPECT_TRUE(isF64(s3[0]));
     auto s4 = partsOf(shape("S4", {{"a", i32}, {"b", f32}}));
     ASSERT_EQ(s4.size(), 1u);
-    EXPECT_TRUE(isI64(s4[0]));                       // mixed chunk -> INTEGER
+    EXPECT_TRUE(isI64(s4[0])); // mixed chunk -> INTEGER
     auto s5 = partsOf(shape("S5", {{"a", i32}, {"b", i32}}));
     ASSERT_EQ(s5.size(), 1u);
     EXPECT_TRUE(isI64(s5[0]));
@@ -291,5 +299,6 @@ TEST_F(RuntimeTest, FfiCppMangledName)
     expectRunWithSources(
         "#[link_name = \"_Z7cpp_addii\"] extern \"C\" fn cpp_add(a: i32, b: i32) -> i32;\n"
         "export fn lis_calls_cpp() -> i32 { ret cpp_add(40, 2); }\n",
-        {{"main.cpp", helper}}, 0);
+        {{"main.cpp", helper}},
+        0);
 }

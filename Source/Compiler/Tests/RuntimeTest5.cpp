@@ -36,7 +36,8 @@ TEST_F(RuntimeTest, FfiReprCStructReadThroughPointer)
         "    if point_sum(&p) != 70 { ret 4; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiReprCLayoutMatchesC)
@@ -72,7 +73,8 @@ TEST_F(RuntimeTest, FfiReprCLayoutMatchesC)
         "    if mixed_sum(&m) != 15 as i64 { ret 5; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiReprCNestedAndArrayFields)
@@ -91,7 +93,8 @@ TEST_F(RuntimeTest, FfiReprCNestedAndArrayFields)
         "    if outer_sum(&o) != 15 { ret 1; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiStructByValueRejected)
@@ -115,9 +118,9 @@ TEST_F(RuntimeTest, FfiStructByValueRejected)
         "extern \"C\" fn opaque_sum(p: &Opaque) -> i32;\n"
         "fn main() -> i32 { let o = Opaque { v: 5 }; ret opaque_sum(&o); }\n",
         {{"helper.cpp",
-          "#include <cstdint>\n"
-          "struct Opaque { int32_t v; };\n"
-          "extern \"C\" int32_t opaque_sum(const Opaque* p) { return p->v; }\n"}},
+            "#include <cstdint>\n"
+            "struct Opaque { int32_t v; };\n"
+            "extern \"C\" int32_t opaque_sum(const Opaque* p) { return p->v; }\n"}},
         5);
 }
 
@@ -176,7 +179,8 @@ TEST_F(RuntimeTest, FfiBoolScalarUsesCAbi)
         "    if c_not(t) != false { ret 6; }   // a bool VALUE round trips too\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiVariadicBoolStillRejected)
@@ -234,7 +238,8 @@ TEST_F(RuntimeTest, FfiStringOwnershipRoundTrip)
         "    print(rev_s.to_cstr()); println();\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiVecOwnershipRoundTrip)
@@ -272,7 +277,8 @@ TEST_F(RuntimeTest, FfiVecOwnershipRoundTrip)
         "    if nums[4] != 4 { ret 7; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 // ── opaque handles: an empty struct is the only thing that can be one ────────
@@ -327,7 +333,8 @@ TEST_F(RuntimeTest, FfiExportCalledFromC)
     expectRunWithSources(
         "export fn add(a: i32, b: i32) -> i32 { ret a + b; }\n"
         "#[link_name = \"lis_mul\"] export fn multiply(a: i32, b: i32) -> i32 { ret a * b; }\n",
-        {{"main.cpp", helper}}, 0);
+        {{"main.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiExportHandsOwnedBufferToC)
@@ -353,7 +360,8 @@ TEST_F(RuntimeTest, FfiExportHandsOwnedBufferToC)
         "    let mut m = s;\n"
         "    ret m.into_raw();\n"
         "}\n",
-        {{"main.cpp", helper}}, 0);
+        {{"main.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiExportMustBeWellFormed)
@@ -458,7 +466,8 @@ TEST_F(RuntimeTest, FfiCallbackExternNamePassedThrough)
         "    if again != 6 as i64 { ret 2; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 // ── #[repr(C, packed)]: the layout WITHOUT padding ──────────────────────────
@@ -495,7 +504,8 @@ TEST_F(RuntimeTest, FfiPackedStructLayoutMatchesC)
         "    if packed_sum(&p) != 6 as i64 { ret 4; }\n"
         "    ret 0;\n"
         "}\n",
-        {{"helper.cpp", helper}}, 0);
+        {{"helper.cpp", helper}},
+        0);
 }
 
 TEST_F(RuntimeTest, FfiPackedMisuse)

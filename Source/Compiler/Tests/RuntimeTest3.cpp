@@ -104,13 +104,17 @@ TEST_F(RuntimeTest, MathFloorCeilRoundTrunc)
     // Each of them must be right on the NEGATIVE side too — that is where a
     // naive trunc-based implementation goes wrong.
     expectOutput("fn main() -> i32 { print(floor(2.5)); print(' '); print(floor(0.0 - 2.5)); ret 0; }",
-        "2.000000 -3.000000", 0);
+        "2.000000 -3.000000",
+        0);
     expectOutput("fn main() -> i32 { print(ceil(2.5)); print(' '); print(ceil(0.0 - 2.5)); ret 0; }",
-        "3.000000 -2.000000", 0);
+        "3.000000 -2.000000",
+        0);
     expectOutput("fn main() -> i32 { print(round(2.5)); print(' '); print(round(0.0 - 2.5)); ret 0; }",
-        "3.000000 -3.000000", 0);
+        "3.000000 -3.000000",
+        0);
     expectOutput("fn main() -> i32 { print(trunc(2.9)); print(' '); print(trunc(0.0 - 2.9)); ret 0; }",
-        "2.000000 -2.000000", 0);
+        "2.000000 -2.000000",
+        0);
     expectOutput("fn main() -> i32 { print(fract(2.25)); ret 0; }", "0.250000", 0);
 }
 
@@ -1032,7 +1036,7 @@ TEST_F(RuntimeTest, TryReadTellsEofFromZero)
     // "0" is a value and end-of-input is None; the plain readers answer 0 for
     // both, so the try_ family is what a "read until exhausted" loop needs.
     // (match, not is_none(a) + a.unwrap(): is_none takes the Option BY VALUE, so
-     // the two calls would be a use-after-move.)
+    // the two calls would be a use-after-move.)
     expectOutputWithInput("fn main() -> i32 { let a = try_read_i32();"
                           " match a { Some(v) => { print(v); }, None => { print(\"none\"); } }"
                           " let b = try_read_i32();"

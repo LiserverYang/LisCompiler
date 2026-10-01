@@ -32,10 +32,10 @@ struct Plan
     std::vector<ArgKind> args;                     ///< one per source parameter
     std::vector<std::vector<llvm::Type *>> argTys; ///< the parts that parameter becomes
     RetKind ret = RetKind::Direct;
-    std::vector<llvm::Type *> retParts;            ///< Coerce: 1 or 2 register-sized types
-    llvm::Type *retTy = nullptr;                   ///< Coerce: the value returned; Sret: ptr
+    std::vector<llvm::Type *> retParts; ///< Coerce: 1 or 2 register-sized types
+    llvm::Type *retTy = nullptr;        ///< Coerce: the value returned; Sret: ptr
     bool valid = true;
-    std::string why;                               ///< when !valid: the reason, for E3020
+    std::string why; ///< when !valid: the reason, for E3020
 };
 
 /// True when any parameter or the return type is a by-value aggregate (a struct).
@@ -43,6 +43,5 @@ bool needsPlan(const FunctionType &sig);
 
 /// Classify \p sig for the target described by \p triple / \p dl -- exactly the
 /// ones codegen uses (Context::targetTriple / Context::dataLayout).
-Plan classify(const FunctionType &sig, const std::string &triple,
-    const llvm::DataLayout &dl, llvm::LLVMContext &ctx);
+Plan classify(const FunctionType &sig, const std::string &triple, const llvm::DataLayout &dl, llvm::LLVMContext &ctx);
 } // namespace FfiAbi
