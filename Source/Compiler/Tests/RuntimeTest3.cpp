@@ -1300,17 +1300,79 @@ TEST_F(RuntimeTest, WholeValueMoveOfDropTypeAllowed)
               " fn main() -> i32 { let p = P { v: 1 }; let q = p; ret g; }",
         0);
 }
-TEST_F(RuntimeTest, ConditionalMoveKeepsUntrackedAliasAlive)
+TEST_F(RuntimeTest, ConditionalMoveKeepsDropFlagCorrect)
 {
-    // The early drop was a use-after-free through an alias the borrow checker
-    // cannot see: `p` is a raw pointer into `a`'s buffer (String::to_cstr()),
-    // and the second allocation is what reuses the block the early drop
-    // released. Before the fix this printed garbage bytes instead of 'hello'.
-    expectOutput("fn main() -> i32 { let a = String::from_lit(\"hello\");"
-                 " let p = a.to_cstr(); let c = 0; if c == 1 { let b = a; }"
-                 " let z = String::from_lit(\"ZZZZZZZZZZZZZZZZ\");"
-                 " print(p); println(); ret 0; }",
-        "hello\n",
+    // A conditionally moved value must be dropped EXACTLY ONCE at scope end: the
+    // drop FLAG decides, not a static "was it moved" answer (0 = dropped twice,
+    // 2 = dropped never). The old form of this test observed the drop through a
+    // raw pointer into the value's buffer -- an alias the checker could not see,
+    // which is why it used to print freed memory (and, since 2026-10-01, is
+    // REJECTED: see ToCstrBorrowIsTracked below). The drop itself is what is
+    // observed now, through a scope that ends before main reads the counter.
+    expectRun("let g = 0;"
+              " struct P { pub v: i32 } impl Drop for P { fn drop(self) { g = g + 1; } }"
+              " fn inner() { let a = P { v: 1 }; let c = 0; if c == 1 { let b = a; } }"
+              " fn main() -> i32 { inner(); ret g; }",
+        1);
+}
+
+// ── returned borrows are tracked (2026-10-01) ────────────────────────────────
+//
+// `to_cstr`/`at_ref`/`get_ref`/`at_mut` return a borrow OF THE RECEIVER. Until
+// this landed the result was untracked: the receiver's own borrow ended with the
+// call, so the program below compiled and read freed memory (the to_cstr one
+// printed garbage bytes, and no diagnostic was produced).
+
+TEST_F(RuntimeTest, ToCstrBorrowIsTracked)
+{
+    expectCompileFail("fn main() { let a = String::from_lit(\"hello\");"
+                      " let p = a.to_cstr(); let c = 0; if c == 1 { let b = a; }"
+                      " print(p); }",
+        "E4004");
+}
+
+TEST_F(RuntimeTest, ToCstrBorrowBlocksPushChar)
+{
+    expectCompileFail("fn main() -> i32 { let mut s = String::from_lit(\"hi\");"
+                      " let p = s.to_cstr(); s.push_char('x'); print(p); ret 0; }",
+        "E4001");
+}
+
+TEST_F(RuntimeTest, AtRefBorrowBlocksPush)
+{
+    expectCompileFail("impt vec { Vec };"
+                      " fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);"
+                      " let r = v.at_ref(0); v.push(2); ret *r; }",
+        "E4001");
+}
+
+TEST_F(RuntimeTest, AtMutBorrowBlocksRead)
+{
+    // `m` has to stay LIVE for the conflict to exist: an unused exclusive borrow
+    // ends at its own binding (the suite pins that separately, in
+    // UnusedSharedBorrowDoesNotBlock).
+    expectCompileFail("impt vec { Vec };"
+                      " fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);"
+                      " let m = v.at_mut(0); let x = v[0]; *m = x + 1; ret 0; }",
+        "E4002");
+}
+
+// ... and the legal uses must stay legal: writing through the exclusive borrow,
+// reading the container while only a SHARED borrow of it is out, and using the
+// borrowed view as a temporary.
+TEST_F(RuntimeTest, BorrowedViewStillUsable)
+{
+    expectRun("impt vec { Vec };"
+              " fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(1);"
+              " let m = v.at_mut(0); *m = 5; ret v[0]; }",
+        5);
+    expectRun("impt vec { Vec };"
+              " fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(7);"
+              " let r = v.at_ref(0); let x = v[0]; ret x + *r; }",
+        14);
+    expectOutput("fn main() -> i32 { let s = String::from_lit(\"ok\");"
+                 " print(s.to_cstr()); println(); ret 0; }",
+        "ok\n",
         0);
 }
 

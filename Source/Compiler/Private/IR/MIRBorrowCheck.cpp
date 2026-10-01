@@ -280,6 +280,13 @@ private:
     /// The borrow that put a reference value into a local (the alias table the
     /// deref resolution reads). Flow-insensitive, exactly like the HIR one.
     std::unordered_map<size_t, size_t> holderBorrow_;
+    /// Local holding a reference -> WHAT IT POINTS AT, as a place. The alias
+    /// table above is not enough for that question: for `_t = &(*self).links` it
+    /// names the FREEZE record of the pointer (`self`), not the referent, and a
+    /// borrow checker that hands `self` to a long-lived result then rejects every
+    /// write to every field of self (that is exactly how HashMap stopped
+    /// compiling). Filled in source order alongside the alias table.
+    std::unordered_map<size_t, MIRPlace> refLocalTarget_;
     /// holder local -> the pointer local it was reborrowed through.
     std::unordered_map<size_t, size_t> parentOfHolder_;
     /// Locals whose value is passed to a call (receiver / reference argument):
@@ -435,6 +442,22 @@ private:
     bool carriesReferenceTo(const std::shared_ptr<Type> &ty, const std::shared_ptr<Type> &pointee, int depth = 0) const;
     /// ... and does it carry a reference at all? A cheap pre-filter for the above.
     bool carriesReference(const std::shared_ptr<Type> &ty, int depth = 0) const;
+
+    // ── the borrow a CALL RESULT holds ──────────────────────────────────────
+    /// The type of an operand: a constant's, a whole local's, or the type a
+    /// projection chain denotes. Null when MIR does not carry it.
+    std::shared_ptr<Type> typeOfOperand(const MIROperand &op) const;
+    /// Which ARGUMENT a call's result borrows from, by Rust's lifetime-elision
+    /// rule: the only reference parameter, or the first one when there are
+    /// several (a method's receiver). -1 = the signature does not say, and the
+    /// call is left untracked (exactly the pre-existing behaviour).
+    int provenanceArgOf(const MIRStmtCall &call) const;
+    /// The mutability of the reference a value CARRIES: `Option<&mut V>` is a
+    /// MUTABLE borrow even though the outer type is an enum, not a reference.
+    bool carriedReferenceIsMut(const std::shared_ptr<Type> &ty, int depth = 0) const;
+    /// Make the destination of a reference-returning call the holder of the
+    /// borrow it derives from (see the definition for the four conditions).
+    void collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call);
     size_t wholeLocalDefinedBy(const MIRStatement &stmt) const;
     std::string borrowName(const MIRPlace &place) const;
 };
@@ -1125,8 +1148,142 @@ bool FunctionChecker::carriesReferenceTo(const std::shared_ptr<Type> &ty,
     return false;
 }
 
-MIRPlace FunctionChecker::placeOfLocal(size_t index) const
+// ─── the borrow a CALL RESULT holds ─────────────────────────────────────────
+//
+// `let r = v.at_ref(0);` used to leave NOTHING behind. The receiver is a
+// temporary reborrow that ends with the statement, and the carrier transfer in
+// settleBorrows matches on the pointee TYPE -- `&i32` against the borrowed
+// `Vec<i32>` never matches, which is why only the `iter()` shape (whose
+// `VecIter.src: &Vec<T>` happens to name the borrowed type) was covered. So
+// `v.push(1)` afterwards compiled and `*r` read freed memory.
+//
+// The signature already says where the reference comes from (elision), and MIR
+// has linearized the receiver into a temporary that HOLDS the borrow of `v`, so
+// the result's binding can simply become the holder of that same borrow.
+
+std::shared_ptr<Type> FunctionChecker::typeOfOperand(const MIROperand &op) const
 {
+    if (auto *c = std::get_if<MIRConst>(&op))
+        return c->type;
+    const MIRPlace *place = operandPlace(op);
+    if (!place)
+        return nullptr;
+    const PlaceInfo info = describePlace(*place);
+    if (!info.isLocal || info.root >= body_.locals.size())
+        return nullptr;
+    if (!info.throughDeref && info.path.empty())
+        return body_.locals[info.root].type;
+    return typeAfter(body_.locals[info.root].type, *place, place->projections.size());
+}
+
+int FunctionChecker::provenanceArgOf(const MIRStmtCall &call) const
+{
+    auto sig = std::dynamic_pointer_cast<FunctionType>(typeOfOperand(call.callee));
+    if (!sig)
+        return -1;
+    const auto &params = sig->getParams();
+
+    int onlyRef = -1;
+    size_t refCount = 0;
+    for (size_t i = 0; i < params.size(); ++i)
+    {
+        if (!isReferenceType(params[i]))
+            continue;
+        ++refCount;
+        if (onlyRef < 0)
+            onlyRef = static_cast<int>(i);
+    }
+    if (refCount == 1)
+        return onlyRef;
+    // Several reference parameters: elision gives the result the RECEIVER's
+    // lifetime, and MIR always passes the receiver first.
+    if (refCount > 1 && !params.empty() && isReferenceType(params[0]))
+        return 0;
+    return -1; // `fn f() -> &T`, or an all-by-value signature: nothing to tie to
+}
+
+bool FunctionChecker::carriedReferenceIsMut(const std::shared_ptr<Type> &ty, int depth) const
+{
+    if (!ty || depth > 4)
+        return false;
+    if (auto ref = std::dynamic_pointer_cast<ReferenceType>(ty))
+        return ref->isMutableRef();
+    auto ct = std::dynamic_pointer_cast<CustomType>(ty);
+    if (!ct)
+        return false;
+    for (const auto &field : ct->getFields())
+        if (carriesReference(field.type, depth + 1))
+            return carriedReferenceIsMut(field.type, depth + 1);
+    return false;
+}
+
+void FunctionChecker::collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call)
+{
+    // A C function's pointer lifetime is the caller's business, and a RAW pointer
+    // is not a borrow at all (`__deref_mut` returns `&mut T` from a `*mut T`).
+    if (call.isExtern || !call.dest.has_value())
+        return;
+
+    // Only a whole local can hold a tracked reference value.
+    const PlaceInfo dest = describePlace(*call.dest);
+    if (!dest.isLocal || dest.throughDeref || !dest.path.empty())
+        return;
+    const std::shared_ptr<Type> destType = body_.locals[dest.root].type;
+    if (!carriesReference(destType))
+        return;
+
+    const int argIdx = provenanceArgOf(call);
+    if (argIdx < 0 || static_cast<size_t>(argIdx) >= call.args.size())
+        return;
+    const MIRPlace *argPlace = operandPlace(call.args[argIdx]);
+    if (!argPlace)
+        return;
+
+    // What the result borrows. The argument is normally a reference temporary
+    // (`_11 = &v`) whose resolved target names `v`; a projected argument
+    // (`holder.r`) is its own place. A reference PARAMETER (`self`) is left
+    // alone: borrowing the local would block every write to `self`.
+    MIRPlace target;
+    bool haveTarget = false;
+    const PlaceInfo argInfo = describePlace(*argPlace);
+    if (argInfo.isLocal && !argInfo.throughDeref && argInfo.path.empty())
+    {
+        auto resolved = refLocalTarget_.find(argInfo.root);
+        auto held = holderBorrow_.find(argInfo.root);
+        if (resolved != refLocalTarget_.end())
+        {
+            target = resolved->second; // `_t = &v`, `_t = &(*self).links`
+            haveTarget = true;
+        }
+        else if (held != holderBorrow_.end())
+        {
+            target = borrows_[held->second].place; // a reference that came from elsewhere
+            haveTarget = true;
+        }
+    }
+    else if (!argInfo.throughDeref)
+    {
+        target = *argPlace;
+        haveTarget = true;
+    }
+    if (!haveTarget)
+        return;
+
+    // The checker compares places down to the FIRST Deref only (PlaceInfo::path);
+    // everything below one collapses to "the whole pointee", so a long-lived
+    // borrow of `(*self).links` would block a write to `(*self).freeHead`. Those
+    // borrows therefore stay statement-local, exactly as they were before this
+    // rule -- the stdlib's `self.field.at(i)` receivers are the case.
+    if (describePlace(target).throughDeref)
+        return;
+
+    const std::vector<size_t> ids{addBorrow(target, dest.root, SIZE_MAX,
+        carriedReferenceIsMut(destType), /*twoPhase=*/false)};
+    borrowSites_[{blockIndex, stmtIndex}] = ids;
+    holderBorrow_[dest.root] = ids.back();
+}
+
+MIRPlace FunctionChecker::placeOfLocal(size_t index) const{
     MIRPlace place;
     place.base = PlaceBase::Local;
     place.index = index;
@@ -1289,6 +1446,17 @@ void FunctionChecker::collectBorrowSites()
         for (size_t i = 0; i < block.stmts.size(); ++i)
         {
             const MIRStatement &stmt = block.stmts[i];
+
+            // A call that RETURNS a reference (`v.at_ref(i)`, `s.to_cstr()`,
+            // `m.get_ref(&k)`) makes its destination the holder of the borrow
+            // the signature says it derives from -- registered here, in source
+            // order, so every later statement sees it.
+            if (auto *resultCall = std::get_if<MIRStmtCall>(&stmt))
+            {
+                collectCallResultBorrow(b, i, *resultCall);
+                continue;
+            }
+
             auto *as = std::get_if<MIRStmtAssign>(&stmt);
             if (!as)
                 continue;
@@ -1309,6 +1477,12 @@ void FunctionChecker::collectBorrowSites()
                     if (parent != parentOfHolder_.end())
                         parentOfHolder_[copyDest.root] = parent->second;
                 }
+                // A copy of a reference points at the same place: carry the
+                // resolved target along, or a call through the copy would fall
+                // back to the (coarser) alias-table answer.
+                auto carriedTarget = refLocalTarget_.find(copySource);
+                if (carriedTarget != refLocalTarget_.end())
+                    refLocalTarget_[copyDest.root] = carriedTarget->second;
             }
 
             auto *ref = std::get_if<MIRRValueRef>(&as->rhs);
@@ -1329,6 +1503,9 @@ void FunctionChecker::collectBorrowSites()
                                   && callArgLocals_.count(dest.root) > 0
                                   && promotedTemps.count(dest.root) == 0;
             std::vector<size_t> ids;
+            // What a reference to this place points AT (`&(*self).links` points
+            // at the Arena field, not at the freeze of `self`).
+            MIRPlace refTarget = ref->place;
             const PlaceInfo rinfo = describePlace(ref->place);
             if (rinfo.throughDeref)
             {
@@ -1352,11 +1529,13 @@ void FunctionChecker::collectBorrowSites()
                     }
                     ids.push_back(addBorrow(resolved, dest.root, rinfo.root, ref->isMut, twoPhase));
                     parentOfHolder_[dest.root] = rinfo.root;
+                    refTarget = resolved;
                 }
             }
             else
                 ids.push_back(addBorrow(ref->place, dest.root, SIZE_MAX, ref->isMut, twoPhase));
 
+            refLocalTarget_[dest.root] = refTarget;
             borrowSites_[{b, i}] = ids;
             // The alias table remembers the REFERENT (the last record), so a
             // reborrow of a reborrow still resolves to the original place.
