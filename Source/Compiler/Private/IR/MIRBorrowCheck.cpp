@@ -455,6 +455,13 @@ private:
     /// The mutability of the reference a value CARRIES: `Option<&mut V>` is a
     /// MUTABLE borrow even though the outer type is an enum, not a reference.
     bool carriedReferenceIsMut(const std::shared_ptr<Type> &ty, int depth = 0) const;
+    /// The pointee of the first reference a VALUE carries: `&V` -> V,
+    /// `Option<&V>` -> V, `VecIter<T>` -> Vec<T>. Null when it carries none.
+    std::shared_ptr<Type> carriedPointee(const std::shared_ptr<Type> &ty, int depth = 0) const;
+    /// Does the reference carried by `src` flow into `dst`? A by-value carrier
+    /// MOVES the borrow (`o: Option<&V>` moved into `unwrap(): &V`), so the
+    /// holder has to follow or the borrow ends at the move.
+    bool referencesFlowInto(const std::shared_ptr<Type> &dst, const std::shared_ptr<Type> &src) const;
     /// Make the destination of a reference-returning call the holder of the
     /// borrow it derives from (see the definition for the four conditions).
     void collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call);
@@ -1217,8 +1224,29 @@ bool FunctionChecker::carriedReferenceIsMut(const std::shared_ptr<Type> &ty, int
     return false;
 }
 
-void FunctionChecker::collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call)
+std::shared_ptr<Type> FunctionChecker::carriedPointee(const std::shared_ptr<Type> &ty, int depth) const
 {
+    if (!ty || depth > 4)
+        return nullptr;
+    if (auto ref = std::dynamic_pointer_cast<ReferenceType>(ty))
+        return ref->getBaseType();
+    auto ct = std::dynamic_pointer_cast<CustomType>(ty);
+    if (!ct)
+        return nullptr;
+    for (const auto &field : ct->getFields())
+        if (auto pointee = carriedPointee(field.type, depth + 1))
+            return pointee;
+    return nullptr;
+}
+
+bool FunctionChecker::referencesFlowInto(const std::shared_ptr<Type> &dst, const std::shared_ptr<Type> &src) const
+{
+    std::shared_ptr<Type> dstPointee = carriedPointee(dst);
+    std::shared_ptr<Type> srcPointee = carriedPointee(src);
+    return dstPointee && srcPointee && dstPointee->equals(srcPointee);
+}
+
+void FunctionChecker::collectCallResultBorrow(size_t blockIndex, size_t stmtIndex, const MIRStmtCall &call){
     // A C function's pointer lifetime is the caller's business, and a RAW pointer
     // is not a borrow at all (`__deref_mut` returns `&mut T` from a `*mut T`).
     if (call.isExtern || !call.dest.has_value())
@@ -1981,7 +2009,11 @@ void FunctionChecker::settleBorrows(size_t blockIndex, size_t stmtIndex, const M
     //     at the call and the loop body could mutate the collection the iterator
     //     points into. Matching on the POINTEE (not just "the destination holds
     //     some reference") is what keeps this precise — the coarse version
-    //     regressed five cases.
+    //     regressed five cases. The second test covers the BY-VALUE carrier:
+    //     `let o = m.get_ref(&k); let r = o.unwrap();` moves an `Option<&V>`
+    //     into `unwrap` and gets the `&V` back, so the reference that flows
+    //     from the source into the destination is the same one — the pointee
+    //     matches even though the borrowed PLACE is the container.
     if (redefined != SIZE_MAX && redefined != copySource)
     {
         const std::shared_ptr<Type> destType =
@@ -1996,7 +2028,8 @@ void FunctionChecker::settleBorrows(size_t blockIndex, size_t stmtIndex, const M
                     continue;
                 if (std::find(sources.begin(), sources.end(), entry.second) == sources.end())
                     continue;
-                if (carriesReferenceTo(destType, borrows_[entry.first].place.type))
+                if (carriesReferenceTo(destType, borrows_[entry.first].place.type) ||
+                    referencesFlowInto(destType, body_.locals[entry.second].type))
                     entry.second = redefined;
             }
         }

@@ -1404,6 +1404,38 @@ TEST_F(RuntimeTest, StringIndexEachPosition)
         97 + 99);
 }
 
+// ── a by-value CARRIER moves the borrow with the value (2026-10-01, step 2) ───
+//
+// `get_ref` hands back an `Option<&V>`; `unwrap` takes that Option BY VALUE and
+// gives back the `&V` inside it. The reference that flows from the source into
+// the destination is the same one, so the borrow has to follow the value -- the
+// older carrier rule compared the carried pointee against the BORROWED PLACE's
+// type (the container), which for `Option<&V>` never matches.
+TEST_F(RuntimeTest, UnwrapCarriesTheBorrow)
+{
+    expectCompileFail("impt map { Map };"
+                      " fn main() -> i32 { let mut m = Map<i32, i32>::new(); m.insert(1, 10);"
+                      " let o = m.get_ref(&1); let r = o.unwrap(); m.insert(2, 20); ret *r; }",
+        "E4001");
+
+    // Reading it without touching the container is still fine.
+    expectRun("impt map { Map };"
+              " fn main() -> i32 { let mut m = Map<i32, i32>::new(); m.insert(1, 10);"
+              " let o = m.get_ref(&1); let r = o.unwrap(); ret *r; }",
+        10);
+}
+
+// The same transfer happens when the reference is put into a struct LITERAL:
+// `H { r: v.at_ref(0) }` builds a value that carries the borrow.
+TEST_F(RuntimeTest, StructLiteralCarriesTheBorrow)
+{
+    expectCompileFail("impt vec { Vec };"
+                      " struct H { pub r: &i32 }"
+                      " fn main() -> i32 { let mut v = Vec<i32>::new(); v.push(7);"
+                      " let h = H { r: v.at_ref(0) }; v.push(8); ret *h.r; }",
+        "E4001");
+}
+
 // ── B2: more operator overloading ──────────────────────────────────────────────
 
 TEST_F(RuntimeTest, OpOverloadGreaterThan)
