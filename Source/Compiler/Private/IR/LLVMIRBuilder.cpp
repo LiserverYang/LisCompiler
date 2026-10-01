@@ -163,6 +163,22 @@ void LLVMIRBuilder::declareStructTypes(const MIRProgram &prog)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Language facts → LLVM facts
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The optimizer re-derives almost everything from the bodies: at -O2 LLVM's
+// FunctionAttrs already puts `mustprogress`, `nounwind`, `willreturn`,
+// `memory(...)` and `nocapture`/`readonly` on the functions and parameters it
+// can prove things about (measured on Examples/fft_bigint.lis). What it can NOT
+// derive is what the LANGUAGE knows: which symbols are C-visible, and which
+// references are exclusive. Those are the two facts stated here.
+
+bool LLVMIRBuilder::isCEntryPoint(const std::string &name) const
+{
+    return name == "main" || context->exportedSymbols.count(name) > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Pass 2 — function declarations
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -188,8 +204,21 @@ void LLVMIRBuilder::declareFunctions(const MIRProgram &prog)
         llvm::Type *retTy = toLLVMType(body.returnType);
         llvm::FunctionType *fty = llvm::FunctionType::get(retTy, paramTypes, /*isVarArg=*/false);
 
+        // LINKAGE is a language fact, not a codegen detail: the whole program
+        // (stdlib + user code) is lowered into ONE module, and C can only ever
+        // reach `main` and the `export fn` entry points. Everything else is
+        // module-private, so say so: internal linkage lets GlobalDCE drop the
+        // functions nothing calls (a program that uses a handful of stdlib
+        // routines otherwise EMITS all of them) and stops the object from
+        // exporting hundreds of symbols nobody can link against. Measured on
+        // Examples/fft_bigint.lis at -o 2: optimized IR 4065 -> 1514 lines,
+        // object 25537 -> 9192 bytes, runtime unchanged.
+        llvm::GlobalValue::LinkageTypes linkage =
+            isCEntryPoint(mirFn->name) ? llvm::GlobalValue::ExternalLinkage
+                                       : llvm::GlobalValue::InternalLinkage;
+
         llvm::Function::Create(fty,
-            llvm::GlobalValue::ExternalLinkage,
+            linkage,
             mirFn->name,
             context->module.get());
     }
@@ -1351,8 +1380,10 @@ llvm::Function *LLVMIRBuilder::getOrDeclareDropGlue(const std::string &structNam
         {llvm::PointerType::getUnqual(ctx_)},
         /*isVarArg=*/false);
 
+    // Synthesized by the compiler for a type's own teardown: no C caller can
+    // name it, so it gets internal linkage like every other non-entry point.
     llvm::Function *func = llvm::Function::Create(fty,
-        llvm::GlobalValue::ExternalLinkage,
+        llvm::GlobalValue::InternalLinkage,
         name,
         context->module.get());
 

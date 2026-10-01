@@ -184,6 +184,13 @@ protected:
     /// pins, is DENIED).
     bool ffiForThisTest_ = false;
 
+    /// Optimisation level of the next compile(). 2 by default, so every
+    /// existing test keeps the behaviour it was written against; a test that
+    /// asserts on the EMITTED IR sets 0 to inspect the module the builder
+    /// produced, before inlining and globaldce can delete the very function
+    /// under test.
+    unsigned emitOptLevel_ = 2;
+
     void TearDown() override
     {
         std::error_code ec;
@@ -307,6 +314,8 @@ protected:
 
         Emitter::Options opts;
         opts.outPath = objPath.string();
+        opts.optLevel = emitOptLevel_;
+        opts.runOptimiser = emitOptLevel_ > 0;
         Emitter emitter(context, opts);
         emitter.run();
         // The module (and its context) stay available for in-process execution.
@@ -425,6 +434,8 @@ protected:
 
         Emitter::Options opts;
         opts.outPath = objPath.string();
+        opts.optLevel = emitOptLevel_;
+        opts.runOptimiser = emitOptLevel_ > 0;
         Emitter emitter(context, opts);
         emitter.run();
         fs::remove_all(modDir);

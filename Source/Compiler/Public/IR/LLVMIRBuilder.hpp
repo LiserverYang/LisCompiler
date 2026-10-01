@@ -204,6 +204,12 @@ private:
     llvm::Value *coerceBoolFromC(llvm::Value *v, const std::shared_ptr<FunctionType> &sig);
     std::string mangleName(const MIRFunction &fn) const;
 
+    /// True for the only two things C can reach in the object: `main` (the C
+    /// runtime) and every `export fn` (Context::exportedSymbols holds the C
+    /// symbol each one emits -- the #[link_name] name when there is one).
+    /// Everything else is module-private and gets internal linkage.
+    bool isCEntryPoint(const std::string &name) const;
+
     /// Declare `printf(i32(ptr, ...))` once. Still needed by the Display
     /// lowering for the primitives (`__show_*`); the print_* builtins that used
     /// it are gone — printing is stdlib code now.
