@@ -35,3 +35,7 @@ bc_test_out_*.txt
 
 # 多 agent 协调协议共享目录(在仓库外,见 CLAUDE.md / F:\LisCompiler-Coord)
 
+# perf artifacts (perf record writes these wherever it is invoked from)
+perf.data
+perf.data.old
+
