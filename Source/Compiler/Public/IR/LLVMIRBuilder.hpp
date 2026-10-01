@@ -105,6 +105,12 @@ private:
         llvm::Function *fn = nullptr;
         const MIRBody *body = nullptr;
 
+        /// A VOID `fn main()` is emitted as the standard `i32 @main()` (see
+        /// declareFunctions): the C runtime turns the return value into the
+        /// process status, and a void main hands it whatever the last libc
+        /// call left in eax. Every `ret` in such a function returns 0.
+        bool implicitZeroRet = false;
+
         // local index → alloca (for mutable / address-taken locals)
         std::unordered_map<size_t, llvm::AllocaInst *> allocas;
 

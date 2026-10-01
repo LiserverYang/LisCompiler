@@ -178,6 +178,16 @@ bool LLVMIRBuilder::isCEntryPoint(const std::string &name) const
     return name == "main" || context->exportedSymbols.count(name) > 0;
 }
 
+namespace
+{
+bool isVoidType(const std::shared_ptr<Type> &ty)
+{
+    return ty && ty->getKind() == Type::Kind::Primitive &&
+           std::static_pointer_cast<PrimitiveType>(ty)->getPrimKind() ==
+               PrimitiveType::PrimKind::VOID;
+}
+} // namespace
+
 bool LLVMIRBuilder::containsIndirection(const std::shared_ptr<Type> &ty, int depth)
 {
     // Unknown, or nested past the sanity bound: assume it may alias. Refusing the
@@ -384,7 +394,14 @@ void LLVMIRBuilder::declareFunctions(const MIRProgram &prog)
         for (size_t i = 1; i <= body.argCount; ++i)
             paramTypes.push_back(toLLVMType(body.locals[i].type));
 
-        llvm::Type *retTy = toLLVMType(body.returnType);
+        // A VOID `fn main()` still has to hand the C runtime a STATUS: it reads
+        // the return value, and a void function leaves whatever the last libc
+        // call happened to put in eax (measured: `fn main() { print("hello"); }`
+        // exited 5 -- fwrite's byte count). Emit the standard `i32 @main()` and
+        // return 0 from every `ret` (see FunctionState::implicitZeroRet).
+        const bool voidMain = mirFn->name == "main" && isVoidType(body.returnType);
+        llvm::Type *retTy = voidMain ? llvm::Type::getInt32Ty(ctx_)
+                                     : toLLVMType(body.returnType);
         llvm::FunctionType *fty = llvm::FunctionType::get(retTy, paramTypes, /*isVarArg=*/false);
 
         // LINKAGE is a language fact, not a codegen detail: the whole program
@@ -470,6 +487,9 @@ void LLVMIRBuilder::lowerFunctionBody(const MIRFunction &mirFn)
     FunctionState fs;
     fs.fn = fn;
     fs.body = &body;
+    // A VOID main was declared as `i32 @main()` (declareFunctions), so its
+    // `ret` terminators have to produce that 0 instead of `ret void`.
+    fs.implicitZeroRet = fn->getReturnType()->isIntegerTy(32) && isVoidType(body.returnType);
     fs.blocks.clear();
     fs.allocas.clear();
 
@@ -1077,6 +1097,14 @@ void LLVMIRBuilder::lowerTerminator(FunctionState &fs, const MIRTerminator &term
                     retSlot.base = PlaceBase::Return;
                     llvm::Value* retVal = loadPlace(fs, retSlot);
                     builder_->CreateRet(retVal);
+                }
+                else if (fs.implicitZeroRet)
+                {
+                    // A VOID main: the LLVM function returns i32 (the C runtime
+                    // wants a status), the MIR one returns void — so there is no
+                    // return slot to load and 0 is the status.
+                    builder_->CreateRet(
+                        llvm::ConstantInt::get(fs.fn->getReturnType(), 0));
                 }
                 else
                 {
