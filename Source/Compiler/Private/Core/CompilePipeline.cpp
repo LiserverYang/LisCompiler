@@ -54,6 +54,9 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--out"}, setAsValue, "", "Where to write the object file (default ./a.o)."});
     argParser->registRule(ArgParseRule{{"--shared"}, setAsTrue, "false", "Also produce a shared library next to the object (lib<stem>.dll / <stem>.so), linked with g++."});
     argParser->registRule(ArgParseRule{{"--allow-ffi"}, setAsTrue, "false", "Allow extern C declarations (FFI) in user code. OFF by default: FFI can break every guarantee the language makes, so the standard library has it and the judge does not hand it to submissions."});
+    argParser->registRule(ArgParseRule{{"--target"}, setAsValue, "", "Build for another target triple (e.g. thumbv7m-none-eabi) instead of the host. Only the object file is produced: --shared stays a host-only operation."});
+    argParser->registRule(ArgParseRule{{"--cpu"}, setAsValue, "", "Target CPU (e.g. cortex-m3). Empty = the host CPU for a host target, \"generic\" for a cross target."});
+    argParser->registRule(ArgParseRule{{"--features"}, setAsValue, "", "Target feature string (e.g. \"+thumb2\"). Empty = the host features for a host target, none for a cross target."});
     argParser->registRule(ArgParseRule{{"--max-depth"},
         setAsValue,
         "256",
@@ -104,6 +107,29 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         start = semi + 1;
     }
 
+    // Resolve the TARGET here, once -- like `-I` and the stdlib directory above, it
+    // is command-line state, and the file the lambda pass below reads is not an
+    // input to it. The FFI ABI classification (how a struct is passed by value) is a
+    // function of type sizes, and the ANALYZER enforces it -- which runs long before
+    // the Emitter creates its TargetMachine. Same resolver as the Emitter's
+    // (Core/TargetInit.hpp), so the module's data layout agrees with codegen's.
+    {
+        ResolvedTarget target = resolveTarget(context->args->getArg("target"),
+            context->args->getArg("cpu"),
+            context->args->getArg("features"));
+        context->targetTriple = target.triple;
+        context->dataLayout = target.dataLayout;
+        context->targetCPU = target.cpu;
+        context->targetFeatures = target.features;
+
+        // --shared is linked by the HOST toolchain (the Emitter drives g++), which
+        // cannot produce a foreign target's shared object: fail as a usage error
+        // instead of writing a host-linked library next to a cross-target object.
+        if (!target.host && context->args->getArg("shared") == "true")
+            throw ArgParseError("--shared links with the host toolchain and cannot be combined with "
+                                 "--target " + target.triple + "; emit the object and link it with your target linker");
+    }
+
     // NOTE: the Argparser is deliberately NOT pushed into `passes` any more --
     // it has already run above, and a second run would re-walk an exhausted
     // argv (`pos` is left at argc).
@@ -130,34 +156,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
             fs::path mainDir = fs::path(ctx->filePath).parent_path();
             if (mainDir.empty()) mainDir = ".";
             ctx->searchPaths.push_back(mainDir.string());
-
-            // Resolve the TARGET here, once. The FFI ABI classification (how a
-            // struct is passed by value) is a function of type sizes, and the
-            // ANALYZER enforces it -- which runs long before the Emitter creates
-            // its TargetMachine. Same inputs as the Emitter's, so the module's
-            // data layout agrees with the one codegen uses.
-            {
-                initLLVMTargetsOnce(); // the registry must know the native target first
-                std::string triple = llvm::sys::getDefaultTargetTriple();
-                std::string errStr;
-                const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, errStr);
-                if (!target)
-                    throw std::runtime_error("LLVM target lookup failed for '" + triple + "': " + errStr);
-                llvm::TargetOptions to;
-                llvm::StringMap<bool> fm = llvm::sys::getHostCPUFeatures();
-                llvm::SubtargetFeatures sf;
-                for (auto &[name, enabled] : fm)
-                    sf.AddFeature(name, enabled);
-                std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
-                    triple, llvm::sys::getHostCPUName().str(), sf.getString(), to,
-                    llvm::Reloc::PIC_, llvm::CodeModel::Small, llvm::CodeGenOptLevel::Default));
-                if (tm)
-                {
-                    ctx->targetTriple = tm->getTargetTriple().str();
-                    ctx->dataLayout = tm->createDataLayout().getStringRepresentation();
-                }
-
-            } }));
+        }));
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
     passes.emplace_back(std::make_unique<HIRBuilder>(context));
@@ -175,5 +174,9 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     int optLevel = std::stoi(context->args->getArg("o"));
     emitOpts.optLevel = optLevel;
     emitOpts.runOptimiser = (optLevel > 0);
+    // The same target the analyzer already classified the ABI against.
+    emitOpts.targetTriple = context->targetTriple;
+    emitOpts.cpu = context->targetCPU;
+    emitOpts.features = context->targetFeatures;
     passes.emplace_back(std::make_unique<Emitter>(context, emitOpts));
 }

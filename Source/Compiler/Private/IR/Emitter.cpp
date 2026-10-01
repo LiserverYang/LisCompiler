@@ -5,6 +5,8 @@
 
 #include "IR/Emitter.hpp"
 
+#include "Core/TargetInit.hpp"
+
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
@@ -24,46 +26,18 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 
-static void initLLVMTargets()
-{
-    static bool done = false;
-    if (done) return;
-    done = true;
-
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    llvm::InitializeNativeTargetAsmParser();
-}
-
 void Emitter::initTargetMachine()
 {
-    // Resolve the triple.
-    std::string triple = opts_.targetTriple.empty()
-                             ? llvm::sys::getDefaultTargetTriple()
-                             : opts_.targetTriple;
+    // ONE resolver for the whole compiler (Core/TargetInit.hpp): the early
+    // target-resolution pass, the FFI ABI rules and this machine all have to agree
+    // on the triple and the data layout, and a CROSS target must never be handed
+    // the HOST cpu (LLVM would reject a CPU name that does not exist there).
+    const ResolvedTarget target = resolveTarget(opts_.targetTriple, opts_.cpu, opts_.features);
 
     std::string errStr;
-    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, errStr);
-    if (!target)
-        throw std::runtime_error("LLVM target lookup failed for '" + triple + "': " + errStr);
-
-    // Resolve CPU and features.
-    std::string cpu = opts_.cpu.empty() ? llvm::sys::getHostCPUName().str()
-                                        : opts_.cpu;
-    std::string features = opts_.features;
-
-    if (features.empty())
-    {
-        // Auto-detect host CPU features (e.g. "+avx2,+bmi2").
-        llvm::StringMap<bool> fm = llvm::sys::getHostCPUFeatures();
-
-        llvm::SubtargetFeatures sf;
-
-        for (auto &[name, enabled] : fm)
-            sf.AddFeature(name, enabled);
-
-        features = sf.getString();
-    }
+    const llvm::Target *targetInfo = llvm::TargetRegistry::lookupTarget(target.triple, errStr);
+    if (!targetInfo)
+        throw std::runtime_error("LLVM target lookup failed for '" + target.triple + "': " + errStr);
 
     // Map our opt level to LLVM's CodeGenOptLevel.
     llvm::CodeGenOptLevel cgOpt;
@@ -76,9 +50,12 @@ void Emitter::initTargetMachine()
     }
 
     llvm::TargetOptions to;
-    tm_.reset(target->createTargetMachine(triple, cpu, features, to, llvm::Reloc::PIC_, llvm::CodeModel::Small, cgOpt));
+    // The relocation model rides along: a bare-metal target gets the static one
+    // (see resolveTarget), everything else stays position independent.
+    tm_.reset(targetInfo->createTargetMachine(
+        target.triple, target.cpu, target.features, to, target.reloc, llvm::CodeModel::Small, cgOpt));
     if (!tm_)
-        throw std::runtime_error("Failed to create TargetMachine for: " + triple);
+        throw std::runtime_error("Failed to create TargetMachine for: " + target.triple);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,7 +210,7 @@ void Emitter::linkExecutable(const std::vector<std::string> &objectFiles,
 
 void Emitter::run()
 {
-    initLLVMTargets();
+    initLLVMTargetsOnce();
     initTargetMachine();
 
     // The MODULE must carry the target triple and data layout, not just the
@@ -263,6 +240,15 @@ void Emitter::run()
     // judge use; clang is not necessarily on PATH).
     if (context->args->getArg("shared") == "true")
     {
+        // The link below drives the HOST g++, which cannot produce a foreign
+        // target's shared object. The pipeline refuses this combination on the
+        // command line; the check stays here so the Emitter is safe to use as a
+        // library too.
+        if (!opts_.targetTriple.empty() &&
+            llvm::Triple(opts_.targetTriple) != llvm::Triple(llvm::sys::getDefaultTargetTriple()))
+            throw ArgParseError(
+                "--shared links with the host toolchain and cannot be combined with --target " + opts_.targetTriple);
+
         std::string stem = objPath;
         const size_t dot = stem.find_last_of('.');
         const size_t slash = stem.find_last_of("/\\");

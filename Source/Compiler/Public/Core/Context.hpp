@@ -101,6 +101,12 @@ struct Context
     std::string targetTriple;
     std::string dataLayout;
 
+    /// The codegen knobs that go WITH that triple. For a host target they are the
+    /// host's; for a cross target they are what --cpu / --features asked for, and
+    /// the host's are never substituted (a host CPU name does not exist there).
+    std::string targetCPU;
+    std::string targetFeatures;
+
     /// Loaded file contents keyed by absolute path — for multi-file diagnostics
     /// (Context::filePath/fileValue is a single slot, restored after parsing).
     std::unordered_map<std::string, std::string> fileContents;

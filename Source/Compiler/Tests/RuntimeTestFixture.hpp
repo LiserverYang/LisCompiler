@@ -42,6 +42,7 @@ extern char *_pgmptr; // full path of the running executable (MinGW CRT)
 #endif
 
 #include "Core/Context.hpp"
+#include "Core/TargetInit.hpp"
 #include "IR/Emitter.hpp"
 #include "IR/HIRBuilder.hpp"
 #include "IR/HIRSemanticAnalyzer.hpp"
@@ -191,6 +192,15 @@ protected:
     /// under test.
     unsigned emitOptLevel_ = 2;
 
+    /// Target the next compile() builds for. Empty (the default, and what every
+    /// other test wants) means the host. The fixture builds its own pass list, so
+    /// the pipeline's early target-resolution pass never runs here and the test has
+    /// to stamp the same values the command line would; a CROSS target is only ever
+    /// inspected as an object file (the in-process JIT runs host code).
+    std::string targetTriple_;
+    std::string targetCpu_;
+    std::string targetFeatures_;
+
     void TearDown() override
     {
         std::error_code ec;
@@ -272,6 +282,15 @@ protected:
         // tests that ask for it may declare extern "C" (the rest of the suite
         // pins the DEFAULT, which is denied).
         context->ffiAllowed = ffiForThisTest_;
+        // Resolve the target exactly like the command line does -- one resolver for
+        // the analyzer's ABI rules and for codegen (see Core/TargetInit.hpp).
+        {
+            ResolvedTarget target = resolveTarget(targetTriple_, targetCpu_, targetFeatures_);
+            context->targetTriple = target.triple;
+            context->dataLayout = target.dataLayout;
+            context->targetCPU = target.cpu;
+            context->targetFeatures = target.features;
+        }
 
         // Main source (stdlib imports prepended).
         context->filePath = "test.lis";
@@ -316,6 +335,9 @@ protected:
         opts.outPath = objPath.string();
         opts.optLevel = emitOptLevel_;
         opts.runOptimiser = emitOptLevel_ > 0;
+        opts.targetTriple = context->targetTriple;
+        opts.cpu = context->targetCPU;
+        opts.features = context->targetFeatures;
         Emitter emitter(context, opts);
         emitter.run();
         // The module (and its context) stay available for in-process execution.
@@ -387,6 +409,15 @@ protected:
         context->searchPaths.push_back(modDir.string());
         context->searchPaths.push_back(stdLibDir.string());
         context->stdLibDirs.push_back(stdLibDir.string());
+        context->ffiAllowed = ffiForThisTest_;
+        // Same target resolution as the command line (Core/TargetInit.hpp).
+        {
+            ResolvedTarget target = resolveTarget(targetTriple_, targetCpu_, targetFeatures_);
+            context->targetTriple = target.triple;
+            context->dataLayout = target.dataLayout;
+            context->targetCPU = target.cpu;
+            context->targetFeatures = target.features;
+        }
 
         // Main source (stdlib imports prepended).
         context->filePath = "test.lis";
@@ -436,6 +467,9 @@ protected:
         opts.outPath = objPath.string();
         opts.optLevel = emitOptLevel_;
         opts.runOptimiser = emitOptLevel_ > 0;
+        opts.targetTriple = context->targetTriple;
+        opts.cpu = context->targetCPU;
+        opts.features = context->targetFeatures;
         Emitter emitter(context, opts);
         emitter.run();
         fs::remove_all(modDir);
