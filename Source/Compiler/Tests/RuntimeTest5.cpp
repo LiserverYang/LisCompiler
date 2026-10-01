@@ -508,3 +508,16 @@ TEST_F(RuntimeTest, FfiPackedMisuse)
                          "extern \"C\" fn f(p: P) -> i32;\nfn main() -> i32 { ret 0; }\n",
         "#[repr(C, packed)] struct can only cross BEHIND A POINTER");
 }
+
+TEST_F(RuntimeTest, FfiExportAggregateByValueRefused)
+{
+    // The matrix proves the CALL direction; the reverse one would have to unpack the
+    // ABI arguments inside the exported body, so it is refused instead of letting C
+    // mis-call. The pointer form still works (see the export tests above).
+    expectCompileFailFfi("#[repr(C)] struct S { pub a: i32, pub b: i32 }\n"
+                         "export fn takes(s: S) -> i32 { ret s.a; }\n",
+        "BY VALUE yet");
+    expectCompileFailFfi("#[repr(C)] struct S { pub a: i32, pub b: i32 }\n"
+                         "export fn gives() -> S { ret S { a: 1, b: 2 }; }\n",
+        "RETURN the struct");
+}

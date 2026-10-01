@@ -542,21 +542,43 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                         return placePtrOrNull(fs, cp->place);
                     return nullptr;
                 };
-                for (size_t i = 0; i < externPlan.args.size() && i < args.size(); ++i)
+                // One source argument may become TWO LLVM arguments (SysV splits a
+                // 9..16-byte aggregate across eightbytes), so the vector is rebuilt
+                // rather than patched in place.
+                std::vector<llvm::Value *> expanded;
+                expanded.reserve(args.size() + 1);
+                for (size_t i = 0; i < args.size(); ++i)
                 {
+                    if (i >= externPlan.args.size() || externPlan.args[i] == FfiAbi::ArgKind::Direct)
+                    {
+                        expanded.push_back(args[i]);
+                        continue;
+                    }
                     llvm::Value *ptr = operandPlacePtr(s.args[i]);
                     if (!ptr)
+                    {
+                        expanded.push_back(args[i]);
                         continue;
-                    if (externPlan.args[i] == FfiAbi::ArgKind::AsInt)
-                        args[i] = builder_->CreateLoad(externPlan.argTys[i], ptr, "agg");
-                    else if (externPlan.args[i] == FfiAbi::ArgKind::ByAddr)
+                    }
+                    if (externPlan.args[i] == FfiAbi::ArgKind::ByAddr)
                     {
                         llvm::Type *sty = toLLVMType(planSig->getParams()[i]);
                         llvm::Value *slot = emitEntryAlloca(builder_->GetInsertBlock()->getParent(), sty, "aggbuf");
                         builder_->CreateStore(lowerOperand(fs, s.args[i]), slot);
-                        args[i] = slot;
+                        expanded.push_back(slot);
+                        continue;
+                    }
+                    // Coerce: one part per eightbyte, loaded from its BYTE offset.
+                    for (size_t k = 0; k < externPlan.argTys[i].size(); ++k)
+                    {
+                        llvm::Value *at = (k == 0)
+                                              ? ptr
+                                              : builder_->CreateGEP(llvm::Type::getInt8Ty(ctx_), ptr,
+                                                    builder_->getInt64((uint64_t)k * 8), "agg.p");
+                        expanded.push_back(builder_->CreateLoad(externPlan.argTys[i][k], at, "agg"));
                     }
                 }
+                args = std::move(expanded);
                 if (externPlan.ret == FfiAbi::RetKind::Sret && s.dest.has_value())
                     args.insert(args.begin(), lowerPlaceAsPtr(fs, *s.dest));
             }
@@ -738,11 +760,24 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
 
         if (s.dest.has_value() && !isVoid) // don't store a void result
         {
-            if (externPlan.valid && externPlan.ret == FfiAbi::RetKind::AsInt)
-                // The aggregate came back as an integer of the same size: its bytes
-                // go straight into the destination slot (the layout is the C one by
-                // construction, and both sides are little-endian here).
-                builder_->CreateStore(result, lowerPlaceAsPtr(fs, *s.dest));
+            if (externPlan.valid && externPlan.ret == FfiAbi::RetKind::Coerce)
+            {
+                // The aggregate came back split into register-sized parts: put each
+                // one back at its BYTE offset in the destination (the layout is the C
+                // one by construction, and both sides are little-endian here).
+                llvm::Value *dst = lowerPlaceAsPtr(fs, *s.dest);
+                for (size_t k = 0; k < externPlan.retParts.size(); ++k)
+                {
+                    llvm::Value *part = (externPlan.retParts.size() == 1)
+                                            ? result
+                                            : builder_->CreateExtractValue(result, {(unsigned)k}, "agg");
+                    llvm::Value *at = (k == 0)
+                                          ? dst
+                                          : builder_->CreateGEP(llvm::Type::getInt8Ty(ctx_), dst,
+                                                builder_->getInt64((uint64_t)k * 8), "agg.p");
+                    builder_->CreateStore(part, at);
+                }
+            }
             else
                 storePlace(fs, *s.dest, result);
         }
@@ -1388,10 +1423,18 @@ llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, con
     for (size_t i = 0; i < sig->getParams().size(); ++i)
     {
         const bool coerced = plan.valid && i < plan.args.size() && plan.args[i] != FfiAbi::ArgKind::Direct;
-        params.push_back(coerced ? plan.argTys[i] : toLLVMTypeForFfi(sig->getParams()[i]));
+        if (coerced)
+        {
+            // One source parameter may become TWO register-sized ones (SysV
+            // splits a 9..16-byte aggregate across eightbytes).
+            for (llvm::Type *part : plan.argTys[i])
+                params.push_back(part);
+        }
+        else
+            params.push_back(toLLVMTypeForFfi(sig->getParams()[i]));
     }
     llvm::Type *ret = toLLVMTypeForFfi(sig->getReturnType());
-    if (plan.valid && plan.ret == FfiAbi::RetKind::AsInt)
+    if (plan.valid && plan.ret == FfiAbi::RetKind::Coerce)
         ret = plan.retTy;
     else if (sret)
         ret = llvm::Type::getVoidTy(ctx_);

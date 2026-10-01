@@ -4392,10 +4392,33 @@ void HIRSemanticAnalyzer::analyzeExportDeclaration(HIRFunction *f)
     // 3. The type whitelist, parameter by parameter and then the return type.
     bool ok = true;
     for (size_t i = 0; i < f->params.size(); ++i)
+    {
         if (!checkFfiSafeType(*f, f->params[i].second, "parameter '" + f->params[i].first + "'"))
             ok = false;
+        // The CALL direction coerces a by-value aggregate at the call site; the
+        // reverse one would have to unpack it inside THIS function's body (and pack
+        // the result on the way out). That adaptation is not written yet, so refuse
+        // rather than let C mis-call a function whose body does not know its own ABI.
+        if (f->params[i].second && f->params[i].second->getKind() == Type::Kind::Custom
+            && !std::static_pointer_cast<CustomType>(f->params[i].second)->isEnum())
+        {
+            log(*f, "an exported function cannot take the struct '" + f->params[i].second->toString()
+                    + "' BY VALUE yet: the reverse direction has to adapt the ABI inside the body. "
+                      "Take &T / &mut T / *T / *mut T instead.",
+                E_NonFfiSafeType);
+            ok = false;
+        }
+    }
     if (!checkFfiSafeType(*f, f->returnType, "return type"))
         ok = false;
+    if (f->returnType && f->returnType->getKind() == Type::Kind::Custom
+        && !std::static_pointer_cast<CustomType>(f->returnType)->isEnum())
+    {
+        log(*f, "an exported function cannot RETURN the struct '" + f->returnType->toString()
+                + "' BY VALUE yet (same reason). Return a pointer instead.",
+            E_NonFfiSafeType);
+        ok = false;
+    }
     if (!ok)
         return;
 

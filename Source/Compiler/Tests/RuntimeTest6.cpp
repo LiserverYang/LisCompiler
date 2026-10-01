@@ -12,6 +12,10 @@
 
 #include "RuntimeTestFixture.hpp"
 
+// The classifier is a plain function of (signature, triple, data layout), so the
+// SysV half of the ABI can be pinned here without running a Linux binary.
+#include "IR/FfiAbi.hpp"
+
 namespace
 {
 /// One C helper covering the shapes of a group.
@@ -133,4 +137,141 @@ TEST_F(RuntimeTest, FfiAggregateNested)
         "    ret 0;\n"
         "}\n",
         {{"helper.cpp", c}}, 0);
+}
+
+// ── SysV x86-64 classification, pinned against clang ────────────────────────
+//
+// This machine cannot RUN Linux binaries (lisc emits COFF), so the SysV rules are
+// verified the other way round: the expectations below are exactly what
+//
+//   clang -S -emit-llvm --target=x86_64-unknown-linux-gnu
+//
+// prints for the same shapes (see the header comment of FfiAbi.cpp), and this
+// test asserts the classifier produces them. A change to the rules that clang
+// would not make fails here.
+TEST_F(RuntimeTest, FfiSysvAggregateClassification)
+{
+    llvm::LLVMContext llvmCtx;
+    auto tc = std::make_shared<TypeContext>();
+    // The Linux data layout clang prints for that triple.
+    const llvm::DataLayout dl(
+        "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    const std::string triple = "x86_64-unknown-linux-gnu";
+
+    auto prim = [&](PrimitiveType::PrimKind k) { return tc->getPrimitive(k); };
+    auto i32 = prim(PrimitiveType::PrimKind::I32);
+    auto i64 = prim(PrimitiveType::PrimKind::I64);
+    auto f32 = prim(PrimitiveType::PrimKind::F32);
+    auto f64 = prim(PrimitiveType::PrimKind::F64);
+    auto voidTy = prim(PrimitiveType::PrimKind::VOID);
+    auto shape = [&](const std::string &name,
+                     const std::vector<std::pair<std::string, std::shared_ptr<Type>>> &fields)
+    {
+        std::vector<CustomType::Field> fs;
+        for (const auto &[n, ty] : fields)
+        {
+            CustomType::Field f;
+            f.name = n;
+            f.type = ty;
+            fs.push_back(f);
+        }
+        auto ct = std::dynamic_pointer_cast<CustomType>(tc->createCustom(name, fs));
+        ct->setCRepr(true);
+        return std::static_pointer_cast<Type>(ct);
+    };
+    auto partsOf = [&](const std::shared_ptr<Type> &s) -> std::vector<llvm::Type *>
+    {
+        auto sig = tc->getFunction({s}, voidTy);
+        FfiAbi::Plan plan = FfiAbi::classify(*sig, triple, dl, llvmCtx);
+        EXPECT_TRUE(plan.valid) << plan.why;
+        EXPECT_EQ(plan.args.size(), 1u);
+        return plan.argTys.empty() ? std::vector<llvm::Type *>{} : plan.argTys[0];
+    };
+    auto retOf = [&](const std::shared_ptr<Type> &s)
+    {
+        auto sig = tc->getFunction({}, s);
+        return FfiAbi::classify(*sig, triple, dl, llvmCtx);
+    };
+
+    auto isF32 = [&](llvm::Type *t) { return t == llvm::Type::getFloatTy(llvmCtx); };
+    auto isF64 = [&](llvm::Type *t) { return t == llvm::Type::getDoubleTy(llvmCtx); };
+    auto isI32 = [&](llvm::Type *t) { return t == llvm::Type::getInt32Ty(llvmCtx); };
+    auto isI64 = [&](llvm::Type *t) { return t == llvm::Type::getInt64Ty(llvmCtx); };
+    auto isF32x2 = [&](llvm::Type *t)
+    { return t == llvm::FixedVectorType::get(llvm::Type::getFloatTy(llvmCtx), 2); };
+
+    // One eightbyte: SSE for a lone float/double or two packed floats, INTEGER as
+    // soon as an integer shares the chunk.
+    auto s1 = partsOf(shape("S1", {{"a", f32}}));
+    ASSERT_EQ(s1.size(), 1u);
+    EXPECT_TRUE(isF32(s1[0]));
+    auto s2 = partsOf(shape("S2", {{"a", f32}, {"b", f32}}));
+    ASSERT_EQ(s2.size(), 1u);
+    EXPECT_TRUE(isF32x2(s2[0]));
+    auto s3 = partsOf(shape("S3", {{"a", f64}}));
+    ASSERT_EQ(s3.size(), 1u);
+    EXPECT_TRUE(isF64(s3[0]));
+    auto s4 = partsOf(shape("S4", {{"a", i32}, {"b", f32}}));
+    ASSERT_EQ(s4.size(), 1u);
+    EXPECT_TRUE(isI64(s4[0]));                       // mixed chunk -> INTEGER
+    auto s5 = partsOf(shape("S5", {{"a", i32}, {"b", i32}}));
+    ASSERT_EQ(s5.size(), 1u);
+    EXPECT_TRUE(isI64(s5[0]));
+
+    // Two eightbytes: the argument becomes TWO registers, in order.
+    auto s6 = partsOf(shape("S6", {{"a", i32}, {"b", i32}, {"c", i32}}));
+    ASSERT_EQ(s6.size(), 2u);
+    EXPECT_TRUE(isI64(s6[0]));
+    EXPECT_TRUE(isI32(s6[1]));
+    auto s7 = partsOf(shape("S7", {{"a", f64}, {"b", i32}}));
+    ASSERT_EQ(s7.size(), 2u);
+    EXPECT_TRUE(isF64(s7[0]));
+    EXPECT_TRUE(isI32(s7[1]));
+    auto s8 = partsOf(shape("S8", {{"a", f64}, {"b", f64}}));
+    ASSERT_EQ(s8.size(), 2u);
+    EXPECT_TRUE(isF64(s8[0]));
+    EXPECT_TRUE(isF64(s8[1]));
+    auto s9 = partsOf(shape("S9", {{"a", i64}, {"b", i64}}));
+    ASSERT_EQ(s9.size(), 2u);
+    EXPECT_TRUE(isI64(s9[0]));
+    EXPECT_TRUE(isI64(s9[1]));
+
+    // A one-part return is the coerced value; a two-part one is a literal struct
+    // (clang: float, i64, { i64, i32 }, { i64, i64 }).
+    auto r1 = retOf(shape("R1", {{"a", f32}}));
+    ASSERT_EQ(r1.ret, FfiAbi::RetKind::Coerce);
+    EXPECT_TRUE(isF32(r1.retTy));
+    auto r4 = retOf(shape("R4", {{"a", i32}, {"b", f32}}));
+    ASSERT_EQ(r4.ret, FfiAbi::RetKind::Coerce);
+    EXPECT_TRUE(isI64(r4.retTy));
+    auto r6 = retOf(shape("R6", {{"a", i32}, {"b", i32}, {"c", i32}}));
+    ASSERT_EQ(r6.ret, FfiAbi::RetKind::Coerce);
+    auto *st6 = llvm::dyn_cast<llvm::StructType>(r6.retTy);
+    ASSERT_TRUE(st6);
+    ASSERT_EQ(st6->getNumElements(), 2u);
+    EXPECT_TRUE(isI64(st6->getElementType(0)));
+    EXPECT_TRUE(isI32(st6->getElementType(1)));
+    auto r9 = retOf(shape("R9", {{"a", i64}, {"b", i64}}));
+    ASSERT_EQ(r9.ret, FfiAbi::RetKind::Coerce);
+    auto *st9 = llvm::dyn_cast<llvm::StructType>(r9.retTy);
+    ASSERT_TRUE(st9);
+    EXPECT_TRUE(isI64(st9->getElementType(0)));
+    EXPECT_TRUE(isI64(st9->getElementType(1)));
+
+    // A 24-byte one is MEMORY on SysV: behind a pointer, and sret when returned.
+    auto big = partsOf(shape("Big", {{"a", i64}, {"b", i64}, {"c", i64}}));
+    ASSERT_EQ(big.size(), 1u);
+    EXPECT_TRUE(big[0]->isPointerTy());
+    auto rbig = retOf(shape("RBig", {{"a", i64}, {"b", i64}, {"c", i64}}));
+    EXPECT_EQ(rbig.ret, FfiAbi::RetKind::Sret);
+    // ... and the SAME shape on Win64 is 1/2/4/8-only integers, so 24 bytes is a
+    // pointer there too -- but a 12-byte one is NOT (it is split on SysV only).
+    FfiAbi::Plan win = FfiAbi::classify(
+        *tc->getFunction({shape("W6", {{"a", i32}, {"b", i32}, {"c", i32}})}, voidTy),
+        "x86_64-w64-windows-gnu",
+        llvm::DataLayout("e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"),
+        llvmCtx);
+    ASSERT_TRUE(win.valid) << win.why;
+    ASSERT_EQ(win.args.size(), 1u);
+    EXPECT_EQ(win.args[0], FfiAbi::ArgKind::ByAddr); // Microsoft: by reference
 }
