@@ -132,6 +132,7 @@ void HIRBuilder::visit(StructDef *node)
     result->length = node->length;
     result->isReprC = node->isReprC;
     result->isPacked = node->isPacked;
+    result->isVolatile = node->isVolatile;
 
     if (!node->genericParams.empty())
     {
@@ -394,6 +395,9 @@ void HIRBuilder::visit(GlobalVarDef *node)
     // Globals are mutable (the grammar has no `mut` keyword for them, but
     // assignment to a global is the only shared-mutable-state mechanism).
     result->isMutable = true;
+    // `#[volatile(<addr>)]` / `#[volatile(sym = <name>)]`: where this global lives.
+    result->volatileAddr = node->volatileAddr;
+    result->volatileSym = node->volatileSym;
 
     if (node->type.has_value())
     {

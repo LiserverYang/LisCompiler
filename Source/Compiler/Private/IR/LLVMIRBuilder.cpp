@@ -227,6 +227,24 @@ bool LLVMIRBuilder::containsIndirection(const std::shared_ptr<Type> &ty, int dep
 
 namespace
 {
+/// Is this the type of a DEVICE REGISTER BLOCK? `#[volatile]` marks a struct, and a
+/// reference or pointer to one counts too: that is what a method receiver or a
+/// parameter is (`self: &mut GpioRegs`), and the access through it is volatile for
+/// exactly the same reason. (Mirrors the analyzer's predicate: sema decides what is
+/// legal, this decides how the legal thing is lowered.)
+bool isVolatileStorageType(const std::shared_ptr<Type> &ty)
+{
+    if (!ty)
+        return false;
+    if (auto *ct = dynamic_cast<CustomType *>(ty.get()))
+        return ct->isVolatile();
+    if (auto *rt = dynamic_cast<ReferenceType *>(ty.get()))
+        return isVolatileStorageType(rt->getBaseType());
+    if (auto *pt = dynamic_cast<PointerType *>(ty.get()))
+        return isVolatileStorageType(pt->getBaseType());
+    return false;
+}
+
 bool operandTouchesGlobal(const MIROperand &op)
 {
     if (auto *c = std::get_if<MIRCopy>(&op))
@@ -430,6 +448,31 @@ void LLVMIRBuilder::lowerGlobals(const MIRProgram &prog)
 {
     for (const auto &g : prog.globals)
     {
+        // The declared type is what a projection walk through this global starts
+        // from (see globalTypes_).
+        globalTypes_[g.name] = g.type;
+
+        // A register global: remember WHERE it lives and allocate nothing. The
+        // address form emits no GlobalVariable at all (the place lowers to the
+        // address constant), and the symbol form emits a DECLARATION the linker
+        // resolves (`PROVIDE(GPIOA = 0x40020000);`).
+        if (g.isMemoryMapped())
+        {
+            registerGlobals_[g.name] = RegisterPlacement{g.volatileAddr, g.volatileSym};
+            if (!g.volatileSym.empty() && !context->module->getNamedGlobal(g.volatileSym))
+            {
+                llvm::Type *regTy = toLLVMType(g.type);
+                auto *decl = new llvm::GlobalVariable(*context->module,
+                    regTy,
+                    /*isConstant=*/false,
+                    llvm::GlobalValue::ExternalLinkage,
+                    /*Initializer=*/nullptr,
+                    g.volatileSym);
+                decl->setVisibility(llvm::GlobalValue::DefaultVisibility);
+            }
+            continue;
+        }
+
         llvm::Type *ty = toLLVMType(g.type);
 
         llvm::Constant *init = nullptr;
@@ -1406,10 +1449,17 @@ llvm::Value *LLVMIRBuilder::lowerConst(const MIRConst &c)
 llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
     FunctionState &fs,
     const MIRPlace &p,
-    std::shared_ptr<Type> *outFinalTy)
+    std::shared_ptr<Type> *outFinalTy,
+    bool *outVolatile)
 {
     llvm::Value *ptr = nullptr;
     std::shared_ptr<Type> currentTy = nullptr;
+
+    // Does this access have to be volatile? Two independent reasons, either enough:
+    // the storage IS a register (the root is a memory-mapped global), or the walk
+    // goes through a `#[volatile]` type -- which is how the answer survives a
+    // reference, a method receiver or a parameter, because the flag is on the TYPE.
+    bool volatileAccess = false;
 
     switch (p.base)
     {
@@ -1419,9 +1469,40 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
         currentTy = fs.body->locals[p.index].type;
         break;
     case PlaceBase::Global:
-        ptr = context->module->getNamedGlobal(p.name);
-        currentTy = p.type;
+    {
+        auto reg = registerGlobals_.find(p.name);
+        if (reg != registerGlobals_.end())
+        {
+            volatileAccess = true;
+            if (reg->second.addr.has_value())
+            {
+                // The address is a COMPILE-TIME constant and there is no
+                // GlobalVariable behind this place: inttoptr it, sized by the
+                // TARGET's pointer width (32-bit on thumbv7m, 64-bit here) -- which
+                // is exactly why the width comes from the data layout, not from a
+                // hard-coded i64.
+                llvm::Type *ptrTy = llvm::PointerType::getUnqual(ctx_);
+                const unsigned bits = context->module->getDataLayout().getPointerSizeInBits(0);
+                llvm::IntegerType *intTy = llvm::Type::getIntNTy(ctx_, bits);
+                ptr = builder_->CreateIntToPtr(
+                    llvm::ConstantInt::get(intTy, *reg->second.addr), ptrTy, p.name);
+            }
+            else
+            {
+                // The linker places this one (`PROVIDE(NAME = 0x...);`).
+                ptr = context->module->getNamedGlobal(reg->second.sym);
+            }
+        }
+        else
+        {
+            ptr = context->module->getNamedGlobal(p.name);
+        }
+        // NOT p.type: that is the type of the place after the projections, while the
+        // walk needs the type it steps INTO (a field projection asserts Custom).
+        auto declared = globalTypes_.find(p.name);
+        currentTy = declared != globalTypes_.end() ? declared->second : p.type;
         break;
+    }
     }
 
     // Whether the projection that produced `currentTy` was a Deref. MIR appends
@@ -1434,6 +1515,13 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
 
     for (const auto &proj : p.projections)
     {
+        // Whatever we are stepping INTO decides how the access is performed: a
+        // `#[volatile]` container makes every projection out of it a volatile one
+        // (`GPIOA.bsrr`, and `self.bsrr` when `self: &mut GpioRegs` -- the Deref step
+        // set currentTy to the register block's type).
+        if (isVolatileStorageType(currentTy))
+            volatileAccess = true;
+
         switch (proj.kind)
         {
         case ProjectionKind::Deref:
@@ -1527,6 +1615,12 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
 
     if (outFinalTy)
         *outFinalTy = currentTy;
+    // The place's OWN type counts too: a field whose type is a register block is
+    // stored into volatile memory as well.
+    if (isVolatileStorageType(currentTy))
+        volatileAccess = true;
+    if (outVolatile)
+        *outVolatile = volatileAccess;
 
     return ptr;
 }
@@ -1538,7 +1632,8 @@ llvm::Value *LLVMIRBuilder::lowerPlaceAsPtr(
 llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
 {
     std::shared_ptr<Type> finalTy;
-    llvm::Value *ptr = lowerPlaceAsPtr(fs, p, &finalTy);
+    bool isVolatile = false;
+    llvm::Value *ptr = lowerPlaceAsPtr(fs, p, &finalTy, &isVolatile);
     // A place with no storage cannot be loaded: createAllocas() gives a VOID
     // local a NULL slot. Returning undefined behaviour from LLVM here (a load
     // of a null pointer, which traps inside DataLayout::getAlignment rather
@@ -1548,7 +1643,9 @@ llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
     if (!ptr)
         throw std::runtime_error("internal: load of a value-less place of type "
                                  + (finalTy ? finalTy->toString() : std::string("?")));
-    return builder_->CreateLoad(toLLVMType(finalTy), ptr, "load");
+    // volatile: a register read must not be elided, merged or moved across another
+    // volatile access (see lowerPlaceAsPtr for why this is true).
+    return builder_->CreateLoad(toLLVMType(finalTy), ptr, isVolatile, "load");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1557,12 +1654,15 @@ llvm::Value *LLVMIRBuilder::loadPlace(FunctionState &fs, const MIRPlace &p)
 
 void LLVMIRBuilder::storePlace(FunctionState &fs, const MIRPlace &p, llvm::Value *val)
 {
-    llvm::Value *ptr = lowerPlaceAsPtr(fs, p);
+    bool isVolatile = false;
+    llvm::Value *ptr = lowerPlaceAsPtr(fs, p, nullptr, &isVolatile);
     // Skip a LOCAL whose alloca is absent (the void return slot). GLOBALs are
     // not allocas — they are module-level variables, so never gate on them.
     if (p.base != PlaceBase::Global && fs.allocas[p.index] == nullptr)
         return;
-    builder_->CreateStore(val, ptr);
+    // volatile: a register write must reach the device even though nothing in the
+    // program ever reads it back (LLVM would otherwise delete it as dead).
+    builder_->CreateStore(val, ptr, isVolatile);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

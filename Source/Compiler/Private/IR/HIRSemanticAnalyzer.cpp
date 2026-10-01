@@ -1230,6 +1230,77 @@ void HIRSemanticAnalyzer::setModuleForItem(size_t index)
 
 namespace
 {
+/// Is this type a DEVICE REGISTER BLOCK? `#[volatile]` marks a struct, and a
+/// reference or pointer to one counts too: that is what a method receiver or a
+/// parameter is (`self: &mut GpioRegs`), and an access through it is volatile for
+/// exactly the same reason.
+bool isVolatileType(const std::shared_ptr<Type> &ty)
+{
+    if (!ty)
+        return false;
+    if (auto *ct = dynamic_cast<CustomType *>(ty.get()))
+        return ct->isVolatile();
+    if (auto *rt = dynamic_cast<ReferenceType *>(ty.get()))
+        return isVolatileType(rt->getBaseType());
+    if (auto *pt = dynamic_cast<PointerType *>(ty.get()))
+        return isVolatileType(pt->getBaseType());
+    return false;
+}
+
+/// The same question WITHOUT looking through references: "is this value a
+/// register block?" -- `&GpioRegs` is not, `GpioRegs` is.
+bool isVolatileAggregate(const std::shared_ptr<Type> &ty)
+{
+    auto *ct = ty ? dynamic_cast<CustomType *>(ty.get()) : nullptr;
+    return ct && ct->isVolatile();
+}
+
+/// Does this place expression reach storage whose accesses have to be volatile?
+///
+/// Walks the SAME chain the lowering will (name / field / index / deref) and
+/// answers yes when the root is a memory-mapped global or any step passes through
+/// a `#[volatile]` type. A true answer with a place whose OWN type is not volatile
+/// means a reference to it would silently drop the volatility.
+bool volatilePlaceReachable(const HIRExpr *expr)
+{
+    bool reached = false;
+    const HIRExpr *cur = expr;
+    while (cur)
+    {
+        if (auto *name = dynamic_cast<const HIRNameRef *>(cur))
+        {
+            if (name->symbol && name->symbol->isMemoryMapped)
+                reached = true;
+            break;
+        }
+        if (auto *member = dynamic_cast<const HIRMemberAccess *>(cur))
+        {
+            if (isVolatileType(member->object->type))
+                reached = true;
+            cur = member->object.get();
+            continue;
+        }
+        if (auto *index = dynamic_cast<const HIRIndexAccess *>(cur))
+        {
+            if (isVolatileType(index->object->type))
+                reached = true;
+            cur = index->object.get();
+            continue;
+        }
+        if (auto *deref = dynamic_cast<const HIRDeref *>(cur))
+        {
+            // `*p` IS the pointee, so this step's own type is what the reference
+            // would point at.
+            if (isVolatileType(deref->type))
+                reached = true;
+            cur = deref->operand.get();
+            continue;
+        }
+        break; // a call result, a literal: nothing to walk, nothing to refuse
+    }
+    return reached;
+}
+
 /// Depth-first walk of the by-value containment graph starting at `type`.
 /// `stack` is the chain of names currently being expanded — re-entering one of
 /// them is a cycle. `finite` memoizes the types already proven finite so a
@@ -1647,6 +1718,8 @@ std::shared_ptr<Type> HIRSemanticAnalyzer::buildStructType(HIRStruct *node)
         // pass, so an extern signature analyzed later in pass 2 already sees it.
         ct->setCRepr(node->isReprC);
         ct->setPacked(node->isPacked);
+        // #[volatile]: access KIND lives on the type (see CustomType::setVolatile).
+        ct->setVolatile(node->isVolatile);
     }
 
     structGParams.clear();
@@ -2198,7 +2271,15 @@ void HIRSemanticAnalyzer::visit(HIRImpl *node)
         // impl into the type's implTrait, so whichever of the pair is visited
         // second sees the other.
         const std::string traitBare = displayName(tn);
-        if (traitBare == "Copy")
+
+        // A register block owns no memory and has no value semantics: 'Copy' would
+        // say a device image may be duplicated freely, and 'Drop' would run code at
+        // scope end on storage this program does not own.
+        if (baseStruct->isVolatile() && (traitBare == "Copy" || traitBare == "Drop"))
+        {
+            log(*node, "type '" + displayName(baseStruct->getName()) + "' is #[volatile] (a register block): it can implement neither Copy nor Drop.", E_VolatileValueMisuse);
+        }
+        else if (traitBare == "Copy")
         {
             for (const auto &f : baseStruct->getFields())
                 if (!f.type->isCopyable())
@@ -2574,11 +2655,17 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
     // actual "struct 'S' has no field 'nope'".
     bool initFailed = false;
 
+
     if (node->init.has_value())
     {
         analyzeExpr(node->init.value().get());
         initType = node->init.value()->type;
         initFailed = !initType;
+
+        // A register block is a PLACE, never a value: `let shadow = GPIOA;` would
+        // copy a device image into ordinary memory. Access it field by field.
+        if (isVolatileAggregate(initType))
+            log(*node, "a #[volatile] type is a register block, not a value: it cannot be copied or moved into '" + node->name + "'. Access its fields directly, or through a reference.", E_VolatileValueMisuse);
 
         // ── `let x = <Option/Result> else <expr>;` ──────────────
         // The binding takes the PAYLOAD type; the else expression supplies the
@@ -2687,11 +2774,52 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         log(*node, "variable '" + node->name + "' cannot have type 'void': void has no value.", E_TypeMismatch);
     }
 
+    // ── a memory-mapped global: `#[volatile(<address>)]` ─────────────────────
+    // Its storage is the device, so nothing initialises it and its type has to
+    // carry the volatility for every access that goes through a reference. This runs
+    // AFTER the declared type was resolved above: every rule below reads that type. See
+    // Document/src/mmio.md for the whole argument.
+    if (node->isGlobal && node->isMemoryMapped())
+    {
+        if (auto *sym = SymbolTable::getInstance().lookupSymbol(node->name))
+            sym->isMemoryMapped = true;
+
+        if (!node->hasExplicitType)
+            log(*node, "a memory-mapped global needs a declared type: write `let mut NAME: <type>;` (nothing initializes it, so the type cannot be inferred from a value).", E_VolatileMisuse);
+        else if (!node->type)
+        {
+            // The type itself failed to resolve; that error is already reported.
+        }
+        else if (isVolatileAggregate(node->type))
+        {
+            // The register block: correct, and the only shape that keeps the
+            // volatility through references and methods.
+        }
+        else if (auto *prim = dynamic_cast<PrimitiveType *>(node->type.get()))
+        {
+            const auto kind = prim->getPrimKind();
+            if (kind != PrimitiveType::PrimKind::I8 && kind != PrimitiveType::PrimKind::I16 &&
+                kind != PrimitiveType::PrimKind::I32 && kind != PrimitiveType::PrimKind::I64 &&
+                kind != PrimitiveType::PrimKind::F32 && kind != PrimitiveType::PrimKind::F64)
+                log(*node, "a register can be an integer or a float, not '" + node->type->toString() + "' (a bool/char/void register has no agreed width on the bus).", E_VolatileMisuse);
+        }
+        else
+        {
+            log(*node, "the type of a memory-mapped global must be a #[volatile] struct (a register block) or an integer/float register, not '" + node->type->toString() + "'.", E_VolatileMisuse);
+        }
+    }
+
     // A declaration WITHOUT an initializer is allowed for Copy types (MIR
     // tracks which paths assigned it), but NOT for Move types: such a binding
     // owns a value that the scope-exit drop glue would release although it was
     // never constructed.
-    if (!node->init.has_value() && node->type && !node->type->isCopyable())
+    //
+    // A memory-mapped global is the one exception, and for the same reason the rule
+    // exists: nothing is ever CONSTRUCTED here. Its storage is the device, there is
+    // no drop glue for it (a #[volatile] type can implement neither Drop nor Copy),
+    // and the initializer it is missing could not exist.
+    const bool registerStorage = node->isGlobal && node->isMemoryMapped();
+    if (!node->init.has_value() && node->type && !node->type->isCopyable() && !registerStorage)
     {
         log(*node,
             "cannot declare '" + node->name + "' without an initializer: '" + node->type->toString() + "' is not a Copy type, so the binding could be released while uninitialized.",
@@ -3168,6 +3296,10 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
     {
         analyzeExpr(node->value.value().get());
         retTy = node->value.value()->type;
+
+        // Returning a register block would copy the device into an ordinary value.
+        if (isVolatileAggregate(retTy))
+            log(*node, "a #[volatile] type cannot be returned by value: a register block is a place, not a value. Return a field, or pass a reference.", E_VolatileValueMisuse);
 
         if (!functionInfo.hasReturnValue)
         {
@@ -5835,6 +5967,12 @@ void HIRSemanticAnalyzer::visit(HIRStructInit *node)
     auto structTy = std::dynamic_pointer_cast<CustomType>(sym->type);
     node->structSymbol = sym;
 
+    // A register block is never CONSTRUCTED: it already exists, at an address the
+    // device owns. Building one here would put a device image in ordinary memory
+    // (and its fields come from hardware, not from this literal).
+    if (structTy && structTy->isVolatile())
+        log(*node, "cannot construct #[volatile] type '" + node->structName + "': a register block is not a value. Declare it as a memory-mapped global (`#[volatile(<address>)] let mut NAME: " + node->structName + ";`) and write its fields.", E_VolatileValueMisuse);
+
     // Analyse all member initialisers up front so we have their types for inference.
     for (auto &[mname, mval] : node->members)
         analyzeExpr(mval.get());
@@ -6041,6 +6179,14 @@ void HIRSemanticAnalyzer::visit(HIRRef *node)
     analyzeExpr(node->expr.get());
     if (node->expr->type)
         node->type = context->typeContext->getReference(node->expr->type, node->isMutable);
+
+    // A reference to a REGISTER place only keeps its volatility when the pointee
+    // TYPE carries it (`&mut GpioRegs` does; `&mut u32` to `GPIOA.moder`, or to a
+    // bare `#[volatile(0x...)] let mut RCC: u32`, does not). Losing it means the
+    // write through that reference is an ordinary store, which LLVM may delete or
+    // sink -- a silently wrong hardware write, the worst failure mode there is.
+    if (volatilePlaceReachable(node->expr.get()) && !isVolatileType(node->expr->type))
+        log(*node, "cannot take a reference to a register (or to a field of a register block) whose type is not #[volatile]: the reference would lose the volatile access and the hardware write could be optimized away. Access the register directly, or declare the block's struct #[volatile].", E_VolatileMisuse);
 }
 
 // ---------------------------------------------------------------------------

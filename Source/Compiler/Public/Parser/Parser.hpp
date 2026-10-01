@@ -98,6 +98,14 @@ protected:
     /// `packed` inside #[repr(...)] — only meaningful together with C.
     bool pendingReprPacked_ = false;
 
+    /// `#[volatile]` (no argument) seen just before the current top-level item: the
+    /// ACCESS-KIND marker, consumed by a struct declaration.
+    bool pendingVolatile_ = false;
+    /// `#[volatile(<address>)]` / `#[volatile(sym = "...")]`: the PLACEMENT, consumed
+    /// by a module-level `let`. At most one of the two is set.
+    std::optional<uint64_t> pendingVolatileAddr_;
+    std::string pendingVolatileSym_;
+
     /**
      * Nesting budget for the recursive-descent functions.
      *

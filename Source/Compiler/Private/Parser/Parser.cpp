@@ -185,6 +185,22 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
         pendingReprPacked_ = false;
     }
 
+    // #[volatile] without an argument describes a TYPE, and the only type a struct
+    // declaration can carry it for; #[volatile(<address>)] describes the STORAGE of
+    // the global that follows. Both are reported HERE, before the dispatch, so the
+    // attribute cannot silently attach to whatever item comes next.
+    if (pendingVolatile_ && !check(TokenCode::STRUCT))
+    {
+        logError(currentToken(), "#[volatile] (no argument) can only be applied to a struct declaration; write #[volatile(<address>)] or #[volatile(sym = <name>)] for a memory-mapped global.", E_VolatileMisuse);
+        pendingVolatile_ = false;
+    }
+    if ((pendingVolatileAddr_.has_value() || !pendingVolatileSym_.empty()) && !check(TokenCode::LET))
+    {
+        logError(currentToken(), "#[volatile(<address>)] / #[volatile(sym = <name>)] can only be applied to a module-level 'let'.", E_VolatileMisuse);
+        pendingVolatileAddr_.reset();
+        pendingVolatileSym_.clear();
+    }
+
     if (check(TokenCode::EXTERN))
     {
         return parseExternFunctionDeclaration();
@@ -220,6 +236,20 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
             }
             pendingReprPacked_ = false;
         }
+
+        // #[volatile] (no argument): the type marker. It is only believable WITH the
+        // layout witness -- the field whitelist that makes a register block's layout
+        // checkable lives in the #[repr(C)] validation.
+        if (pendingVolatile_)
+        {
+            pendingVolatile_ = false;
+            if (!structDef->isReprC)
+                logError(structTok, "#[volatile] requires #[repr(C)]: a register block needs the same layout promise a C-visible struct does.", E_VolatileMisuse);
+            else if (structDef->members.empty() || !structDef->genericParams.empty())
+                logError(structTok, "#[volatile] cannot be applied to an empty or generic struct.", E_VolatileMisuse);
+            else
+                structDef->isVolatile = true;
+        }
         return structDef;
     }
     else if (check(TokenCode::IMPL))
@@ -238,7 +268,14 @@ std::unique_ptr<ASTNode> Parser::parseGlobalStatement()
     }
     else if (check(TokenCode::LET))
     {
-        return parseGlobalVariableDefinition();
+        // parseGlobalVariableDefinition() reads the pending placement to decide
+        // whether an initializer is allowed, so the state is cleared AFTER it runs.
+        auto global = parseGlobalVariableDefinition();
+        global->volatileAddr = pendingVolatileAddr_;
+        global->volatileSym = pendingVolatileSym_;
+        pendingVolatileAddr_.reset();
+        pendingVolatileSym_.clear();
+        return global;
     }
     else if (check(TokenCode::TRAIT))
     {
@@ -851,8 +888,24 @@ std::unique_ptr<GlobalVarDef> Parser::parseGlobalVariableDefinition()
         var->type = parseType();
     }
 
-    consume(TokenCode::ASSIGN, "expected '=' in variable definition", E_ExpectAnASSIGN);
-    var->initValue = parseExpression();
+    // A memory-mapped global has NO initializer: its storage is the device, not
+    // memory this program owns or could initialise. Reported -- and the initializer
+    // is still parsed, to keep the stream in sync -- rather than silently ignored.
+    const bool memoryMapped = pendingVolatileAddr_.has_value() || !pendingVolatileSym_.empty();
+    if (memoryMapped)
+    {
+        if (check(TokenCode::ASSIGN))
+        {
+            logError(currentToken(), "a memory-mapped global cannot have an initializer: its storage is the device, not memory this program owns.", E_VolatileMisuse);
+            advance();
+            var->initValue = parseExpression();
+        }
+    }
+    else
+    {
+        consume(TokenCode::ASSIGN, "expected '=' in variable definition", E_ExpectAnASSIGN);
+        var->initValue = parseExpression();
+    }
 
     // A global `let ... else` is rejected with a diagnostic that says why (a
     // global initializer must be a literal, so there is no runtime path to take
@@ -1285,9 +1338,57 @@ void Parser::parseAttribute()
         } while (match(TokenCode::COMMA));
         consume(TokenCode::RPAREN, "expected ')' to close #[repr(C)]", E_ExpectARPAREN);
     }
+    else if (check(TokenCode::IDENTIFIER) && currentToken().value == "volatile")
+    {
+        // #[volatile] is ONE attribute name with two jobs, told apart by whether it
+        // has an argument:
+        //
+        //   #[volatile]                on a struct: every access through the TYPE is a
+        //                              volatile one (a device register block).
+        //   #[volatile(0x4002_0000)]   on a module-level `let`: the PLACEMENT -- this
+        //   #[volatile(sym = <name>)]  global's storage is the device, at that address,
+        //                              or at the symbol the linker places.
+        advance();
+        if (match(TokenCode::LPAREN))
+        {
+            if (check(TokenCode::IDENTIFIER) && currentToken().value == "sym")
+            {
+                advance();
+                consume(TokenCode::ASSIGN, "expected '=' in #[volatile(sym = <name>)]", E_ExpectAnASSIGN);
+                if (!check(TokenCode::STRING_LITERAL))
+                    logError(currentToken(), "expected a symbol name in #[volatile(sym = <name>)].", E_ExpectedExpression);
+                else
+                {
+                    pendingVolatileSym_ = currentToken().value;
+                    advance();
+                }
+            }
+            else if (check(TokenCode::INT_LITERAL))
+            {
+                try
+                {
+                    pendingVolatileAddr_ = static_cast<uint64_t>(parseIntegerLiteral(currentToken().value));
+                }
+                catch (const std::exception &)
+                {
+                    logError(currentToken(), "the address in #[volatile(...)] must fit in 64 bits.", E_VolatileMisuse);
+                }
+                advance();
+            }
+            else
+            {
+                logError(currentToken(), "expected an address or sym = <name> in #[volatile(...)].", E_VolatileMisuse);
+            }
+            consume(TokenCode::RPAREN, "expected ')' to close #[volatile(...)]", E_ExpectARPAREN);
+        }
+        else
+        {
+            pendingVolatile_ = true;
+        }
+    }
     else
     {
-        logError(currentToken(), "unknown attribute; only #[i_know], #[link_name], #[repr(C)] and #[link(name = \"...\")] are supported", E_UndefinedIdentifier);
+        logError(currentToken(), "unknown attribute; only #[i_know], #[link_name], #[repr(C)] / #[repr(C, packed)], #[link(name = ...)] and #[volatile(...)] are supported.", E_UndefinedIdentifier);
     }
 
     consume(TokenCode::RBRACKET, "expected ']' to close attribute", E_ExpectARBRACE);

@@ -465,6 +465,16 @@ public:
     bool isMutable = false;
     bool isGlobal = false;
     Symbol *varSymbol = nullptr;
+
+    /// `#[volatile(<address>)]` / `#[volatile(sym = <name>)]`: this global's storage
+    /// IS the device. It has no initializer, and codegen emits no GlobalVariable for
+    /// it -- the place lowers to the address itself.
+    std::optional<uint64_t> volatileAddr;
+    std::string volatileSym;
+    bool isMemoryMapped() const
+    {
+        return volatileAddr.has_value() || !volatileSym.empty();
+    }
     void accept(HIRVisitor *visitor) override
     {
         visitor->visit(this);
@@ -668,6 +678,12 @@ public:
     bool isReprC = false;
     /// #[repr(C, packed)] — no padding; see StructDef::isPacked.
     bool isPacked = false;
+
+    /// #[volatile] -- see StructDef::isVolatile. Carried into CustomType so the
+    /// lowering can ask "is an access through this type a volatile one?" while it
+    /// walks a place, which is what makes the answer survive a reference, a method
+    /// receiver or a parameter.
+    bool isVolatile = false;
 
     std::vector<std::shared_ptr<GenericParamType>> gParams;
     std::unordered_map<std::string, std::vector<HIRGenericConstraint>> unsolveConstraints;

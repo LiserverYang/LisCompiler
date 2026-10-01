@@ -137,6 +137,24 @@ private:
     /// Third pass: lower globals.
     void lowerGlobals(const MIRProgram &prog);
 
+    /// Every `#[volatile(<address>)]` / `#[volatile(sym = <name>)]` global, by name.
+    /// Filled by lowerGlobals: such a global has no GlobalVariable of ours, so the
+    /// place lowering has to know where its storage is instead of looking one up.
+    struct RegisterPlacement
+    {
+        std::optional<uint64_t> addr;
+        std::string sym;
+    };
+    std::unordered_map<std::string, RegisterPlacement> registerGlobals_;
+
+    /// Every global's DECLARED type, by name (register globals included). A place
+    /// rooted at a global has to start its projection walk from this type, not from
+    /// MIRPlace::type -- that one is the type of the place AFTER the projections, and
+    /// the two only coincide when there are none. Until a global could have a struct
+    /// type (`#[volatile(<address>)] let GPIOA: GpioRegs;`) nothing exercised that:
+    /// every global was a scalar (`p.type` == the container type).
+    std::unordered_map<std::string, std::shared_ptr<Type>> globalTypes_;
+
     /// Fourth pass: lower function bodies.
     void lowerFunctionBody(const MIRFunction &mirFn);
 
@@ -180,10 +198,16 @@ private:
     llvm::Value *lowerConst(const MIRConst &c);
 
     /// Returns a pointer to the place (always a pointer — callers load/store).
+    /// @param outVolatile  set to true when the place's storage must be accessed with
+    ///                     VOLATILE loads/stores: its root is a register global, or
+    ///                     the walk passed through a `#[volatile]` type (the flag
+    ///                     lives on the TYPE, which is what keeps the answer right
+    ///                     through a reference or a method receiver).
     llvm::Value *lowerPlaceAsPtr(
         FunctionState &fs,
         const MIRPlace &p,
-        std::shared_ptr<Type> *outFinalTy = nullptr);
+        std::shared_ptr<Type> *outFinalTy = nullptr,
+        bool *outVolatile = nullptr);
 
     /// Returns the loaded value at the place.
     llvm::Value *loadPlace(FunctionState &fs, const MIRPlace &p);

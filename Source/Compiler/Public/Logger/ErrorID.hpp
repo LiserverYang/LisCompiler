@@ -60,7 +60,12 @@ ERRORID E_RecursiveType = 3018;               // a type that contains itself has
 ERRORID E_FFIOutsideAllowedScope = 3019;      // extern "C" outside the stdlib / without --allow-ffi
 ERRORID E_NonFfiSafeType = 3020;              // a type that cannot cross the C boundary
 ERRORID E_CReprMisuse = 3021;                 // #[repr(C)] on the wrong item / with a C-unsafe field
-ERRORID E_ExportMisuse = 3022;                // export fn: generic, body-less, duplicate symbol, reserved name
+ERRORID E_ExportMisuse = 3022;
+ERRORID E_VolatileMisuse = 3023;      // #[volatile(...)] on the wrong item / with a bad
+                                      // argument / a reference to a bare register / a
+                                      // memory-mapped global that breaks its own rules
+ERRORID E_VolatileValueMisuse = 3024; // a #[volatile] type used as a VALUE: constructed,
+                                      // copied, moved, dropped, or given Copy/Drop                // export fn: generic, body-less, duplicate symbol, reserved name
 
 // Borrow-checker errors (4000 series)
 

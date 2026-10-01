@@ -277,6 +277,20 @@ public:
         return cRepr;
     }
 
+    /// #[volatile]: every access through this type is a volatile one. The flag lives
+    /// on the TYPE, not on the global that holds it, so an access through a
+    /// reference, a method receiver or a parameter stays volatile -- which is the
+    /// only way `impl GpioRegs { fn set_high(self: &mut Self) { self.bsrr = ... } }`
+    /// can be correct.
+    void setVolatile(bool v)
+    {
+        volatileType = v;
+    }
+    bool isVolatile() const
+    {
+        return volatileType;
+    }
+
     /// #[repr(C, packed)]: the C layout with no padding at all. The LLVM struct is
     /// emitted packed, which is what a C side using #pragma pack(1) sees; such a
     /// struct is pointer-only across the FFI boundary (an unaligned field must not
@@ -320,6 +334,7 @@ private:
     std::vector<EnumVariantInfo> variants;
     bool cRepr = false;
     bool packed = false;
+    bool volatileType = false;
 };
 
 // --- 4. 函数类型 ---

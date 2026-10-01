@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -173,6 +174,12 @@ public:
     /// a pointer -- an unaligned field must not be handed to C by value.
     bool isPacked = false;
 
+    /// `#[volatile]`: every access through this type is a VOLATILE one -- it must
+    /// not be elided, merged or reordered against another volatile access. This is
+    /// how a device register block is described; the ADDRESS is a separate promise
+    /// (`#[volatile(<addr>)]` on the global that holds it).
+    bool isVolatile = false;
+
     void accept(ASTVisitor *visitor) override
     {
         visitor->visit(this);
@@ -323,6 +330,12 @@ public:
     std::string name;
     std::optional<std::unique_ptr<TypeNode>> type;
     std::unique_ptr<Expr> initValue;
+
+    /// `#[volatile(0x4002_0000)]` / `#[volatile(sym = "GPIOA")]`: where this
+    /// global's storage IS. Exactly one of the two is set for a memory-mapped
+    /// global, and such a global has no initializer.
+    std::optional<uint64_t> volatileAddr;
+    std::string volatileSym;
 
     void accept(ASTVisitor *visitor) override
     {

@@ -363,6 +363,17 @@ struct MIRGlobal
     std::string name;
     std::shared_ptr<Type> type;
     std::optional<MIRRValue> init; // constant-folded init, or nullopt = zeroinit
+
+    /// `#[volatile(<address>)]` / `#[volatile(sym = <name>)]`: this global's storage
+    /// is the DEVICE, so there is no storage of ours to allocate and no initializer
+    /// to emit. The address form lowers every access to an `inttoptr` of the
+    /// constant; the symbol form declares the global and lets the linker place it.
+    std::optional<uint64_t> volatileAddr;
+    std::string volatileSym;
+    bool isMemoryMapped() const
+    {
+        return volatileAddr.has_value() || !volatileSym.empty();
+    }
 };
 
 struct MIRProgram

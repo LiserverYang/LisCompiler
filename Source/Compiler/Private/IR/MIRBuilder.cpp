@@ -773,6 +773,8 @@ MIRGlobal MIRBuilder::buildGlobal(HIRVarDecl *decl)
         .name = decl->name,
         .type = decl->type,
         .init = std::move(init),
+        .volatileAddr = decl->volatileAddr,
+        .volatileSym = decl->volatileSym,
     };
 }
 

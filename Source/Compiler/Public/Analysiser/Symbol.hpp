@@ -60,6 +60,12 @@ struct Symbol
     /// target symbol so lookups always see the target's latest state.
     Symbol *aliasTarget = nullptr;
 
+    /// `#[volatile(<address>)]` / `#[volatile(sym = <name>)]`: this global's storage
+    /// IS the device. Recorded on the symbol so a REFERENCE to it can be refused
+    /// wherever it appears (the reference would lose the volatility, see
+    /// HIRSemanticAnalyzer::visit(HIRRef)).
+    bool isMemoryMapped = false;
+
     /// An `extern "C"` DECLARATION: codegen declares the C symbol
     /// (cName) instead of looking for a Lis definition, and the call must not go
     /// through monomorphization.

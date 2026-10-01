@@ -30,8 +30,9 @@ lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，通过引�
 | **模块系统** | `impt lib.nums;` / `impt math as m;` / `impt math { max };`，模块隔离命名空间、循环导入检测、搜索路径（lstdlib 优先 → `-I` → 主文件目录） |
 | 内置 | `panic`/`assert`、字节流原语 `__read_byte`/`__write`/`__flush`、堆（`__alloc` 系）、`to_string_*`、`str_len`/`str_cmp`；`#[i_know]` 属性放行窄化 cast。**打印与读取不在这里——它们是标准库 `io` 模块** |
 | 诊断 | GCC 风格带源码上下文的错误（E1xxx 词法 ~ E6xxx 错误传播），解析错误可恢复；编译器内部错误（ICE）带调用栈与 issue 链接 |
+| **目标 / 裸机** | `--target <triple>` / `--cpu` / `--features`：能为别的目标产出目标文件（实测 `thumbv7m-none-eabi` 是 `elf32-littlearm` + Thumb 指令，`aarch64-unknown-linux-gnu` 是 ELF64）；`#[volatile]` 标寄存器块类型、`#[volatile(<地址>)]` / `#[volatile(sym = ...)]` 标它的存储位置，寄存器读写因此是语言的一部分（`-o 2` 下存储不被优化掉、寄存器不占存储、借用规则照常）。见 `Document/src/mmio.md` |
 | 优化 | **不与 LLVM 重叠**：只把语言知道、LLVM 推不出来的事实写成 IR 事实（非入口函数 `internal` linkage、`&mut` 形参 `noalias`），其余交给 LLVM 的 O2 全管线（`-o 0..3`）。见 `Document/src/optimization.md` |
-| 测试 | **1421 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片）；**16 个 Examples** 输出为回归基线（borrow 55/iterator 23/match 8/method_ref 10/operator 41/result 42/…） |
+| 测试 | **1448 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片）；**16 个 Examples** 输出为回归基线（borrow 55/iterator 23/match 8/method_ref 10/operator 41/result 42/…） |
 
 **已完成**：panic/`never` → `Result<T, E>` + 后缀 `?` 错误传播 + 编译期定值分析 →
 **堆安全化**（裸指针类型、堆原语/裸指针操作仅限标准库、`&mut T` 独占语义、字段可见性强制）→
