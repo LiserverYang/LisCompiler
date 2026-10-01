@@ -10,6 +10,7 @@
 // we classify is the size the object file will have).
 #include "IR/LLVMIRBuilder.hpp"
 
+#include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
 
 namespace
@@ -79,7 +80,9 @@ FfiAbi::Plan FfiAbi::classify(const FunctionType &sig, const std::string &triple
     const llvm::DataLayout &dl, llvm::LLVMContext &ctx)
 {
     Plan plan;
-    llvm::Triple t(triple);
+    // An empty triple means "not resolved" (a hand-built pass list, e.g. the test
+    // fixture): classify for the host rather than refusing everything.
+    llvm::Triple t(triple.empty() ? llvm::sys::getDefaultTargetTriple() : triple);
     const bool win64 = t.getArch() == llvm::Triple::x86_64 && t.isOSWindows();
 
     auto classifyOne = [&](const std::shared_ptr<Type> &ty, bool isReturn) -> bool

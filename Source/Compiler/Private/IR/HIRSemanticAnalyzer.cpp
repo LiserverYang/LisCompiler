@@ -5,6 +5,7 @@
 
 #include "IR/HIRSemanticAnalyzer.hpp"
 
+#include "Core/TargetInit.hpp"
 #include "IR/FfiAbi.hpp"
 
 #include <llvm/IR/DataLayout.h>
@@ -4303,8 +4304,9 @@ bool HIRSemanticAnalyzer::checkFfiSafeType(HIRNode &owner, const std::shared_ptr
         {
             auto voidTy = context->typeContext->getPrimitive(PrimitiveType::PrimKind::VOID);
             auto probe = context->typeContext->getFunction({ty}, voidTy);
+            const std::string dl = context->dataLayout.empty() ? hostDataLayout() : context->dataLayout;
             FfiAbi::Plan plan = FfiAbi::classify(*probe, context->targetTriple,
-                llvm::DataLayout(context->dataLayout), *context->llvmContext);
+                llvm::DataLayout(dl), *context->llvmContext);
             if (!plan.valid)
                 return bad(plan.why);
         }
