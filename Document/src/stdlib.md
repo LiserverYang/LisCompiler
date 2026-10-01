@@ -160,7 +160,7 @@ for e in m { print(*e.key); }              // 12 —— 迭代按**键升序**
 - **没有按值 get**：按值交出只有 Copy 元素才安全，而这个约束**无法表达**（方法/自由函数上的
   bound 到不了 arena 的元素类型）。Copy 值用 `*m.get_ref(&k).unwrap()`，非 Copy 值用
   `get_ref` / `remove`。
-- `get_ref` 返回的借用**不被借用检查追踪**：`insert`（扩容）/ `remove` 之后再使用即悬垂。
+- `get_ref` 返回的借用**被借用检查追踪**（2026-10-01）：`insert`（扩容）/ `remove` 与它冲突即 E4001。
 - **键唯一：Map 不是多重集**。序统计数的是**键**。要「多重集 + 排名/第 k 小」，用竞赛标准技巧 ——
   每次出现给唯一 id，键取 `(值, id)` 按字典序比较：
 
@@ -279,7 +279,7 @@ struct String
 |---|---|---|
 | `new()` | `-> String` | 空串，容量 16 |
 | `from_lit(s: &i8)` | `-> String` | 拷贝 C 字面量到堆 |
-| `to_cstr(self: &String)` | `-> &i8` | **返回借用接收者的引用**——owner 被 move/drop 后悬垂 |
+| `to_cstr(self: &String)` | `-> &i8` | **返回借用接收者的引用**——借用绑定到 owner，move/`push_char` 与它冲突即报错 |
 | `push_char(self: &mut String, c: char)` | | 满时翻倍扩容；保持 null 结尾 |
 | `push_str(self: &mut String, other: &i8)` | | 追加 C 字符串 |
 | `index(self: &String, i: i32)` | `-> Option<char>` | 越界返回 None（两端检查） |
@@ -334,8 +334,8 @@ struct Vec<T> { data: *mut T, len: i32, cap: i32, cursor: i32 }   // 字段全�
   `type 'string$String' does not implement trait 'Copy' required by 'vec$Vec::at'`
   （impl 上写的泛型约束现在真的会被检查）。非 Copy 容器请用 `at_ref`/`at_mut` 或
   `pop`/`remove`/`for`。
-- **`at_ref`/`at_mut` 的借用不被追踪**：与 `String::to_cstr` 同一类妥协。拿到引用后
-  必须保证这个 Vec 存活且**没有被扩容**（`push`/`insert` 会 `__free` 旧缓冲），否则悬垂。
+- **`at_ref`/`at_mut` 的借用被追踪**（2026-10-01）：拿到引用后，这个 Vec 在它的最后一次
+  使用之前保持借用，`push`/`insert`（会 `__free` 旧缓冲）与它冲突即 E4001。
 - **`for` 的正序与游标**：`next()` 把元素移出，Vec 内部记下「已移出的前缀」；容器只拥有
   该前缀之后的元素，所以 `len()`、下标、`pop`/`remove` 都相对**存活区间**解释，
   `Drop`/`clear` 也只析构这一段——被移出的元素不会被析构第二次。

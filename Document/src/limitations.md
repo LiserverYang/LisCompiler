@@ -155,8 +155,9 @@
 
 - **没有按值 `get`**：按值交出只有 Copy 元素才安全，而这个 bound 无法表达（见标准库章节）。
   Copy 值写 `*m.get_ref(&k).unwrap()`，非 Copy 值用 `get_ref` / `remove`。
-- **`get_ref`/`at_ref` 返回的借用不被借用检查追踪**（与 `Vec::at_ref` 同类）：
-  `insert` 触发扩容、或 `remove` 之后再使用该借用即悬垂。
+- **已修（2026-10-01）：返回借用会被追踪**。`get_ref`/`at_ref`/`to_cstr` 的借用绑定到接收者，
+  `insert`（扩容）/`remove`/`push_char` 与它冲突时直接报 E4001/E4002。剩余边界：穿过解引用的
+  借用（标准库内部的 `self.field.at(i)`）仍是语句级临时量，见[借用检查](./borrow.md)。
 - **无序容器的迭代顺序未定义**（桶序），不要依赖；有序容器才是按键升序。
 - **Map 的键唯一**（是「有序集合」不是多重集）。多重集 + 排名/第 k 小用 ~(值, id)~ 键的
   标准技巧实现，见[标准库](./stdlib.md)的容器章节；~Examples/balanced_tree.lis~ 是完整题解。

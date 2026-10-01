@@ -65,7 +65,7 @@ Lis 把**整个程序**（标准库 + 用户代码）下降成**一个** LLVM mo
 | 不做 | 原因 |
 |---|---|
 | `mustprogress` / `nounwind` / `willreturn` | LLVM 已经自己推断（实测），再加是纯重叠 |
-| `dereferenceable` | **不是事实**：`at_ref`/`to_cstr` 返回的借用允许在 `push` 扩容后悬垂 |
+| `dereferenceable` | **仍不是事实**：穿过解引用的借用（标准库内部的 `self.field.at(i)`）与裸指针不受追踪，且该属性要对**每个**调用方成立（含 `export fn`） |
 | `nonnull` / `noundef` | 已被部分推断，剩余场景收益≈0；`noundef` 还会被聚合体的 padding 破坏 |
 | 前端自建常量折叠/CSE/内联/边界检查消除 | 与 LLVM 重叠，收益为负 |
 | 全局变量的链接性 | 语义相同但暂无测量支撑，留待以后 |
