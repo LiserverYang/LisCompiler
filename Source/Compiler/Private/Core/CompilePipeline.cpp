@@ -27,12 +27,45 @@
 
 #include "Core/TargetInit.hpp"
 #include "Lexer/Lexer.hpp"
+
+// --time-trace: LLVM's profiler (its implementation is compiled into the LLVMSupport
+// this project already links). Pipeline::run() wraps every pass in a scope, and
+// LLVM's own pass manager contributes one per optimisation pass, so the trace covers
+// our phases AND the middle-end.
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/TimeProfiler.h>
+#include <llvm/Support/raw_ostream.h>
 #include "Parser/Parser.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+
+namespace
+{
+/// Where `--time-trace` wants the Chrome trace. Global because the write has to
+/// happen on the way OUT, including the `exit(1)` the analyzer uses for "this
+/// program is illegal" -- a trace of a failed compile is often the interesting one.
+std::string gTimeTracePath;
+
+void writeTimeTraceOnExit()
+{
+    if (gTimeTracePath.empty())
+        return;
+
+    std::error_code ec;
+    llvm::raw_fd_ostream os(gTimeTracePath, ec, llvm::sys::fs::OF_None);
+    if (ec)
+    {
+        llvm::errs() << "cannot write the time trace to '" << gTimeTracePath << "': " << ec.message() << "\n";
+        return;
+    }
+    llvm::timeTraceProfilerWrite(os);
+    llvm::timeTraceProfilerCleanup();
+}
+} // namespace
 
 CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const char **argv)
 {
@@ -57,6 +90,8 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--target"}, setAsValue, "", "Build for another target triple (e.g. thumbv7m-none-eabi) instead of the host. Only the object file is produced: --shared stays a host-only operation."});
     argParser->registRule(ArgParseRule{{"--cpu"}, setAsValue, "", "Target CPU (e.g. cortex-m3). Empty = the host CPU for a host target, \"generic\" for a cross target."});
     argParser->registRule(ArgParseRule{{"--features"}, setAsValue, "", "Target feature string (e.g. \"+thumb2\"). Empty = the host features for a host target, none for a cross target."});
+    argParser->registRule(ArgParseRule{{"--time-trace"}, setAsValue, "", "Write a Chrome trace of the compile to this file (`chrome://tracing` or ui.perfetto.dev shows it as a flame graph). Scopes cover every pass, and LLVM adds one per optimisation pass. Pair with --time-trace-granularity to drop the noise."});
+    argParser->registRule(ArgParseRule{{"--time-trace-granularity"}, setAsValue, "500", "Minimum duration in MICROSECONDS for a scope to appear in the --time-trace output (default 500)."});
     argParser->registRule(ArgParseRule{{"--max-depth"},
         setAsValue,
         "256",
@@ -105,6 +140,31 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         if (semi == std::string::npos)
             break;
         start = semi + 1;
+    }
+
+    // `--time-trace`: start LLVM's profiler as soon as the command line is known.
+    // It has to happen BEFORE any scope is created (Pipeline::run() and LLVM's own
+    // pass manager both create them) and the file has to be written on the way OUT,
+    // including the analyzer's exit(1) -- a trace of a FAILED compile is often the
+    // interesting one.
+    {
+        const std::string tracePath = context->args->getArg("time_trace");
+        if (!tracePath.empty())
+        {
+            unsigned granularity = 500;
+            try
+            {
+                granularity = static_cast<unsigned>(std::stoul(context->args->getArg("time_trace_granularity")));
+            }
+            catch (const std::exception &)
+            {
+                // A non-numeric granularity keeps the default; the trace is a
+                // diagnostic, it should not be the reason a compile fails.
+            }
+            llvm::timeTraceProfilerInitialize(granularity, "lisc");
+            gTimeTracePath = tracePath;
+            std::atexit(writeTimeTraceOnExit);
+        }
     }
 
     // Resolve the TARGET here, once -- like `-I` and the stdlib directory above, it
