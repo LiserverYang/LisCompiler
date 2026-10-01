@@ -250,9 +250,10 @@ void Emitter::run()
 
     runOptPipeline(*context->module.get());
 
-        // --out is read HERE, not where the pass object is constructed: every pass is
-    // built before any of them runs, so argv has not been parsed yet at that point
-    // (the same trap the target resolution hit).
+    // --out is read HERE rather than in the constructor: the Emitter's Options
+    // carry the DEFAULT path and the command line overrides it, so the two
+    // sources stay separate. (argv itself is parsed eagerly by CompilePipeline
+    // before any pass object is built, so either place works today.)
     const std::string outArg = context->args->getArg("out");
     const std::string objPath = outArg.empty() ? opts_.outPath : outArg;
     emitObjectFile(*context->module.get(), objPath);

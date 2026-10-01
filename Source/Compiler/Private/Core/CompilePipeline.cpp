@@ -59,6 +59,21 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         "256",
         "Maximum nesting depth of expressions/statements/types. Deep nesting is bounded by the compiler's own recursion, so past this limit it reports E2018 instead of exhausting the stack (default 256)."});
 
+    // ── Parse the command line NOW ────────────────────────────────────────────
+    //
+    // Every pass object this pipeline builds -- and the Emitter's own options
+    // below -- is CONSTRUCTED before any pass RUNS, so a `getArg` in a
+    // constructor used to read the default that registRule() had just stored,
+    // never what the user typed. That trap is not hypothetical: it silently made
+    // `-o` inert (the emitter always saw "2", so -o0/-o1/-o3 emitted
+    // byte-identical -O2 objects) and dropped every `-I` directory, and it is
+    // the same one that once made `--allow-ffi` look dead.
+    //
+    // The Argparser is the first pass and depends on nothing, so run it here,
+    // before anything is built from argv. From this point on argv is readable
+    // everywhere: at construction time and at pass time alike.
+    argParser->run();
+
     // The standard library is NOT auto-preloaded anymore — user code imports
     // the modules it needs (`impt math;`). The stdlib directory is added to
     // the search paths so `impt math;` finds <lstdlib>/math.lis.
@@ -89,12 +104,11 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         start = semi + 1;
     }
 
-    passes.emplace_back(argParser.release());
+    // NOTE: the Argparser is deliberately NOT pushed into `passes` any more --
+    // it has already run above, and a second run would re-walk an exhausted
+    // argv (`pos` is left at argc).
     passes.emplace_back(std::make_unique<LambdaPass>(context, [](std::shared_ptr<Context> ctx)
         {
-            // The FFI capability is read HERE, not in the constructor above: the
-            // Argparser is itself a PASS, so argv is only parsed once that pass
-            // runs — reading it earlier always saw the default ("false").
             ctx->ffiAllowed = ctx->args->getArg("allow_ffi") == "true";
 
             // this pass is to read file
@@ -157,6 +171,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     passes.emplace_back(std::make_unique<LLVMIRBuilder>(context, *context->llvmContext, context->args->getArg("filePath")));
 
     Emitter::Options emitOpts;
+    // Readable here because this constructor parsed argv at the top.
     int optLevel = std::stoi(context->args->getArg("o"));
     emitOpts.optLevel = optLevel;
     emitOpts.runOptimiser = (optLevel > 0);
