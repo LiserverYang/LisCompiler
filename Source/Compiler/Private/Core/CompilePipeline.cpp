@@ -51,6 +51,8 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
     argParser->registRule(ArgParseRule{{"--print-llvmir"}, setAsTrue, "false", "Print the parsed LLVM IR."});
     argParser->registRule(ArgParseRule{{"-o"}, setAsValue, "2", "The optimise level(0-3), default is 2."});
     argParser->registRule(ArgParseRule{{"-I"}, setAsValue, "", "Add module search path(s), ';'-separated (lisbuild packs include_dirs here)."});
+    argParser->registRule(ArgParseRule{{"--out"}, setAsValue, "", "Where to write the object file (default ./a.o)."});
+    argParser->registRule(ArgParseRule{{"--shared"}, setAsTrue, "false", "Also produce a shared library next to the object (lib<stem>.dll / <stem>.so), linked with g++."});
     argParser->registRule(ArgParseRule{{"--allow-ffi"}, setAsTrue, "false", "Allow extern C declarations (FFI) in user code. OFF by default: FFI can break every guarantee the language makes, so the standard library has it and the judge does not hand it to submissions."});
     argParser->registRule(ArgParseRule{{"--max-depth"},
         setAsValue,
