@@ -1071,3 +1071,61 @@ TEST_F(LexerTest, QuestionMarkAmongOtherOperators)
     expectToken(2, TokenCode::PLUS, "+", 1, 4);
     expectToken(3, TokenCode::IDENTIFIER, "b", 1, 6);
 }
+
+// Hexadecimal literals are the difference between `#[volatile(0x4002_0000)]` and a
+// decimal magic number, and `_` separators are what make both readable. The LEXER
+// only recognises them -- the token keeps the text as written and
+// Core/NumericLiteral.hpp turns it into a value (the runtime test in MmioTest
+// checks the VALUES).
+TEST_F(LexerTest, HexadecimalLiterals)
+{
+    runLexer("0x1F 0X2a 0x4002_0000");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+
+    expectToken(0, TokenCode::INT_LITERAL, "0x1F", 1, 1);
+    expectToken(1, TokenCode::INT_LITERAL, "0X2a", 1, 6);
+    expectToken(2, TokenCode::INT_LITERAL, "0x4002_0000", 1, 11);
+}
+
+// `e` is a hex DIGIT: reading `0x1e` as a float exponent would be the classic way to
+// get this wrong, so it is pinned here.
+TEST_F(LexerTest, HexDigitsThatLookLikeFloatSyntax)
+{
+    runLexer("0x1e 0xE 0xff");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+
+    expectToken(0, TokenCode::INT_LITERAL, "0x1e", 1, 1);
+    expectToken(1, TokenCode::INT_LITERAL, "0xE", 1, 6);
+    expectToken(2, TokenCode::INT_LITERAL, "0xff", 1, 10);
+}
+
+TEST_F(LexerTest, DigitSeparatorsInDecimalLiterals)
+{
+    runLexer("1_000_000 1_000.5");
+    EXPECT_EQ(Logger::GetErrorCount(), 0);
+
+    expectToken(0, TokenCode::INT_LITERAL, "1_000_000", 1, 1);
+    expectToken(1, TokenCode::FLOAT_LITERAL, "1_000.5", 1, 11);
+}
+
+// A `0x` with no digits, a separator with nothing after it, and a separator before
+// the first digit are malformed. Reported (the token is still emitted so the stream
+// stays in sync) -- never silently accepted, and never thrown out of the lexer.
+TEST_F(LexerTest, MalformedHexAndSeparatorsAreReported)
+{
+    // Each case gets a FRESH Lexer and token stream: Lexer::run() resets the error
+    // count but not its own index, so one instance lexes only the first source.
+    auto expectLexError = [this](const std::string &source)
+    {
+        context = std::make_shared<Context>();
+        context->filePath = "test.lis";
+        context->fileValue = source;
+        Lexer fresh(context);
+        fresh.run();
+        EXPECT_GT(Logger::GetErrorCount(), 0) << "expected a lexing error for: " << source;
+    };
+
+    expectLexError("0x");
+    expectLexError("1_");
+    expectLexError("0x_1");
+}

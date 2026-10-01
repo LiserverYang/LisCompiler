@@ -357,6 +357,63 @@ Token Lexer::lexNumber()
     bool isFloat = false;     // flag for decimal points
     bool hasExponent = false; // flag for scientific notation
 
+    // Hexadecimal (`0x1F`, `0x4002_0000`) is handled on its own, before the decimal
+    // loop, for two reasons: `e`/`E` are hex DIGITS and would otherwise be read as
+    // an exponent, and `.` has no meaning inside a hex literal. The token keeps the
+    // prefix and the separators as written -- the value is parsed later, by
+    // Core/NumericLiteral.hpp.
+    if (index + 1 < source.size() && source[index] == '0' &&
+        (source[index + 1] == 'x' || source[index + 1] == 'X'))
+    {
+        value += source[index++]; // '0'
+        column++;
+        value += source[index++]; // 'x'
+        column++;
+
+        bool sawDigit = false;
+        bool separatorOk = false; // a separator must be followed by a digit
+        while (index < source.size())
+        {
+            char c = source[index];
+            if (std::isxdigit((unsigned char)c))
+            {
+                value += c;
+                index++;
+                column++;
+                sawDigit = true;
+                separatorOk = true;
+            }
+            else if (c == '_' && separatorOk)
+            {
+                value += c;
+                index++;
+                column++;
+                separatorOk = false;
+            }
+            else
+                break;
+        }
+
+        if (!sawDigit || !separatorOk)
+        {
+            Logger::LogInfo info = {&source,
+                context->filePath,
+                sawDigit ? "malformed hexadecimal literal: a digit separator must be followed by a digit"
+                         : "malformed hexadecimal literal: expected hex digits after '0x'",
+                line,
+                column - 1,
+                1,
+                index,
+                E_InvalidLiteralType};
+            info.exit = false;
+            Logger::Log(Logger::LogLevel::ERROR, info);
+        }
+
+        token.code = TokenCode::INT_LITERAL;
+        token.value = value;
+        return token;
+    }
+
     while (index < source.size())
     {
         char c = source[index];
@@ -364,6 +421,15 @@ Token Lexer::lexNumber()
         // accumulate digits
         // P9: cast to unsigned char — ctype UB on negative char values
         if (std::isdigit((unsigned char)c))
+        {
+            value += c;
+            index++;
+            column++;
+        }
+        // `_` may separate digits (`1_000_000`); the value parser strips it. Only
+        // accepted directly after a digit, so an identifier like `_x` or a typo like
+        // `1__0` is not silently swallowed into the literal.
+        else if (c == '_' && !value.empty() && std::isdigit((unsigned char)value.back()))
         {
             value += c;
             index++;
@@ -420,6 +486,23 @@ Token Lexer::lexNumber()
         {
             break; // end of numeric literal
         }
+    }
+
+    // A separator with nothing after it (`1_`) is malformed. Reported here and the
+    // token is still emitted, exactly like the float-exponent case above: the stream
+    // stays in sync and the compile stops with a clean error instead of a throw.
+    if (!value.empty() && value.back() == '_')
+    {
+        Logger::LogInfo info = {&source,
+            context->filePath,
+            "malformed numeric literal: a digit separator must be followed by a digit",
+            line,
+            column - 1,
+            1,
+            index,
+            E_InvalidLiteralType};
+        info.exit = false;
+        Logger::Log(Logger::LogLevel::ERROR, info);
     }
 
     // determine token type based on flags

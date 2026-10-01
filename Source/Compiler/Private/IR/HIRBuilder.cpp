@@ -4,6 +4,7 @@
  */
 
 #include "IR/HIRBuilder.hpp"
+#include "Core/NumericLiteral.hpp"
 #include "Logger/Logger.hpp"
 
 // Helper: convert an AST TypeNode pointer into an HIRRawType.
@@ -907,7 +908,7 @@ void HIRBuilder::visit(LiteralExpr *node)
         // would be silently discarded and the literal would silently become 0).
         try
         {
-            result->value = std::stoll(node->value);
+            result->value = parseIntegerLiteral(node->value);
         }
         catch (const std::exception &)
         {
@@ -923,7 +924,7 @@ void HIRBuilder::visit(LiteralExpr *node)
         // behaviour (IEEE-754 overflow), so only the exception path is handled.
         try
         {
-            result->value = std::stod(node->value);
+            result->value = parseFloatLiteral(node->value);
         }
         catch (const std::exception &)
         {

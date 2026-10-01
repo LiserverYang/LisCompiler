@@ -3,6 +3,7 @@
  */
 
 #include "Parser/Parser.hpp"
+#include "Core/NumericLiteral.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Lexer/Token.hpp"
 #include "Parser/ASTPrinter.hpp"
@@ -936,7 +937,7 @@ std::unique_ptr<TypeNode> Parser::parseType()
             // test harness with it).
             try
             {
-                type->arraySize = std::stoll(currentToken().value);
+                type->arraySize = parseIntegerLiteral(currentToken().value);
             }
             catch (const std::exception &)
             {
@@ -1945,7 +1946,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
                 {
                     try
                     {
-                        literal->repeatCount = std::stoll(currentToken().value);
+                        literal->repeatCount = parseIntegerLiteral(currentToken().value);
                     }
                     catch (const std::exception &)
                     {
