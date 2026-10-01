@@ -275,3 +275,21 @@ TEST_F(RuntimeTest, FfiSysvAggregateClassification)
     ASSERT_EQ(win.args.size(), 1u);
     EXPECT_EQ(win.args[0], FfiAbi::ArgKind::ByAddr); // Microsoft: by reference
 }
+
+// ── C++ (no mangler, no exceptions -- the practical route) ──────────────────
+//
+// #[link_name] takes ANY symbol, so a C++ function is reachable through the name
+// the Itanium ABI gives it: g++ mangles int cpp_add(int, int) as _Z7cpp_addii.
+// The C++ side deliberately does NOT use extern C, and it checks the answer, so a
+// wrong mangling fails the link instead of passing quietly.
+TEST_F(RuntimeTest, FfiCppMangledName)
+{
+    const std::string helper =
+        "int cpp_add(int a, int b) { return a + b; }   // NORMAL C++ linkage\n"
+        "extern \"C\" int lis_calls_cpp(void);            // exported from Lis\n"
+        "int main() { return lis_calls_cpp() == 42 ? 0 : 1; }\n";
+    expectRunWithSources(
+        "#[link_name = \"_Z7cpp_addii\"] extern \"C\" fn cpp_add(a: i32, b: i32) -> i32;\n"
+        "export fn lis_calls_cpp() -> i32 { ret cpp_add(40, 2); }\n",
+        {{"main.cpp", helper}}, 0);
+}
