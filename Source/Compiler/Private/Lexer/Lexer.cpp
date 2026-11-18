@@ -362,8 +362,7 @@ Token Lexer::lexNumber()
     // an exponent, and `.` has no meaning inside a hex literal. The token keeps the
     // prefix and the separators as written -- the value is parsed later, by
     // Core/NumericLiteral.hpp.
-    if (index + 1 < source.size() && source[index] == '0' &&
-        (source[index + 1] == 'x' || source[index + 1] == 'X'))
+    if (index + 1 < source.size() && source[index] == '0' && (source[index + 1] == 'x' || source[index + 1] == 'X'))
     {
         value += source[index++]; // '0'
         column++;

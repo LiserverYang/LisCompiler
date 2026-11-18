@@ -289,7 +289,8 @@ private:
     bool resolveGenericOperatorMethod(HIRBinaryOp *node, const std::shared_ptr<GenericParamType> &gp, const char *opMethod, const char *opTrait);
 
     // Dispatch helpers
-    void analyzeExpr(HIRExpr *expr);
+    void analyzeExpr(HIRExpr *expr, const std::shared_ptr<Type> &expected = nullptr);
+    void analyzeIntegerLiteral(HIRLiteral *literal, const std::shared_ptr<Type> &expected);
     void analyzeStmt(HIRStmt *stmt);
 
     // First pass: register top-level names so forward refs work

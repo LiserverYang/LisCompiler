@@ -14,6 +14,7 @@
  */
 
 #include "Core/CompilePipeline.hpp"
+#include "TestPaths.hpp"
 
 #include <gtest/gtest.h>
 
@@ -24,23 +25,8 @@
 
 namespace fs = std::filesystem;
 
-extern char *_pgmptr; // full path of the running executable (MinGW CRT)
-
 namespace
 {
-// The pipeline looks for <argv[0]>/lstdlib next to the compiler. The test
-// binary lives in Build/Intermediate, so lisc.exe is its sibling under Binaries.
-std::string compilerPathForThisTest()
-{
-    if (_pgmptr)
-    {
-        fs::path candidate =
-            fs::path(_pgmptr).parent_path().parent_path() / "Binaries" / "lisc.exe";
-        return candidate.string();
-    }
-    return "lisc.exe";
-}
-
 bool searchPathContains(const std::shared_ptr<Context> &ctx, const std::string &dir)
 {
     for (const auto &p : ctx->searchPaths)

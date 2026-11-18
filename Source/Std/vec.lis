@@ -7,8 +7,7 @@
 // private), so all element access happens inside this module, where raw-pointer
 // indexing is legal (E3014 gates it to the standard library).
 //
-//     let mut v = Vec<i32>::new();   // T must be written out: this language has
-//                                    // no expected-type inference, so
+//     let mut v = Vec<i32>::new();   // The variable annotation does not infer T:
 //                                    // `let v: Vec<i32> = Vec::new();` is an error
 //     v.push(1);
 //     v.push(2);
@@ -39,11 +38,9 @@ impt iterator { Iterator };
 // The index operator traits: `v[i]` reads through `Index`, `v[i] = x` writes
 // through `IndexMut`. A user type becomes indexable by implementing them.
 //
-// They return the ELEMENT, not a reference to it. Handing out `&T` would need
-// the compiler to track that the borrow must not outlive the buffer, and
-// returned borrows are not tracked yet — a dangling reference would be silent.
-// Reading is a copy, writing goes through the method; `&v[i]` borrows a
-// temporary COPY, not the element.
+// Reading through Index returns a copy. Writing goes through IndexMut::set.
+// Use at_ref / at_mut to borrow the element itself: their return values borrow
+// from the Vec. `&v[i]` only borrows the temporary copy.
 // ---------------------------------------------------------------------------
 
 // `let x = v[i];` — the element at `i`. Out of bounds aborts, like an array.

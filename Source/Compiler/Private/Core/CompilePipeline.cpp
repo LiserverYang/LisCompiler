@@ -32,10 +32,10 @@
 // this project already links). Pipeline::run() wraps every pass in a scope, and
 // LLVM's own pass manager contributes one per optimisation pass, so the trace covers
 // our phases AND the middle-end.
+#include "Parser/Parser.hpp"
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TimeProfiler.h>
 #include <llvm/Support/raw_ostream.h>
-#include "Parser/Parser.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -187,7 +187,8 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
         // instead of writing a host-linked library next to a cross-target object.
         if (!target.host && context->args->getArg("shared") == "true")
             throw ArgParseError("--shared links with the host toolchain and cannot be combined with "
-                                 "--target " + target.triple + "; emit the object and link it with your target linker");
+                                "--target "
+                                + target.triple + "; emit the object and link it with your target linker");
     }
 
     // NOTE: the Argparser is deliberately NOT pushed into `passes` any more --
@@ -215,8 +216,7 @@ CompilePipeline::CompilePipeline(std::shared_ptr<Context> cnt, int argc, const c
             // Examples/iterator.lis must not shadow the stdlib's iterator).
             fs::path mainDir = fs::path(ctx->filePath).parent_path();
             if (mainDir.empty()) mainDir = ".";
-            ctx->searchPaths.push_back(mainDir.string());
-        }));
+            ctx->searchPaths.push_back(mainDir.string()); }));
     passes.emplace_back(std::make_unique<Lexer>(context));
     passes.emplace_back(std::make_unique<Parser>(context));
     passes.emplace_back(std::make_unique<HIRBuilder>(context));

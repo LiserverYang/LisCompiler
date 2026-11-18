@@ -7,8 +7,11 @@
 
 #include "Analysiser/SymbolTable.hpp"
 #include "Core/ModuleUtils.hpp"
+#include "Core/TargetInit.hpp"
 #include "IR/HIRBuilder.hpp"
 #include "IR/HIRSemanticAnalyzer.hpp"
+#include "IR/MIRBorrowCheck.hpp"
+#include "IR/MIRBuilder.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Logger/Logger.hpp"
 #include "Parser/Parser.hpp"
@@ -166,19 +169,30 @@ llvm::json::Object LspServer::compileAndPublish(const std::string &uri)
 
     context->filePath = path;
     context->fileValue = docIt->second;
+    const auto target = resolveTarget("", "", "");
+    context->targetTriple = target.triple;
+    context->dataLayout = target.dataLayout;
 
-    // Gate-free compile driver (mirrors RuntimeTest::compile): Lexer::run +
-    // Parser::parseAll + HIRBuilder::run + sema.visit. Diagnostics are captured
-    // (never printed, never exit).
+    // Use the non-exiting entry points for the same analysis as lisc.
     Logger::BeginCapture();
     Lexer lexer(context);
     lexer.run();
     Parser parser(context);
     parser.parseAll();
-    HIRBuilder builder(context);
-    builder.run();
-    HIRSemanticAnalyzer sema(context);
-    sema.visit(context->hirProgram.get());
+    if (Logger::GetErrorCount() == 0)
+    {
+        HIRBuilder builder(context);
+        builder.run();
+        HIRSemanticAnalyzer sema(context);
+        sema.visit(context->hirProgram.get());
+    }
+    if (Logger::GetErrorCount() == 0)
+    {
+        MIRBuilder mir(context);
+        context->mirProgram = std::make_unique<MIRProgram>(mir.buildProgram(context->hirProgram.get()));
+        if (Logger::GetErrorCount() == 0)
+            MIRBorrowCheck(context).check();
+    }
     std::vector<Logger::Captured> captured = Logger::EndCapture();
 
     lastContext_ = context;
@@ -187,10 +201,9 @@ llvm::json::Object LspServer::compileAndPublish(const std::string &uri)
     llvm::json::Array diags;
     for (const auto &c : captured)
     {
-        // Only OPEN documents receive diagnostics (module files the user
-        // hasn't opened are skipped — the client ignores them anyway).
-        std::string diagUri = pathToUri(c.codePath);
-        if (!documents_.count(diagUri))
+        // This notification belongs to the requested document. Compare paths
+        // so percent-escaped filenames still receive their diagnostics.
+        if (fs::path(c.codePath).lexically_normal() != fs::path(path).lexically_normal())
             continue;
         llvm::json::Object d{
             {"range", makeRange(c.line, c.col, c.length)},

@@ -461,8 +461,13 @@ HIRSemanticAnalyzer::resolveType(const HIRRawType &raw, HIRNode &errorNode)
     return base;
 }
 
-void HIRSemanticAnalyzer::analyzeExpr(HIRExpr *expr)
+void HIRSemanticAnalyzer::analyzeExpr(HIRExpr *expr, const std::shared_ptr<Type> &expected)
 {
+    if (auto *literal = dynamic_cast<HIRLiteral *>(expr); literal && literal->kind == HIRLiteral::Kind::Int)
+    {
+        analyzeIntegerLiteral(literal, expected);
+        return;
+    }
     if (expr) expr->accept(this);
 }
 
@@ -482,7 +487,7 @@ std::vector<std::shared_ptr<Type>> HIRSemanticAnalyzer::inferGenericArguments(
 
     for (size_t i = 0; i < args.size() && i < paramTypes.size(); ++i)
     {
-        analyzeExpr(args[i].get());
+        analyzeExpr(args[i].get(), paramTypes[i]);
         auto argTy = args[i]->type;
         auto paramTy = paramTypes[i];
         matchGenericType(paramTy, argTy, genericMap);
@@ -2605,8 +2610,8 @@ void HIRSemanticAnalyzer::checkCallArgs(
 {
     for (size_t i = 0; i < args.size() && i + paramOffset < params.size(); ++i)
     {
-        analyzeExpr(args[i].get());
         const std::shared_ptr<Type> &paramTy = params[i + paramOffset];
+        analyzeExpr(args[i].get(), paramTy);
 
         // A context-free generic value (`get(Option::None)` where the parameter
         // is Option<i32>) keeps the type DEFINITION; explain the real problem
@@ -2645,6 +2650,8 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
             log(*node, "variable '" + node->name + "' already exists in this scope.");
     }
 
+    if (node->hasExplicitType)
+        node->type = resolveType(node->rawType, *node);
     std::shared_ptr<Type> initType;
 
     // True when the initializer's OWN analysis failed (its type is null —
@@ -2655,10 +2662,9 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
     // actual "struct 'S' has no field 'nope'".
     bool initFailed = false;
 
-
     if (node->init.has_value())
     {
-        analyzeExpr(node->init.value().get());
+        analyzeExpr(node->init.value().get(), node->type);
         initType = node->init.value()->type;
         initFailed = !initType;
 
@@ -2726,7 +2732,6 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
 
     if (node->hasExplicitType)
     {
-        node->type = resolveType(node->rawType, *node);
         // A never-valued initialiser is compatible with any declared type
         // (bottom): the value cannot exist, so nothing about the declared type
         // is violated. Everything else still needs an exact match.
@@ -2798,9 +2803,7 @@ void HIRSemanticAnalyzer::visit(HIRVarDecl *node)
         else if (auto *prim = dynamic_cast<PrimitiveType *>(node->type.get()))
         {
             const auto kind = prim->getPrimKind();
-            if (kind != PrimitiveType::PrimKind::I8 && kind != PrimitiveType::PrimKind::I16 &&
-                kind != PrimitiveType::PrimKind::I32 && kind != PrimitiveType::PrimKind::I64 &&
-                kind != PrimitiveType::PrimKind::F32 && kind != PrimitiveType::PrimKind::F64)
+            if (kind != PrimitiveType::PrimKind::I8 && kind != PrimitiveType::PrimKind::I16 && kind != PrimitiveType::PrimKind::I32 && kind != PrimitiveType::PrimKind::I64 && kind != PrimitiveType::PrimKind::F32 && kind != PrimitiveType::PrimKind::F64)
                 log(*node, "a register can be an integer or a float, not '" + node->type->toString() + "' (a bool/char/void register has no agreed width on the bus).", E_VolatileMisuse);
         }
         else
@@ -2859,7 +2862,7 @@ void HIRSemanticAnalyzer::visit(HIRAssign *node)
     analyzeExpr(node->target.get());
     inAssignTarget_ = savedInAssignTarget;
     inCompoundAssignTarget_ = savedInCompoundTarget;
-    analyzeExpr(node->value.get());
+    analyzeExpr(node->value.get(), node->target->type);
 
     // `x op= y` follows exactly the operand rules of `x op y`,
     // minus the operator-trait method call: the MIR lowers it as a read of the
@@ -3294,7 +3297,7 @@ void HIRSemanticAnalyzer::visit(HIRReturn *node)
 
     if (node->value.has_value())
     {
-        analyzeExpr(node->value.value().get());
+        analyzeExpr(node->value.value().get(), functionInfo.declaredReturnType);
         retTy = node->value.value()->type;
 
         // Returning a register block would copy the device into an ordinary value.
@@ -3355,7 +3358,7 @@ void HIRSemanticAnalyzer::visit(HIRLiteral *node)
     // representation (e.g. an int64-overflowing integer). Report it here, where
     // the diagnostic survives to the error gate — logging in the builder would
     // be wiped by run()'s ResetErrorCount, silently turning the literal into 0.
-    if (node->overflowed)
+    if (node->overflowed && node->kind != HIRLiteral::Kind::Int)
     {
         log(*node, "numeric literal overflows its type.", E_InvalidLiteralType);
     }
@@ -3363,7 +3366,7 @@ void HIRSemanticAnalyzer::visit(HIRLiteral *node)
     switch (node->kind)
     {
     case HIRLiteral::Kind::Int:
-        node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+        analyzeIntegerLiteral(node, nullptr);
         break;
     case HIRLiteral::Kind::Float:
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::F64);
@@ -3392,6 +3395,21 @@ void HIRSemanticAnalyzer::visit(HIRLiteral *node)
         node->type = context->typeContext->getPrimitive(PrimitiveType::PrimKind::CHAR);
         break;
     }
+}
+
+void HIRSemanticAnalyzer::analyzeIntegerLiteral(HIRLiteral *literal, const std::shared_ptr<Type> &expected)
+{
+    auto *primitive = dynamic_cast<PrimitiveType *>(expected.get());
+    literal->type = primitive && primitive->isInteger()
+                        ? expected
+                        : context->typeContext->getPrimitive(PrimitiveType::PrimKind::I32);
+    const auto width = static_cast<PrimitiveType &>(*literal->type).integerBitWidth();
+    const auto value = std::get<int64_t>(literal->value);
+    const bool outsideRange = width < 64
+                              && (value < -(int64_t{1} << (width - 1))
+                                  || value >= (int64_t{1} << (width - 1)));
+    if (literal->overflowed || outsideRange)
+        log(*literal, "integer literal overflows its type '" + literal->type->toString() + "'.", E_InvalidLiteralType);
 }
 
 // ---------------------------------------------------------------------------
@@ -3880,9 +3898,21 @@ void HIRSemanticAnalyzer::visit(HIRBinaryOp *node)
 // ---------------------------------------------------------------------------
 void HIRSemanticAnalyzer::visit(HIRCast *node)
 {
-    analyzeExpr(node->expr.get());
     node->targetType = resolveType(node->rawTargetType, *node);
     node->type = node->targetType;
+    // A direct widening cast can spell a large i64 literal. Keep the ordinary
+    // narrowing-cast rules (including #[i_know]) for smaller integer targets.
+    auto *target = dynamic_cast<PrimitiveType *>(node->targetType.get());
+    if (auto *literal = dynamic_cast<HIRLiteral *>(node->expr.get());
+        target && target->getPrimKind() == PrimitiveType::PrimKind::I64
+        && literal && literal->kind == HIRLiteral::Kind::Int
+        && (literal->overflowed || std::get<int64_t>(literal->value) < INT32_MIN
+            || std::get<int64_t>(literal->value) > INT32_MAX))
+    {
+        analyzeIntegerLiteral(literal, node->targetType);
+        return;
+    }
+    analyzeExpr(node->expr.get());
 
     auto fromType = node->expr->type;
     if (!fromType) return;
@@ -5975,7 +6005,10 @@ void HIRSemanticAnalyzer::visit(HIRStructInit *node)
 
     // Analyse all member initialisers up front so we have their types for inference.
     for (auto &[mname, mval] : node->members)
-        analyzeExpr(mval.get());
+    {
+        auto field = std::find(structTy->getFields().begin(), structTy->getFields().end(), mname);
+        analyzeExpr(mval.get(), field != structTy->getFields().end() ? field->type : nullptr);
+    }
 
     std::shared_ptr<CustomType> finalTy = structTy;
 

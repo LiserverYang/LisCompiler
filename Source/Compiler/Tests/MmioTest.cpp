@@ -94,8 +94,7 @@ bool hasVolatileStoreThroughPointer(llvm::Module &m)
         if (!llvm::isa<llvm::StoreInst>(inst))
             continue;
         auto *st = llvm::cast<llvm::StoreInst>(inst);
-        if (!llvm::isa<llvm::ConstantExpr>(st->getPointerOperand()) &&
-            !llvm::isa<llvm::AllocaInst>(st->getPointerOperand()))
+        if (!llvm::isa<llvm::ConstantExpr>(st->getPointerOperand()) && !llvm::isa<llvm::AllocaInst>(st->getPointerOperand()))
             return true;
     }
     return false;

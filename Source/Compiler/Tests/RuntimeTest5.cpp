@@ -404,9 +404,8 @@ TEST_F(RuntimeTest, FfiExportDuplicateAndReservedSymbols)
 
 TEST_F(RuntimeTest, FfiLinkAttribute)
 {
-    // #[link(name = "m")] records a linker request (emitted as
-    // llvm.linker.options). lld honours it; GNU ld ignores it, which is why the
-    // docs also keep the "add -lm to the link line" recipe.
+    // The object writer must accept the target's encoding of the library
+    // request. In particular, ELF rejects a single llvm.linker.options string.
     expectRunFfi("#[link(name = \"m\")]\n"
                  "fn main() -> i32 { ret 0; }\n",
         0);

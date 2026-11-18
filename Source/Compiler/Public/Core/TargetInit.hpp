@@ -104,7 +104,9 @@ struct ResolvedTarget
 /// Throws ArgParseError for a triple LLVM does not know: a typo on the command line
 /// is a usage error (exit 2), not an internal compiler error (exit 70).
 inline ResolvedTarget resolveTarget(
-    const std::string &requestedTriple, const std::string &requestedCpu, const std::string &requestedFeatures)
+    const std::string &requestedTriple,
+    const std::string &requestedCpu,
+    const std::string &requestedFeatures)
 {
     initLLVMTargetsOnce();
 

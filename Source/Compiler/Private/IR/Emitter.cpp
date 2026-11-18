@@ -244,8 +244,7 @@ void Emitter::run()
         // target's shared object. The pipeline refuses this combination on the
         // command line; the check stays here so the Emitter is safe to use as a
         // library too.
-        if (!opts_.targetTriple.empty() &&
-            llvm::Triple(opts_.targetTriple) != llvm::Triple(llvm::sys::getDefaultTargetTriple()))
+        if (!opts_.targetTriple.empty() && llvm::Triple(opts_.targetTriple) != llvm::Triple(llvm::sys::getDefaultTargetTriple()))
             throw ArgParseError(
                 "--shared links with the host toolchain and cannot be combined with --target " + opts_.targetTriple);
 

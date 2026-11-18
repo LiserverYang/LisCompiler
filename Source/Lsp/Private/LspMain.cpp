@@ -18,7 +18,6 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <thread>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -178,16 +177,18 @@ int main(int argc, const char **argv)
             const llvm::json::Object *params = getObjectField(req, "params");
             const llvm::json::Object *td = getObjectField(params, "textDocument");
             std::string uri = getString(td, "uri");
-            std::string text = getString(td, "text");
             if (!uri.empty())
             {
                 if (method == "textDocument/didOpen")
-                    server.openDocument(uri, text);
+                    server.openDocument(uri, getString(td, "text"));
                 else
-                    server.changeDocument(uri, text);
-                // Debounce: sleep briefly so a burst of keystrokes collapses
-                // into one recompile.
-                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                {
+                    const auto *changesValue = params->get("contentChanges");
+                    const auto *changes = changesValue ? changesValue->getAsArray() : nullptr;
+                    if (!changes || changes->empty() || !changes->back().getAsObject())
+                        continue;
+                    server.changeDocument(uri, getString(changes->back().getAsObject(), "text"));
+                }
                 llvm::json::Object publish = server.compileAndPublish(uri);
                 writeMessage(llvm::json::Value(llvm::json::Object{
                     {"jsonrpc", "2.0"},

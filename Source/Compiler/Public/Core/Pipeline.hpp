@@ -31,8 +31,7 @@ inline std::string passDisplayName(const std::type_info &info)
     size_t digits = 0;
     while (digits < name.size() && std::isdigit(static_cast<unsigned char>(name[digits])))
         digits++;
-    if (digits > 0 && digits < name.size() &&
-        (std::isalpha(static_cast<unsigned char>(name[digits])) || name[digits] == '_'))
+    if (digits > 0 && digits < name.size() && (std::isalpha(static_cast<unsigned char>(name[digits])) || name[digits] == '_'))
         name = name.substr(digits);
     return name;
 }

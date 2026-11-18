@@ -28,8 +28,6 @@
 
 namespace fs = std::filesystem;
 
-extern char *_pgmptr; // full path of the running executable (MinGW CRT)
-
 namespace
 {
 /// A program with nothing target-specific in it: this suite is about the target the
@@ -41,18 +39,6 @@ fn main() -> i32
 }
 )";
 
-// The pipeline looks for <argv[0]>/lstdlib next to the compiler; the test binary
-// lives in Build/Intermediate, so lisc.exe is its sibling under Binaries.
-std::string compilerPathForThisTest()
-{
-    if (_pgmptr)
-    {
-        fs::path candidate = fs::path(_pgmptr).parent_path().parent_path() / "Binaries" / "lisc.exe";
-        return candidate.string();
-    }
-    return "lisc.exe";
-}
-
 std::string readFileBytes(const fs::path &path)
 {
     std::ifstream in(path, std::ios::binary);
@@ -61,8 +47,8 @@ std::string readFileBytes(const fs::path &path)
 
 struct ElfHeaderInfo
 {
-    uint8_t elfClass = 0;  // 1 = ELF32, 2 = ELF64
-    uint16_t machine = 0;  // 40 = EM_ARM, 183 = EM_AARCH64
+    uint8_t elfClass = 0; // 1 = ELF32, 2 = ELF64
+    uint16_t machine = 0; // 40 = EM_ARM, 183 = EM_AARCH64
 };
 
 ElfHeaderInfo elfHeaderOf(const fs::path &path)
@@ -73,8 +59,7 @@ ElfHeaderInfo elfHeaderOf(const fs::path &path)
         return info; // the caller's EXPECTs report the empty header
     info.elfClass = static_cast<uint8_t>(bytes[4]);
     // Little endian, which is what both cross targets under test and the host use.
-    info.machine = static_cast<uint16_t>(static_cast<uint8_t>(bytes[18])) |
-                   static_cast<uint16_t>(static_cast<uint8_t>(bytes[19]) << 8);
+    info.machine = static_cast<uint16_t>(static_cast<uint8_t>(bytes[18])) | static_cast<uint16_t>(static_cast<uint8_t>(bytes[19]) << 8);
     return info;
 }
 

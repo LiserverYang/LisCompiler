@@ -5,6 +5,50 @@
 
 #include "RuntimeTestFixture.hpp"
 
+TEST_F(RuntimeTest, IntegerLiteralUsesExplicitIntegerContext)
+{
+    expectRun(R"lis(
+        let wide: i64 = 3_000_000_000;
+        struct Number { pub value: i64 }
+        fn min_wide() -> i64 { ret -0x8000_0000_0000_0000; }
+        fn pass(n: i64) -> i64 { ret n; }
+        fn main() -> i32 {
+            let mut n: i64 = 0;
+            n = 3_000_000_000;
+            let v = Number { value: 3_000_000_000 };
+            let narrow: i8 = -128;
+            let min_default = -2147483648;
+            if n != wide || v.value != wide || pass(3_000_000_000) != wide { ret 1; }
+            if 0xB2D0_5E00 as i64 != wide { ret 2; }
+            if min_wide() >= (0 as i64) || (narrow as i32) != -128 || min_default >= 0 { ret 3; }
+            ret 0;
+        }
+    )lis",
+        0);
+}
+
+TEST_F(RuntimeTest, IntegerLiteralRejectsTruncation)
+{
+    expectCompileFail("fn main() -> i32 { ret 2147483648; }", "E2016");
+    expectCompileFail("fn main() -> i32 { let n: i8 = -129; ret 0; }", "E2016");
+    expectCompileFail("fn main() -> i32 { let n: i64 = 0xffff_ffff_ffff_ffff; ret 0; }", "E2016");
+    expectCompileFail("fn main() -> i32 { let n: i64 = -9223372036854775809; ret 0; }", "E2016");
+}
+
+TEST_F(RuntimeTest, LocalReferenceRejectedWhenAnotherReturnIsSafe)
+{
+    expectCompileFail(R"lis(
+        let global_value = 7;
+        fn bad(early: bool) -> &i32 {
+            let x = 1;
+            if early { ret &x; }
+            ret &global_value;
+        }
+        fn main() -> i32 { ret 0; }
+    )lis",
+        "E4007");
+}
+
 TEST_F(RuntimeTest, Arithmetic)
 {
     expectRun("fn main() -> i32 { ret 1 + 2 * 3; }", 7);

@@ -155,8 +155,9 @@ fn main() -> i32 {
 
 ## 链接
 
-`#[link(name = "m")]` 是**文件级**属性：它把请求写进对象文件
-（`llvm.linker.options` 命名元数据，`!llvm.linker.options = !{!0}`，`!0 = !{!"-lm"}`）。
+`#[link(name = "m")]` 是**文件级**属性，会把依赖库写进对象文件。在 ELF 目标上，
+编译器通过 `llvm.dependent-libraries` 把库名 `m` 写进 `.deplibs`。在 Windows
+目标上，编译器通过 `llvm.linker.options` 写入 `-lm`。
 
 - **lld 认它**；**GNU ld 不认**（MinGW 链接时可能顺带打一句
   `Warning: corrupt .drectve at end of def file`，无害）。
@@ -181,7 +182,7 @@ extern 声明与调用点（同一次分类）。
 | 目标 | 规则 |
 |---|---|
 | Win64 x86-64 | 1/2/4/8 字节 → 等宽整数；其余 → **按引用**（调用方给一份副本的地址）；返回值走隐藏首指针（sret） |
-| SysV x86-64 | >16 字节 → 同上；≤16 字节 → 逐八字节拆分：整块全是浮点则走 SSE（`float` / `double` / 两个 float 打成 `<2 x float>`），掺进整数就是 INTEGER（按**实际用到的字节数**取整，所以 `{f64,i32}` 是 `(double, i32)`）；一个实参可能变成**两个**形参，两部分的返回值是 `{ i64, i32 }` 这样的字面结构体 |
+| SysV x86-64 | >16 字节的参数在栈上传副本（LLVM `byval`），返回值走隐藏首指针（`sret`）。≤16 字节按八字节拆分，浮点部分走 SSE，整数部分按实际用到的字节数取整。例如 `{f64,i32}` 拆为 `(double, i32)`，两部分的返回值用 LLVM 结构体表示。 |
 
 做法与 clang 一致：实参从它自己的位置**按另一种类型 load**，返回值把各部分**按字节偏移 store 回目标槽位**，
 按引用时在入口块 alloca 一份副本（C 可以写它）。

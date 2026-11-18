@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "RuntimeJit.hpp"
+#include "TestPaths.hpp"
 
 #include "llvm/IR/IRBuilder.h"
 
@@ -35,9 +36,9 @@
 #include <process.h>
 #define dup _dup
 #define dup2 _dup2
-#define close _close
-extern char *_pgmptr; // full path of the running executable (MinGW CRT)
+#define fileno _fileno
 #else
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -110,32 +111,6 @@ static const int kPanicExitCode = (int)0xC0000409;
 static const int kPanicExitCode = 134;
 #endif
 
-/// Locate the preloaded stdlib (`Build/Binaries/lstdlib`). test.exe lives at
-/// `Build/Intermediate/`, so it is the exe dir's parent + `Binaries/lstdlib`.
-fs::path findStdlibDir()
-{
-#ifdef _WIN32
-    if (_pgmptr)
-    {
-        fs::path cand = fs::path(_pgmptr).parent_path().parent_path() / "Binaries" / "lstdlib";
-        if (fs::exists(cand)) return cand;
-    }
-#else
-    {
-        char buf[4096];
-        ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-        if (n > 0)
-        {
-            buf[n] = '\0';
-            fs::path cand = fs::path(buf).parent_path().parent_path() / "Binaries" / "lstdlib";
-            if (fs::exists(cand)) return cand;
-        }
-    }
-#endif
-    fs::path cwdCand = fs::current_path() / "Build" / "Binaries" / "lstdlib";
-    if (fs::exists(cwdCand)) return cwdCand;
-    return {};
-}
 /// This process's id. Test artifacts are named per (pid, test) so several test
 /// binaries can run concurrently (sharded runs) without colliding.
 int rtProcessId()
@@ -213,12 +188,12 @@ protected:
     bool compileCapture(const std::string &source, std::string &diagnostics)
     {
         fflush(stdout);
-        int saved = dup(_fileno(stdout));
+        int saved = dup(fileno(stdout));
         FILE *f = freopen(diagPath.string().c_str(), "w", stdout);
         (void)f;
         bool ok = compile(source);
         fflush(stdout);
-        dup2(saved, _fileno(stdout));
+        dup2(saved, fileno(stdout));
         close(saved);
         std::ifstream fi(diagPath);
         diagnostics.assign((std::istreambuf_iterator<char>(fi)), std::istreambuf_iterator<char>());
@@ -358,12 +333,12 @@ protected:
         if (!diagnostics)
             return compileMultiImpl(source, modules);
         fflush(stdout);
-        int saved = dup(_fileno(stdout));
+        int saved = dup(fileno(stdout));
         FILE *f = freopen(diagPath.string().c_str(), "w", stdout);
         (void)f;
         bool ok = compileMultiImpl(source, modules);
         fflush(stdout);
-        dup2(saved, _fileno(stdout));
+        dup2(saved, fileno(stdout));
         close(saved);
         std::ifstream fi(diagPath);
         diagnostics->assign((std::istreambuf_iterator<char>(fi)), std::istreambuf_iterator<char>());
@@ -477,12 +452,11 @@ protected:
         return true;
     }
 
-    /// Link objPath → exePath with the MinGW toolchain, then run it and return
+    /// Link objPath → exePath with the host toolchain, then run it and return
     /// the process exit code (-1 if linking or launching failed). If `out` is
     /// non-null the child's stdout is captured into it; if `err` is non-null its
     /// stderr is captured (the builtin `panic` writes its message there); if
-    /// `in` is non-null its bytes are fed to the child's stdin (via a pipe)
-    /// before it runs.
+    /// `in` is non-null the child reads those bytes from stdin.
     int linkAndRun(std::string *out = nullptr, const std::string *in = nullptr, std::string *err = nullptr)
     {
         // Link with a RETRY on a fresh output name. Under the 8-shard run an
@@ -513,11 +487,11 @@ protected:
         if (out)
         {
             fflush(stdout);
-            saved = dup(_fileno(stdout));
+            saved = dup(fileno(stdout));
             if (_pipe(fds, 65536, _O_BINARY) == 0)
             {
                 outPipe = true;
-                dup2(fds[1], _fileno(stdout));
+                dup2(fds[1], fileno(stdout));
                 close(fds[1]); // child inherits the write end; we close ours
             }
         }
@@ -531,11 +505,11 @@ protected:
         if (err)
         {
             fflush(stderr);
-            savedErr = dup(_fileno(stderr));
+            savedErr = dup(fileno(stderr));
             if (_pipe(fdsErr, 65536, _O_BINARY) == 0)
             {
                 errPipe = true;
-                dup2(fdsErr[1], _fileno(stderr));
+                dup2(fdsErr[1], fileno(stderr));
                 close(fdsErr[1]);
             }
         }
@@ -548,11 +522,11 @@ protected:
         if (in)
         {
             fflush(stdin);
-            savedIn = dup(_fileno(stdin));
+            savedIn = dup(fileno(stdin));
             if (_pipe(fdsIn, 65536, _O_BINARY) == 0)
             {
-                dup2(fdsIn[0], _fileno(stdin));
-                if (fdsIn[0] != _fileno(stdin)) close(fdsIn[0]);
+                dup2(fdsIn[0], fileno(stdin));
+                if (fdsIn[0] != fileno(stdin)) close(fdsIn[0]);
                 _write(fdsIn[1], in->data(), (unsigned)in->size());
                 close(fdsIn[1]);
             }
@@ -561,7 +535,7 @@ protected:
         int code = _spawnl(_P_WAIT, exePath.string().c_str(), exePath.string().c_str(), nullptr);
         if (out && saved != -1)
         {
-            dup2(saved, _fileno(stdout));
+            dup2(saved, fileno(stdout));
             close(saved);
             // NOTE the `outPipe` guard: if _pipe failed above the fd stayed -1,
             // and read(-1, ...) runs the CRT invalid-parameter handler, which
@@ -578,7 +552,7 @@ protected:
         }
         if (err && savedErr != -1)
         {
-            dup2(savedErr, _fileno(stderr));
+            dup2(savedErr, fileno(stderr));
             close(savedErr);
             if (errPipe)
             {
@@ -591,32 +565,51 @@ protected:
         }
         if (in && savedIn != -1)
         {
-            dup2(savedIn, _fileno(stdin));
+            dup2(savedIn, fileno(stdin));
             close(savedIn);
         }
         return code;
 #else
-        if (!err)
+        // Use files for the streams so waiting for the child cannot block
+        // behind a full output pipe.
+        const auto stdinPath = exePath.string() + ".stdin";
+        const auto stdoutPath = exePath.string() + ".stdout";
+        const auto stderrPath = exePath.string() + ".stderr";
+        std::string cmd = "\"" + exePath.string() + "\"";
+        if (in)
         {
-            int st = std::system(exePath.string().c_str());
-            return WEXITSTATUS(st);
+            std::ofstream input(stdinPath, std::ios::binary);
+            input << *in;
+            input.close();
+            if (!input)
+            {
+                std::error_code error;
+                fs::remove(stdinPath, error);
+                return -1;
+            }
+            cmd += " < \"" + stdinPath + "\"";
         }
-        // POSIX: no fd juggling needed for one stream — redirect stderr to a
-        // sibling temp file and read it back. (A signal death reports status 0
-        // here, exactly as it already does for stdout-only runs.)
-        fs::path errPath = exePath;
-        errPath += ".err";
-        std::string cmd = "\"" + exePath.string() + "\" 2> \"" + errPath.string() + "\"";
-        int st = std::system(cmd.c_str());
+        if (out) cmd += " > \"" + stdoutPath + "\"";
+        if (err) cmd += " 2> \"" + stderrPath + "\"";
+        const int status = std::system(cmd.c_str());
+
+        auto readOutput = [](const std::string &path, std::string *buffer)
         {
-            std::ifstream fe(errPath);
-            err->assign((std::istreambuf_iterator<char>(fe)), std::istreambuf_iterator<char>());
-        }
+            std::ifstream stream(path, std::ios::binary);
+            buffer->assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+            std::error_code error;
+            fs::remove(path, error);
+        };
+        if (out) readOutput(stdoutPath, out);
+        if (err) readOutput(stderrPath, err);
+        if (in)
         {
-            std::error_code ec;
-            fs::remove(errPath, ec);
+            std::error_code error;
+            fs::remove(stdinPath, error);
         }
-        return WEXITSTATUS(st);
+        if (status == -1) return -1;
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
 #endif
     }
 

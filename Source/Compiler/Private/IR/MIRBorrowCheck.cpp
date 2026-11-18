@@ -418,7 +418,7 @@ private:
     std::string returnedName(const MIROperand &op) const;
     /// Reject 'ret <reference into this frame>' and 'ret <struct with such a
     /// field>' (E4007).
-    void checkReturnTerm(const MIRTermReturn &ret);
+    void checkReturnedValue(const MIROperand &operand);
     static bool isReferenceType(const std::shared_ptr<Type> &ty);
     static bool structHasRefFields(const std::shared_ptr<Type> &ty);
 
@@ -684,6 +684,11 @@ void FunctionChecker::transferStmt(const MIRStatement &stmt, State &st, bool rep
         }
         else
             useRValue(as->rhs, st, report);
+        // Check the value written by this return, before another return can
+        // overwrite the shared return slot's recorded origin.
+        if (report && as->lhs.base == PlaceBase::Local && as->lhs.index == 0 && as->lhs.projections.empty())
+            if (const auto *use = std::get_if<MIRRValueUse>(&as->rhs))
+                checkReturnedValue(use->operand);
         definePlace(as->lhs, st);
         return;
     }
@@ -725,8 +730,11 @@ void FunctionChecker::transferTerm(const MIRTerminator &term, State &st, bool re
     if (auto *ret = std::get_if<MIRTermReturn>(&term))
     {
         if (ret->value.has_value())
+        {
             useOperand(*ret->value, st, report);
-        checkReturnTerm(*ret);
+            if (report)
+                checkReturnedValue(*ret->value);
+        }
         return;
     }
     if (auto *call = std::get_if<MIRTermCall>(&term))
@@ -2248,18 +2256,11 @@ std::string FunctionChecker::returnedName(const MIROperand &op) const
     return "this value";
 }
 
-void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
+void FunctionChecker::checkReturnedValue(const MIROperand &operand)
 {
     const std::shared_ptr<Type> declared = body_.returnType;
     if (!declared)
         return;
-
-    // The returned value normally travels through the RETURN SLOT
-    // ('_0 = copy _2; return;'), so a terminator without an operand is checked
-    // against local 0 — whose origin the pre-pass tracked like any other local.
-    const MIROperand operand = ret.value.has_value()
-                                   ? *ret.value
-                                   : MIROperand(MIRCopy{.place = placeOfLocal(0)});
 
     if (isReferenceType(declared))
     {
@@ -2302,6 +2303,8 @@ void FunctionChecker::checkReturnTerm(const MIRTermReturn &ret)
 
 void MIRBorrowCheck::run()
 {
+    if (context->mirProgram && std::getenv("LIS_MIR_DEBUG") != nullptr)
+        printMIRProgram(*context->mirProgram, std::cout);
     check();
 
     // Diagnostics are reported non-fatally so that all of them surface in one
@@ -2318,13 +2321,6 @@ void MIRBorrowCheck::check()
 {
     if (!context || !context->mirProgram)
         return;
-
-    // LIS_MIR_DEBUG=1 dumps every function body. This pass runs right after
-    // MIRBuilder, so the dump is exactly the input the checks see (the
-    // --print_mir flag prints the same bodies one stage later, after
-    // monomorphization).
-    if (std::getenv("LIS_MIR_DEBUG") != nullptr)
-        printMIRProgram(*context->mirProgram, std::cout);
 
     for (const auto &fn : context->mirProgram->functions)
     {

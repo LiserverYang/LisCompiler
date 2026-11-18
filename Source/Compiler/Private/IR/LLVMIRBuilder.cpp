@@ -9,6 +9,7 @@
 #include "IR/BuiltinNames.hpp"
 #include "IR/MIRMonomorphization.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <sstream>
 #include <stdexcept>
@@ -50,17 +51,15 @@ void LLVMIRBuilder::lowerProgram(const MIRProgram &prog)
     if (!context->dataLayout.empty())
         context->module->setDataLayout(context->dataLayout);
 
-    // Linker requests from #[link(name = "...")]: an object file can carry them
-    // (llvm.linker.options), which lld reads and GNU ld ignores -- the docs keep
-    // the "add -lm to the link line" recipe for that case.
+    // ELF uses library names in .deplibs. Its llvm.linker.options metadata
+    // requires pairs and rejects the single-option encoding used for COFF.
     if (!context->linkOptions.empty())
     {
-        // The shape LLVM 20 wants: NAMED metadata llvm.linker.options, each operand
-        // a node of strings. (The old "Linker Options" MODULE FLAG is rejected by
-        // the verifier with "'Linker Options' named metadata no longer supported".)
-        llvm::NamedMDNode *opts = context->module->getOrInsertNamedMetadata("llvm.linker.options");
+        const bool elf = llvm::Triple(context->module->getTargetTriple()).isOSBinFormatELF();
+        llvm::NamedMDNode *opts = context->module->getOrInsertNamedMetadata(
+            elf ? "llvm.dependent-libraries" : "llvm.linker.options");
         for (const auto &lib : context->linkOptions)
-            opts->addOperand(llvm::MDNode::get(ctx_, {llvm::MDString::get(ctx_, "-l" + lib)}));
+            opts->addOperand(llvm::MDNode::get(ctx_, {llvm::MDString::get(ctx_, elf ? lib : "-l" + lib)}));
     }
 
     // Pass 1 — struct types (needed for any field GEP to work).
@@ -835,7 +834,9 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                     if (externPlan.args[i] == FfiAbi::ArgKind::ByAddr)
                     {
                         llvm::Type *sty = toLLVMType(planSig->getParams()[i]);
-                        llvm::Value *slot = emitEntryAlloca(builder_->GetInsertBlock()->getParent(), sty, "aggbuf");
+                        auto *slot = emitEntryAlloca(builder_->GetInsertBlock()->getParent(), sty, "aggbuf");
+                        if (!llvm::Triple(context->module->getTargetTriple()).isOSWindows())
+                            slot->setAlignment(std::max(slot->getAlign(), llvm::Align(8)));
                         builder_->CreateStore(lowerOperand(fs, s.args[i]), slot);
                         expanded.push_back(slot);
                         continue;
@@ -850,8 +851,13 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
                     }
                 }
                 args = std::move(expanded);
-                if (externPlan.ret == FfiAbi::RetKind::Sret && s.dest.has_value())
-                    args.insert(args.begin(), lowerPlaceAsPtr(fs, *s.dest));
+                if (externPlan.ret == FfiAbi::RetKind::Sret)
+                {
+                    llvm::Value *resultSlot = s.dest.has_value()
+                                                  ? lowerPlaceAsPtr(fs, *s.dest)
+                                                  : emitEntryAlloca(fs.fn, toLLVMType(planSig->getReturnType()), "discarded.result");
+                    args.insert(args.begin(), resultSlot);
+                }
             }
         }
     }
@@ -1012,6 +1018,8 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         assert(normalDest.has_value());
         llvm::InvokeInst *inv =
             builder_->CreateInvoke(callee->getFunctionType(), callee, *normalDest, *unwindDest, args, s.funcName + ".ret");
+        if (s.isExtern)
+            inv->setAttributes(callee->getAttributes());
         llvm::Value *invResult = coerceBoolFromC(inv, externSig);
         if (s.dest.has_value())
             storePlace(fs, *s.dest, invResult);
@@ -1025,6 +1033,8 @@ void LLVMIRBuilder::lowerCall(FunctionState &fs,
         llvm::CallInst *call =
             builder_->CreateCall(callee->getFunctionType(), callee, args,
                 isVoid ? "" : s.funcName + ".ret"); // void calls must have no name
+        if (s.isExtern)
+            call->setAttributes(callee->getAttributes());
 
         // C's _Bool comes back as i8; the Lis result is i1.
         llvm::Value *result = coerceBoolFromC(call, externSig);
@@ -1775,7 +1785,31 @@ llvm::Function *LLVMIRBuilder::getOrDeclareExternFn(const std::string &name, con
     else if (sret)
         ret = llvm::Type::getVoidTy(ctx_);
     llvm::FunctionType *fty = llvm::FunctionType::get(ret, params, /*isVarArg=*/sig->isVarArg());
-    return llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage, name, context->module.get());
+    auto *fn = llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage, name, context->module.get());
+    if (!plan.valid || llvm::Triple(context->module->getTargetTriple()).isOSWindows())
+        return fn;
+
+    // In SysV a MEMORY-class parameter is a copy passed on the stack.
+    // A plain pointer parameter would instead be passed in a register.
+    const auto &layout = context->module->getDataLayout();
+    unsigned arg = 0;
+    if (sret)
+    {
+        auto *type = toLLVMTypeForFfi(sig->getReturnType());
+        fn->addParamAttr(arg, llvm::Attribute::getWithStructRetType(ctx_, type));
+        fn->addParamAttr(arg++, llvm::Attribute::getWithAlignment(ctx_, layout.getABITypeAlign(type)));
+    }
+    for (size_t i = 0; i < plan.args.size(); ++i)
+    {
+        if (plan.args[i] == FfiAbi::ArgKind::ByAddr)
+        {
+            auto *type = toLLVMTypeForFfi(sig->getParams()[i]);
+            fn->addParamAttr(arg, llvm::Attribute::getWithByValType(ctx_, type));
+            fn->addParamAttr(arg, llvm::Attribute::getWithAlignment(ctx_, std::max(layout.getABITypeAlign(type), llvm::Align(8))));
+        }
+        arg += static_cast<unsigned>(std::max(size_t{1}, plan.argTys[i].size()));
+    }
+    return fn;
 }
 
 llvm::Function *LLVMIRBuilder::getOrDeclareFn(const std::string &name)

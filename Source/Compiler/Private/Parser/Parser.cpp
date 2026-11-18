@@ -1367,7 +1367,7 @@ void Parser::parseAttribute()
             {
                 try
                 {
-                    pendingVolatileAddr_ = static_cast<uint64_t>(parseIntegerLiteral(currentToken().value));
+                    pendingVolatileAddr_ = parseIntegerMagnitude(currentToken().value);
                 }
                 catch (const std::exception &)
                 {
@@ -1981,7 +1981,8 @@ std::unique_ptr<Expr> Parser::parseUnary()
         {
             if (auto *lit = dynamic_cast<LiteralExpr *>(operand.get()))
             {
-                if (lit->kind == LiteralExpr::LiteralType::Int || lit->kind == LiteralExpr::LiteralType::Float)
+                if ((lit->kind == LiteralExpr::LiteralType::Int || lit->kind == LiteralExpr::LiteralType::Float)
+                    && !lit->value.starts_with('-'))
                 {
                     // The literal is carried as TEXT; "-" + text keeps the
                     // overflow handling in HIRBuilder (which parses it) intact.

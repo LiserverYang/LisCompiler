@@ -1581,6 +1581,29 @@ static const char *kDropCounterPrologue =
     "struct Item { pub v: i32 }\n"
     "impl Drop for Item { fn drop(self) { ctr = ctr + 1; } }\n";
 
+TEST_F(RuntimeTest, OverwritingBorrowedFieldDropsOldValue)
+{
+    expectRunWithPrologue(R"lis(
+        struct Inner { pub item: Item }
+        struct Outer { pub inner: Inner }
+        fn replace(out: &mut Outer) {
+            out.inner.item = Item { v: 2 };
+            if ctr != 1 { panic("old item was not dropped"); }
+            (*out).inner.item = Item { v: 3 };
+        }
+        fn main() -> i32 {
+            {
+                let mut out = Outer { inner: Inner { item: Item { v: 1 } } };
+                replace(&mut out);
+                if ctr != 2 || out.inner.item.v != 3 { ret 1; }
+            }
+            ret ctr - 3;
+        }
+    )lis",
+        kDropCounterPrologue,
+        0);
+}
+
 TEST_F(RuntimeTest, VecNonCopyDropRunsOncePerElement)
 {
     // Leaving the block destroys the Vec, which destroys its three elements.

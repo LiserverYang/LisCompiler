@@ -4,8 +4,9 @@
 
 ## lis 语言
 
-lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，通过引入 rust 的所有权和生命周期
-机制保证了内存安全。所以可以说，**安全**同样也是 lis 语言的一个设计理念。
+lis 语言融合了 Rust 的所有权与生命周期模型，以及 C++ 风格的底层表达能力。
+编译器会检查移动、借用和未初始化读取。返回引用的溯源、标准库的裸指针操作以及 C 交互
+仍有各自的安全边界，见[已知限制](Document/src/limitations.md)和 [FFI 契约](Document/src/ffi.md)。
 
 有关 lis 语言的具体例子，可以参考 `Examples` 目录下的所有 `.lis` 文件，这些示例都有
 比较详尽的注释。完整、权威的语言参考在 `Document/`（mdBook，`mdbook build` 构建，
@@ -32,7 +33,7 @@ lis 语言的设计初衷是实现一个 rust 和 c++ 的融合体，通过引�
 | 诊断 | GCC 风格带源码上下文的错误（E1xxx 词法 ~ E6xxx 错误传播），解析错误可恢复；编译器内部错误（ICE）带调用栈与 issue 链接 |
 | **目标 / 裸机** | `--target <triple>` / `--cpu` / `--features`：能为别的目标产出目标文件（实测 `thumbv7m-none-eabi` 是 `elf32-littlearm` + Thumb 指令，`aarch64-unknown-linux-gnu` 是 ELF64）；`#[volatile]` 标寄存器块类型、`#[volatile(<地址>)]` / `#[volatile(sym = ...)]` 标它的存储位置，寄存器读写因此是语言的一部分（`-o 2` 下存储不被优化掉、寄存器不占存储、借用规则照常）。见 `Document/src/mmio.md` |
 | 优化 | **不与 LLVM 重叠**：只把语言知道、LLVM 推不出来的事实写成 IR 事实（非入口函数 `internal` linkage、`&mut` 形参 `noalias`），其余交给 LLVM 的 O2 全管线（`-o 0..3`）。见 `Document/src/optimization.md` |
-| 测试 | **1448 个 gtest 全绿**（运行时用例进程内 MCJIT 执行 + 按物理核分片）；**16 个 Examples** 输出为回归基线（borrow 55/iterator 23/match 8/method_ref 10/operator 41/result 42/…） |
+| 测试 | **超过 1400 个 gtest**（运行时用例进程内 MCJIT 执行 + 按物理核分片）；**16 个 Examples** 输出为回归基线（borrow 55/iterator 23/match 8/method_ref 10/operator 41/result 42/…） |
 
 **已完成**：panic/`never` → `Result<T, E>` + 后缀 `?` 错误传播 + 编译期定值分析 →
 **堆安全化**（裸指针类型、堆原语/裸指针操作仅限标准库、`&mut T` 独占语义、字段可见性强制）→
@@ -57,8 +58,8 @@ String 的格式化/拼接。**明确不做**：与 LLVM 重叠的各类优化 p
 ### 编译运行
 
 项目没有使用 Makefile 或 CMake，使用的是我自己的一个编译系统 **LisBuilder**
-（独立仓库 `github.com/LiserverYang/LisBuilder`，以 git submodule 挂在 `./Build/`，
-构建引擎源码在 `F:\LisBuilder\BuildSystem\`）。编译的入口文件在 `./build.py`，
+（独立仓库 `github.com/LiserverYang/LisBuilder`，以子模块挂在 `./Build/`）。首次构建前运行
+`git submodule update --init`。编译入口在 `./build.py`，
 编译系统用 python 编写，我的设计理念就是足够的模块化和足够的好用。
 
 ```bash
@@ -72,9 +73,26 @@ python3 build.py --llvm-position F:/LLVM/ --build-type Debug --enable-tests --th
 ./Build/Binaries/lisc.exe Examples/print.lis && g++ -o a.exe a.o && ./a.exe
 ```
 
-由于编译器使用了 LLVM 作为后端，你必须要保证安装了 llvm，并且在编译时使用
-`--llvm-position xxx` 指定 llvm 的位置。LLVM 版本必须大于十五（十五以后才支持
-不透明指针），推荐版本是十七。
+源码构建使用 LLVM 20，并用 `--llvm-position` 指定其安装位置。
+
+### Linux 快速试用
+
+在 Ubuntu 24.04 上，从 GitHub Actions 的 **Check, Build and Test** 成功运行记录中下载
+`lis-linux-x64`，解压下载的 ZIP 后，在仓库根目录执行下面的命令。压缩包带有 `lisc`、
+`lisls` 和两者共用的 `lstdlib`。
+
+```bash
+sudo apt-get install libllvm20 g++
+mkdir -p lis-bin
+tar -xzf lis-linux-x64.tar.gz -C lis-bin
+./lis-bin/lisc Examples/print.lis --out print.o
+g++ print.o -o print
+./print
+```
+
+首行应为 `hello world`。从源码构建时，先初始化 `Build` 子模块，再安装 `llvm-20-dev`
+和 `requirements.txt` 中的 Python 依赖，运行
+`python3 build.py --llvm-position /usr/lib/llvm-20 --build-type Debug --enable-tests`。
 
 `--format` 一键格式化代码（clang-format 20），CI 有格式检查。更多使用方式运行
 `python3 build.py --help` 查阅。
@@ -95,7 +113,7 @@ python3 build.py --llvm-position F:/LLVM/ --build-type Debug --enable-tests --th
 - IR：最大的文件夹，HIR/MIR/LLVM IR 的定义与构建器、语义分析、泛型单态化
 - Analysiser：类型、符号表、作用域
 - Argparser：自研命令行参数解析器
-- Tests：1421 个 gtest（词法/语法/借用/运行时端到端/FFI/IR 事实），测试源按 TU 并行编译、测试按物理核分片并行跑；运行时用例在进程内 MCJIT 执行，会 abort 的用例走子进程
+- Tests：gtest（词法/语法/借用/运行时端到端/FFI/IR 事实），测试源按 TU 并行编译、测试按物理核分片并行跑；运行时用例在进程内 MCJIT 执行，会 abort 的用例走子进程
 
 这个项目的模块化做的很清晰，你看一眼文件夹的名字就会知道这个模块在干什么，
 建议你从 `./Source/Compiler/Private/Core/CompilePipeline.cpp` 这个文件入手，会知道
@@ -105,8 +123,9 @@ python3 build.py --llvm-position F:/LLVM/ --build-type Debug --enable-tests --th
 
 采用了类似 rust 的路线：源代码（string）经 Lexer 解析为 TokenStream，经 Parser 生成
 AST（Parser 会递归加载 `impt` 的模块文件），HIRBuilder 把 AST 转化为 HIR，
-HIRSemanticAnalyzer 做语义分析、借用检查、脱糖与语义补全（推断返回类型、泛型参数），
-MIRBuilder 生成 MIR，MIRMonomorphization 单态化全部泛型，LLVMIRBuilder 生成 LLVM IR，
+HIRSemanticAnalyzer 做类型检查、脱糖与语义补全（推断返回类型、泛型参数），
+MIRBuilder 生成 MIR，MIRBorrowCheck 检查移动、定值和借用，MIRMonomorphization 单态化泛型，
+LLVMIRBuilder 生成 LLVM IR，
 Emitter 输出目标文件。
 
 ### 标准库

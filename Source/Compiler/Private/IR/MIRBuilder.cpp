@@ -1193,10 +1193,14 @@ void MIRBuilder::buildAssign(HIRAssign *assign)
 
     // `*out = v` overwrites a value that lives in someone else's frame, so it is
     // NOT covered by the drop-flag machinery above. Release the old value first
-    // (Rust does the same). Only the whole-pointee form is handled here: `p.f = v`
-    // / `(*p).f = v` keep their existing behaviour (documented in limitations.md).
-    if (lhs.projections.size() == 1 && lhs.projections[0].kind == ProjectionKind::Deref
-        && lhs.type && lhs.type->needsDrop())
+    // (Rust does the same). This also applies to fields reached through the
+    // reference. Moving out through a reference is rejected by borrow checking.
+    // A raw buffer index can point at uninitialized storage (Vec::push).
+    // Only a dereference followed by fields identifies an existing value here.
+    if (lhs.type && lhs.type->needsDrop() && !lhs.projections.empty()
+        && lhs.projections.front().kind == ProjectionKind::Deref
+        && std::all_of(lhs.projections.begin() + 1, lhs.projections.end(), [](const Projection &projection)
+            { return projection.kind == ProjectionKind::Field; }))
         emitDrop(lhs);
 
     // emitAssign re-arms ownership on a whole-root-local write.
@@ -2420,7 +2424,7 @@ MIRPlace MIRBuilder::buildMemberAccess(HIRMemberAccess *ma)
 
     while (obj.type->getKind() == Type::Kind::Reference)
     {
-        obj.projections.insert(obj.projections.begin(), Projection{.kind = ProjectionKind::Deref});
+        obj.projections.push_back(Projection{.kind = ProjectionKind::Deref});
         auto refTy = std::static_pointer_cast<ReferenceType>(obj.type);
         obj.type = refTy->getBaseType();
     }
